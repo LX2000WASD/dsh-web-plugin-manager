@@ -7,7 +7,7 @@ export const zh = {
   tab: '管理',
   heading: '插件管理',
   intro: '为所选 profile 安装、删除、启停插件。启停变更在下次重启后生效（Web HMR 已关闭）。',
-  profileLabel: '配置文件',
+  profileLabel: '运行环境',
   refresh: '刷新',
   packages: '已安装包',
   entries: '运行时条目',

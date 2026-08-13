@@ -69,7 +69,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
     background: 'var(--dsw-alias-bg-layer-3)',
   },
-  cardOpen: { borderColor: 'var(--dsw-alias-border-l1)', boxShadow: 'var(--dsw-shadow-lv1)' },
+  cardOpen: { borderColor: 'var(--dsw-alias-border-l1)' },
   cardContent: {
     boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
     gap: '12px', width: '100%', minHeight: '52px', border: 0, padding: '12px 14px',
@@ -218,10 +218,16 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
         || entry.moduleName.toLocaleLowerCase().includes(normalizedQuery)
     })
     const sorted = [...filtered]
+    // Sort by the displayed short name (what the user sees), tie-break on the
+    // full package name so equal short names (e.g. host hmr vs client hmr)
+    // keep a deterministic order.
+    const byDisplay = (a: RuntimeEntry, b: RuntimeEntry): number =>
+      moduleShortName(a.moduleName).localeCompare(moduleShortName(b.moduleName))
+        || a.moduleName.localeCompare(b.moduleName)
     if (sort === 'az') {
-      sorted.sort((a, b) => a.moduleName.localeCompare(b.moduleName))
+      sorted.sort(byDisplay)
     } else if (sort === 'enabled') {
-      sorted.sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.moduleName.localeCompare(b.moduleName))
+      sorted.sort((a, b) => Number(b.enabled) - Number(a.enabled) || byDisplay(a, b))
     }
     if (descending) sorted.reverse()
     return sorted
