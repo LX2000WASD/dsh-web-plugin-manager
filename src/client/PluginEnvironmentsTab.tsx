@@ -15,6 +15,7 @@ export interface PluginEnvironmentsTabInjected {
   readonly profiles: () => Promise<ProfileInfo[]>
   readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
   readonly startProfile: (name: string) => Promise<StartResult>
+  readonly stopProfile: (name: string) => Promise<MutationResult>
   readonly createProfile: (name: string, template: string) => Promise<MutationResult>
   readonly renameProfile: (oldName: string, newName: string) => Promise<MutationResult>
   readonly removeProfile: (name: string) => Promise<MutationResult>
@@ -95,7 +96,7 @@ const styles: Record<string, React.CSSProperties> = {
 }
 
 /** Render the environment management tab. */
-export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
+export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [newName, setNewName] = useState('')
@@ -107,7 +108,7 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
   const [transferFrom, setTransferFrom] = useState('')
   const [transferTo, setTransferTo] = useState('')
 
-  const injected = useRef({ profiles, copyPlugins, startProfile, createProfile, renameProfile, removeProfile })
+  const injected = useRef({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile })
 
   const refresh = (): void => {
     void injected.current.profiles().then(setProfileList, () => { /* keep last list */ })
@@ -151,6 +152,18 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
       const result = await injected.current.removeProfile(name)
       setOutput(result.message)
       if (result.ok) refresh()
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const onStop = async (name: string): Promise<void> => {
+    if (!window.confirm(t('confirmStop') + ' ' + name + '?')) return
+    setBusy('stop-' + name)
+    try {
+      const result = await injected.current.stopProfile(name)
+      setOutput(result.message)
+      refresh()
     } finally {
       setBusy(null)
     }
@@ -202,7 +215,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
         <ul style={styles.cards}>
           {profileList.map((profile) => {
             const open = expanded === profile.name
-            const canStart = profile.bundles.includes('@deepseek-ai/dsh-web-app')
+            const running = profile.running !== null
+            const canStart = !running && profile.bundles.includes('@deepseek-ai/dsh-web-app')
             return (
               <li key={profile.name} className="pm-card" data-open={open ? 'true' : undefined}>
                 <div style={styles.cardHeader}>
@@ -217,9 +231,20 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
                     <span style={styles.cardTrailing}>
                       {profile.isOfficial ? <span style={styles.tag}>{t('officialBadge')}</span> : null}
                       {profile.isCurrent ? <span style={{ ...styles.tag, ...styles.tagOn }}>{t('currentBadge')}</span> : null}
-                      <IconChevronDownOutline14 size={12} aria-hidden="true" />
+                      {running ? (
+                        <span style={{ ...styles.tag, ...styles.tagOn }}>
+                          {t('runningBadge')}{profile.running!.port !== null ? ' :' + profile.running!.port : ''}
+                        </span>
+                      ) : null}
                     </span>
                   </button>
+                  {running && !profile.isCurrent && (
+                    <span style={{ flex: 'none' }}>
+                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onStop(profile.name)}>
+                        {busy === 'stop-' + profile.name ? t('stopping') : t('stopButton')}
+                      </Button>
+                    </span>
+                  )}
                   {canStart && (
                     <span style={{ flex: 'none' }}>
                       <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onStart(profile.name)}>
@@ -242,6 +267,7 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
                         </>
                       )}
                       {profile.isOfficial && <span style={styles.filterLabel}>{t('officialReadonly')}</span>}
+                      {profile.isCurrent && <span style={styles.filterLabel}>{t('currentRunningHint')}</span>}
                     </div>
                   </div>
                 )}

@@ -26,7 +26,7 @@
  *    ctx.tools when the host provides it (src/tools.ts).
  */
 
-import { execFile, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import { connect, createServer } from 'node:net'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -135,6 +135,7 @@ export class PluginManagerService extends Service {
   /** List every profile under $DSH_HOME/profiles (directories with package.json). */
   listProfiles(): ProfileInfo[] {
     const root = join(dshHome(), 'profiles')
+    const runs = scanRuns()
     const out: ProfileInfo[] = []
     for (const entry of readdirSafe(root)) {
       if (!entry.isDirectory() || entry.name === 'node_modules') continue
@@ -152,6 +153,7 @@ export class PluginManagerService extends Service {
         // The profile hosting this running plugin is its dependency.
         isCurrent: Object.keys(dependencies ?? {}).includes(OUR_PACKAGE_NAME),
         isOfficial: isOfficialProfile(entry.name),
+        running: runs.get(entry.name) ?? null,
       })
     }
     return out.sort((a, b) => a.name.localeCompare(b.name))
@@ -320,6 +322,7 @@ export class PluginManagerService extends Service {
         dependencies: packages.map(p => p.name),
         isCurrent: Object.keys(deps).includes(OUR_PACKAGE_NAME),
         isOfficial: isOfficialProfile(profile),
+        running: scanRuns().get(profile) ?? null,
       },
       entries,
       packages,
@@ -363,6 +366,28 @@ export class PluginManagerService extends Service {
           ? `enabled ${entryId} (live via config HMR)`
           : `disabled ${entryId} (live via config HMR)`,
       }
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** Stop a running instance of a custom profile (never the current one). */
+  async stopProfile(name: string): Promise<MutationResult> {
+    const run = scanRuns().get(name)
+    if (run === undefined) return { ok: false, message: name + ' is not running' }
+    if (isHostProfile(name)) return { ok: false, message: 'cannot stop the current instance (' + name + ')' }
+    try {
+      process.kill(run.pid, 'SIGTERM')
+      // Wait for the process to exit (up to ~5s).
+      const deadline = Date.now() + 5_000
+      for (;;) {
+        if (Date.now() > deadline) break
+        await new Promise(resolve => setTimeout(resolve, 400))
+        if (scanRuns().get(name) === undefined) {
+          return { ok: true, message: 'stopped ' + name }
+        }
+      }
+      return { ok: false, message: 'timed out stopping ' + name }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
@@ -469,6 +494,51 @@ async function installSpec(profile: string, spec: string): Promise<CommandResult
       output: result.output + `\n[plugin-manager] install ok but insert row failed: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
+}
+/** One live dsh instance found by process scan. */
+interface RunInfo {
+  readonly port: number | null
+  readonly pid: number
+}
+
+/**
+ * Scan running dsh instances by their command line (dsh --profile <name>
+ * [--port <n>]). Stateless: a live process is by definition running; no
+ * registry file to go stale. Bash wrappers and the node child both match;
+ * the entry carrying a --port wins for the same profile.
+ */
+function scanRuns(): Map<string, RunInfo> {
+  const runs = new Map<string, RunInfo>()
+  try {
+    const output = execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' })
+    for (const line of output.split('\n')) {
+      let match = /^\s*(\d+)\s+(.*\bdsh\b.*--profile\s+(\S+))/.exec(line)
+      let profile: string | undefined
+      let pid: number | undefined
+      if (match !== null) {
+        pid = Number(match[1]!)
+        profile = match[3]!
+      } else {
+        // `dsh web`/`dsh headless` command mode (no --profile flag).
+        match = /^\s*(\d+)\s+.*\bbin\.js\s+(\S+)/.exec(line)
+        if (match !== null) {
+          pid = Number(match[1]!)
+          profile = match[2]!
+        }
+      }
+      if (profile === undefined || pid === undefined) continue
+      // Parse --port from the whole line (the --profile group ends at the name).
+      const portMatch = /--port\s+(\d+)/.exec(line)
+      const port = portMatch === null ? null : Number(portMatch[1]!)
+      const existing = runs.get(profile)
+      if (existing === undefined || (existing.port === null && port !== null)) {
+        runs.set(profile, { port, pid })
+      }
+    }
+  } catch {
+    /* ps unavailable: no runs reported */
+  }
+  return runs
 }
 /** Find the first free port from `start` upward. */
 async function findFreePort(start: number): Promise<number> {
@@ -806,6 +876,11 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.createProfile(name, template) })
           return
         }
+        case 'stopProfile': {
+          const name = typeof body['name'] === 'string' ? body['name'] : ''
+          sendJson(res, 200, { ok: true, value: await service.stopProfile(name) })
+          return
+        }
         case 'startProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
           sendJson(res, 200, { ok: true, value: await service.startProfile(name) })
@@ -847,7 +922,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

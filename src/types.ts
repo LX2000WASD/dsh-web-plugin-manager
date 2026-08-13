@@ -17,6 +17,8 @@ export interface ProfileInfo {
   readonly isCurrent: boolean
   /** Whether this is an official built-in profile (web/headless, never managed). */
   readonly isOfficial: boolean
+  /** Running instance info (from process scan), when this profile is live. */
+  readonly running: { readonly port: number | null; readonly pid: number } | null
 }
 
 /** One plugin entry in the composed Loader tree (runtime view). */
