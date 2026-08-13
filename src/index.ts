@@ -344,12 +344,19 @@ function includeRows(ctx: Context, installed: InstalledSets): RuntimeEntry[] {
   if (loader === undefined) return []
   for (const entry of loader.entries()) {
     if (entry.id !== 'include') continue
-    const rows: RuntimeEntry[] = []
+    // Deduplicate by include row id: config-HMR refresh generations can leave
+    // both the patched row (configured disabled, unmounted) and the stale
+    // mounted row in the tree. Prefer the configured state (disabled), then a
+    // live fiber, then the first occurrence — the loader itself never mounts
+    // two rows with the same id, so one entry per id is the authoritative view.
+    const seen = new Map<string, RuntimeEntry>()
+    const authority = (row: RuntimeEntry): number =>
+      (row.enabled ? 0 : 2) + (row.fiberPhase === null ? 0 : 1)
     for (const row of entry.subtree?.entries() ?? []) {
       const options = row.options
       if (options === undefined || options.id === undefined || options.group) continue
       const name = options.name ?? ''
-      rows.push({
+      const candidate: RuntimeEntry = {
         entryId: options.id,
         moduleName: name,
         enabled: !row.disabled,
@@ -357,9 +364,13 @@ function includeRows(ctx: Context, installed: InstalledSets): RuntimeEntry[] {
         installed: installed.packageNames.has(name)
           || installed.insertNames.has(name)
           || installed.insertIds.has(options.id),
-      })
+      }
+      const current = seen.get(options.id)
+      if (current === undefined || authority(candidate) > authority(current)) {
+        seen.set(options.id, candidate)
+      }
     }
-    return rows
+    return [...seen.values()]
   }
   return []
 }
