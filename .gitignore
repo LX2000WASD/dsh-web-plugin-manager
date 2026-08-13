@@ -1,0 +1,13 @@
+# Build outputs
+dist/
+node_modules/
+
+# Project docs and references (kept out of the plugin package repo)
+docs/
+reference/
+
+# Logs
+*.log
+
+# OS
+.DS_Store

@@ -1,0 +1,6 @@
+# dsh-plugin-manager: Web-UI plugin management for DeepSeek Harness.
+# The host service mounts here; the browser half is discovered through the
+# package.json dsh.client declaration (no separate Loader row).
+- insert:
+    - id: plugin-manager
+      name: 'dsh-plugin-manager'
