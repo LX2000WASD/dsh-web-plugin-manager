@@ -79,6 +79,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px', lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)',
     fontVariantNumeric: 'tabular-nums',
   },
+  cardMetaRow: {
+    display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap',
+    padding: '0 14px 10px',
+  },
   tagOn: {
     background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent)',
     color: 'var(--dsw-alias-state-success-primary)',
@@ -175,9 +179,6 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
   return (
     <div style={styles.section}>
       <div style={styles.toolbar}>
-        <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => load(true)}>
-          {t('refresh')}
-        </Button>
         <span style={styles.filterLabel}>{t('sortLabel')}</span>
         <PmSelect
           ariaLabel={t('sortLabel')}
@@ -193,6 +194,10 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
         <Button size="sm" variant="ghost" onClick={() => setDescending(current => !current)}>
           {descending ? t('sortDesc') : t('sortAsc')}
         </Button>
+        <span style={{ marginLeft: 'auto' }} />
+        <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => load(true)}>
+          {t('refresh')}
+        </Button>
         <span style={styles.filterLabel}>{t('installTarget')}</span>
         <PmSelect
           ariaLabel={t('installTarget')}
@@ -207,6 +212,13 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
 
       {state.status === 'ready' && (
         <>
+          <div style={styles.heading}>
+            <h3 style={styles.headingTitle}>{t('marketList')}</h3>
+            <span style={styles.headingCount}>{rows.length}</span>
+            <span style={styles.filterLabel}>
+              {state.result.fromCache ? t('marketCached') + (state.result.cachedAt !== undefined ? ' ' + shortDate(state.result.cachedAt) : '') : t('marketFresh')}
+            </span>
+          </div>
           <label style={styles.search}>
             <IconSearchOutline16 aria-hidden="true" />
             <input
@@ -218,13 +230,6 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
               onChange={(event) => setQuery(event.currentTarget.value)}
             />
           </label>
-          <div style={styles.heading}>
-            <h3 style={styles.headingTitle}>{t('marketList')}</h3>
-            <span style={styles.headingCount}>{rows.length}</span>
-            <span style={styles.filterLabel}>
-              {state.result.fromCache ? t('marketCached') + (state.result.cachedAt !== undefined ? ' ' + shortDate(state.result.cachedAt) : '') : t('marketFresh')}
-            </span>
-          </div>
           {rows.length === 0 ? <p style={styles.status}>{t('noMarketItems')}</p> : (
             <ul style={styles.cards}>
               {rows.map((item) => (
@@ -233,17 +238,19 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
                     <a href={item.url} target="_blank" rel="noreferrer" style={{ ...styles.cardTitle, ...styles.link }} title={item.name}>
                       {item.displayName}
                     </a>
+                    <span style={{ marginLeft: 'auto' }}>
+                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onInstall(item)}>
+                        {busy === item.name ? t('installing') : t('installButton')}
+                      </Button>
+                    </span>
+                  </div>
+                  <div style={styles.cardMetaRow}>
                     <span style={styles.tag}>★ {item.stars}</span>
                     {item.status !== undefined && item.status.length > 0 && (
                       <span style={{ ...styles.tag, ...(item.status.includes('✅') ? styles.tagOn : {}) }} title={item.status}>
                         {item.status.includes('✅') ? t('statusVerified') : t('statusPending')}
                       </span>
                     )}
-                    <span style={{ marginLeft: 'auto' }}>
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onInstall(item)}>
-                        {busy === item.name ? t('installing') : t('installButton')}
-                      </Button>
-                    </span>
                   </div>
                   {item.description !== undefined && item.description.length > 0 && (
                     <div style={{ padding: '0 14px 10px' }}>
