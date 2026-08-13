@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo,
@@ -79,6 +79,28 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent)',
     color: 'var(--dsw-alias-state-success-primary)',
   },
+  cardContent: {
+    boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    gap: '12px', width: '100%', minHeight: '52px', border: 0, padding: '12px 14px',
+    background: 'transparent', color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer',
+  },
+  cardTrailing: { display: 'inline-flex', flex: 'none', alignItems: 'center', gap: '7px' },
+  cardDetails: {
+    borderTop: '1px solid var(--dsw-alias-border-l2)', padding: '10px 14px 12px',
+    background: 'var(--dsw-alias-bg-module-platform)',
+  },
+  entryValue: {
+    display: 'block', overflowWrap: 'anywhere', color: 'var(--dsw-alias-label-primary)',
+    fontFamily: 'var(--ds-font-family-code)', fontSize: '12px', lineHeight: '18px',
+  },
+  details: {
+    display: 'grid', gridTemplateColumns: '76px minmax(0, 1fr)', gap: '6px 10px',
+    margin: '8px 0 0', color: 'var(--dsw-alias-label-tertiary)', fontSize: '11px', lineHeight: '17px',
+  },
+  detailsRow: { display: 'contents' },
+  link: {
+    color: 'var(--dsw-alias-state-business-primary)', textDecoration: 'none', overflowWrap: 'anywhere',
+  },
   output: {
     maxHeight: '200px', overflow: 'auto', whiteSpace: 'pre-wrap',
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
@@ -94,6 +116,15 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: '13px',
   },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+}
+
+/** Format an ISO timestamp for display (local time). */
+function formatTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
+    + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes())
 }
 
 /** Render the management tab. */
@@ -182,21 +213,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     }
   }
 
-  // Copy-to-environment: per-package target selection.
-  const [copyTargets, setCopyTargets] = useState<Record<string, string>>({})
-  const otherEnvironments = profileList.filter(profile => profile.name !== selected)
-
-  const onCopy = async (pkgName: string): Promise<void> => {
-    const target = copyTargets[pkgName] ?? otherEnvironments[0]?.name
-    if (target === undefined) return
-    setBusy('copy-' + pkgName)
-    try {
-      const result = await injected.current.copyPlugins(selected, target, [pkgName])
-      setOutput('$ copy ' + pkgName + ' -> ' + target + '\n' + result.output)
-    } finally {
-      setBusy(null)
-    }
-  }
+  const [expandedPkg, setExpandedPkg] = useState<string | null>(null)
 
   const snapshot = state.status === 'ready' ? state.snapshot : undefined
   const packages = useMemo(() => snapshot?.packages ?? [], [snapshot])
@@ -228,34 +245,60 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
           </div>
           {packages.length === 0 ? <p style={styles.status}>{t('noPackages')}</p> : (
             <ul style={styles.cards}>
-              {packages.map((pkg) => (
-                <li key={pkg.name} style={styles.card}>
-                  <div style={styles.cardRow}>
-                    <span style={styles.cardTitle} title={pkg.name}>{pkg.name}</span>
-                    <span style={{ ...styles.tag, ...(pkg.isBundle ? styles.tagOn : {}) }}>
-                      {pkg.isBundle ? t('bundleBadge') : t('dependencyBadge')}
-                    </span>
-                    <span style={{ marginLeft: 'auto' }}>
-                      {otherEnvironments.length > 0 && (
-                        <>
-                          <PmSelect
-                            ariaLabel={t('copyToLabel')}
-                            value={copyTargets[pkg.name] ?? otherEnvironments[0]!.name}
-                            options={otherEnvironments.map(profile => ({ value: profile.name, label: profile.name }))}
-                            onChange={(value) => setCopyTargets(current => ({ ...current, [pkg.name]: value }))}
-                          />
-                          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onCopy(pkg.name)}>
-                            {t('copyButton')}
+              {packages.map((pkg) => {
+                const open = expandedPkg === pkg.name
+                return (
+                  <li key={pkg.name} className="pm-card" data-open={open ? 'true' : undefined}>
+                    <div style={styles.cardRow}>
+                      <button
+                        className="pm-card-content"
+                        style={styles.cardContent}
+                        type="button"
+                        aria-expanded={open}
+                        onClick={() => setExpandedPkg(current => current === pkg.name ? null : pkg.name)}
+                      >
+                        <span style={styles.cardTitle} title={pkg.name}>{pkg.name}</span>
+                        <span style={styles.cardTrailing}>
+                          <span style={{ ...styles.tag, ...(pkg.isBundle ? styles.tagOn : {}) }}>
+                            {pkg.isBundle ? t('bundleBadge') : t('dependencyBadge')}
+                          </span>
+                          <IconChevronDownOutline14 size={12} aria-hidden="true" />
+                        </span>
+                      </button>
+                    </div>
+                    {open ? (
+                      <div style={styles.cardDetails}>
+                        <code style={styles.entryValue}>{pkg.name}{pkg.version ? '@' + pkg.version : ''}</code>
+                        <dl style={styles.details}>
+                          <div style={styles.detailsRow}>
+                            <dt>{t('installedAt')}</dt>
+                            <dd>{pkg.installedAt !== undefined ? formatTime(pkg.installedAt) : t('unknown')}</dd>
+                          </div>
+                          <div style={styles.detailsRow}>
+                            <dt>{t('updatedAt')}</dt>
+                            <dd>{t('unknown')}</dd>
+                          </div>
+                          <div style={styles.detailsRow}>
+                            <dt>{t('repository')}</dt>
+                            <dd>
+                              {pkg.repository !== undefined ? (
+                                <a href={pkg.repository} target="_blank" rel="noreferrer" style={styles.link}>
+                                  {pkg.repository}
+                                </a>
+                              ) : t('unknown')}
+                            </dd>
+                          </div>
+                        </dl>
+                        <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'flex-end' }}>
+                          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRemove(pkg.name)}>
+                            {t('removeButton')}
                           </Button>
-                        </>
-                      )}
-                      <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRemove(pkg.name)}>
-                        {t('removeButton')}
-                      </Button>
-                    </span>
-                  </div>
-                </li>
-              ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </li>
+                )
+              })}
             </ul>
           )}
 

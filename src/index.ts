@@ -27,7 +27,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -245,6 +245,7 @@ export class PluginManagerService extends Service {
         managedDisabledIds: isBundle && hasManagedDisable(patchPath(dir), name)
           ? [name]
           : [],
+        ...readPackageInfo(dir, name),
       }
     })
 
@@ -503,6 +504,45 @@ function includeRows(ctx: Context, installed: InstalledSets): RuntimeEntry[] {
   return []
 }
 
+/** Read a package's manifest metadata (version, repository) and install time. */
+function readPackageInfo(dir: string, name: string): {
+  version?: string
+  installedAt?: string
+  updatedAt?: string
+  repository?: string
+} {
+  const pkgPath = join(dir, 'node_modules', name, 'package.json')
+  try {
+    const manifest = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+      version?: unknown
+      repository?: unknown
+      homepage?: unknown
+    }
+    let repository: string | undefined
+    if (typeof manifest.repository === 'string') repository = manifest.repository
+    else if (typeof manifest.repository === 'object' && manifest.repository !== null) {
+      const url = (manifest.repository as { url?: unknown }).url
+      if (typeof url === 'string') repository = url
+    }
+    if (repository === undefined && typeof manifest.homepage === 'string') repository = manifest.homepage
+    // Install time: the node_modules link mtime (written when pnpm added it).
+    let installedAt: string | undefined
+    try {
+      installedAt = statSync(join(dir, 'node_modules', name)).mtime.toISOString()
+    } catch {
+      installedAt = undefined
+    }
+    return {
+      ...(typeof manifest.version === 'string' ? { version: manifest.version } : {}),
+      ...(installedAt !== undefined ? { installedAt } : {}),
+      // Last-update tracking is not available yet (reserved for the future marketplace).
+      updatedAt: undefined,
+      ...(repository !== undefined ? { repository } : {}),
+    }
+  } catch {
+    return {}
+  }
+}
 /**
  * Resolve the real package name after an install: pnpm writes the package's
  * own name as the dependency key, while the requested source may have been a

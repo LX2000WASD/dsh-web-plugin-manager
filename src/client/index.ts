@@ -104,6 +104,7 @@ export function apply(ctx: ClientContext): void {
 
   const environmentsInjected = (): PluginEnvironmentsTabInjected => ({
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
+    copyPlugins: (from, to, names) => call<CommandResult>('copyPlugins', { from, to, names }),
     createProfile: (name, template) => call<MutationResult>('createProfile', { name, template }),
     renameProfile: (oldName, newName) => call<MutationResult>('renameProfile', { oldName, newName }),
     removeProfile: (name) => call<MutationResult>('removeProfile', { name }),

@@ -81,6 +81,17 @@ export const zh = {
   templateHeadless: 'Headless 环境（base + headless）',
   copyToLabel: '复制到',
   copyButton: '复制',
+  transferTitle: '复制/转移插件',
+  transferPlaceholder: '包名（多个用逗号/空格分隔）',
+  transferFrom: '原环境',
+  transferTo: '目标环境',
+  transferArrow: '→',
+  transferButton: '转移',
+  transferring: '转移中…',
+  installedAt: '安装时间',
+  updatedAt: '更新时间',
+  repository: '原仓库',
+  unknown: '未知',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -165,4 +176,15 @@ export const en = {
   templateHeadless: 'Headless environment (base + headless)',
   copyToLabel: 'Copy to',
   copyButton: 'Copy',
+  transferTitle: 'Copy / transfer plugins',
+  transferPlaceholder: 'Package names (comma/space separated)',
+  transferFrom: 'From',
+  transferTo: 'To',
+  transferArrow: '→',
+  transferButton: 'Transfer',
+  transferring: 'Transferring…',
+  installedAt: 'Installed at',
+  updatedAt: 'Updated at',
+  repository: 'Repository',
+  unknown: 'unknown',
 } satisfies Record<PluginManagerLocaleKey, string>

@@ -6,13 +6,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { MutationResult, ProfileInfo } from '../types.ts'
+import type { CommandResult, MutationResult, ProfileInfo } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
 export interface PluginEnvironmentsTabInjected {
   readonly profiles: () => Promise<ProfileInfo[]>
+  readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
   readonly createProfile: (name: string, template: string) => Promise<MutationResult>
   readonly renameProfile: (oldName: string, newName: string) => Promise<MutationResult>
   readonly removeProfile: (name: string) => Promise<MutationResult>
@@ -77,14 +78,18 @@ const styles: Record<string, React.CSSProperties> = {
 }
 
 /** Render the environment management tab. */
-export function PluginEnvironmentsTab({ profiles, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
+export function PluginEnvironmentsTab({ profiles, copyPlugins, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [newName, setNewName] = useState('')
   const [template, setTemplate] = useState('web')
   const [output, setOutput] = useState('')
+  // Plugin transfer state: package names, source, target.
+  const [transferNames, setTransferNames] = useState('')
+  const [transferFrom, setTransferFrom] = useState('')
+  const [transferTo, setTransferTo] = useState('')
 
-  const injected = useRef({ profiles, createProfile, renameProfile, removeProfile })
+  const injected = useRef({ profiles, copyPlugins, createProfile, renameProfile, removeProfile })
 
   const refresh = (): void => {
     void injected.current.profiles().then(setProfileList, () => { /* keep last list */ })
@@ -128,6 +133,19 @@ export function PluginEnvironmentsTab({ profiles, createProfile, renameProfile, 
       const result = await injected.current.removeProfile(name)
       setOutput(result.message)
       if (result.ok) refresh()
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const onTransfer = async (): Promise<void> => {
+    const names = transferNames.split(/[,\s]+/).map(name => name.trim()).filter(name => name.length > 0)
+    if (names.length === 0 || transferFrom.length === 0 || transferTo.length === 0) return
+    setBusy('transfer')
+    try {
+      const result = await injected.current.copyPlugins(transferFrom, transferTo, names)
+      setOutput('$ copy ' + names.join(', ') + ' ' + transferFrom + ' -> ' + transferTo + '\n' + result.output)
+      setTransferNames('')
     } finally {
       setBusy(null)
     }
@@ -189,6 +207,37 @@ export function PluginEnvironmentsTab({ profiles, createProfile, renameProfile, 
         />
         <Button variant="primary" disabled={busy !== null || newName.trim().length === 0} onClick={() => void onCreate()}>
           {busy === 'create' ? t('creating') : t('createButton')}
+        </Button>
+      </div>
+
+      <div style={styles.heading}>
+        <h3 style={styles.headingTitle}>{t('transferTitle')}</h3>
+      </div>
+      <div style={styles.toolbar}>
+        <Input
+          type="text"
+          value={transferNames}
+          placeholder={t('transferPlaceholder')}
+          disabled={busy !== null}
+          onChange={(event) => setTransferNames(event.currentTarget.value)}
+          onKeyDown={(event) => { if (event.key === 'Enter') void onTransfer() }}
+          style={{ flex: 1 }}
+        />
+        <PmSelect
+          ariaLabel={t('transferFrom')}
+          value={transferFrom}
+          options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
+          onChange={setTransferFrom}
+        />
+        <span style={styles.filterLabel}>{t('transferArrow')}</span>
+        <PmSelect
+          ariaLabel={t('transferTo')}
+          value={transferTo}
+          options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
+          onChange={setTransferTo}
+        />
+        <Button variant="primary" disabled={busy !== null || transferNames.trim().length === 0 || transferFrom.length === 0 || transferTo.length === 0 || transferFrom === transferTo} onClick={() => void onTransfer()}>
+          {busy === 'transfer' ? t('transferring') : t('transferButton')}
         </Button>
       </div>
 
