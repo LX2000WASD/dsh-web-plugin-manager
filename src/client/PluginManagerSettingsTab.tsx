@@ -359,22 +359,6 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
             </ul>
           )}
 
-          <div style={styles.toolbar}>
-            <Input
-              type="text"
-              value={spec}
-              placeholder={t('installPlaceholder')}
-              disabled={busy !== null}
-              onChange={(event: React.ChangeEvent<HTMLInputElement>) => setSpec(event.currentTarget.value)}
-              onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') void onInstall() }}
-              style={{ flex: 1 }}
-            />
-            <Button variant="primary" disabled={busy !== null || spec.trim().length === 0} onClick={() => void onInstall()}>
-              {busy === 'install' ? t('installing') : t('installButton')}
-            </Button>
-          </div>
-
-
           {output.length > 0 && (
             <div>
               <div style={styles.heading}>
