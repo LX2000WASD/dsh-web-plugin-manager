@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CommandResult, MutationResult, ProfileInfo, StartResult } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
@@ -15,6 +15,7 @@ export interface PluginEnvironmentsTabInjected {
   readonly profiles: () => Promise<ProfileInfo[]>
   readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
   readonly startProfile: (name: string) => Promise<StartResult>
+  readonly stopProfile: (name: string) => Promise<MutationResult>
   readonly createProfile: (name: string, template: string) => Promise<MutationResult>
   readonly renameProfile: (oldName: string, newName: string) => Promise<MutationResult>
   readonly removeProfile: (name: string) => Promise<MutationResult>
@@ -95,7 +96,7 @@ const styles: Record<string, React.CSSProperties> = {
 }
 
 /** Render the environment management tab. */
-export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
+export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [newName, setNewName] = useState('')
@@ -107,7 +108,7 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
   const [transferFrom, setTransferFrom] = useState('')
   const [transferTo, setTransferTo] = useState('')
 
-  const injected = useRef({ profiles, copyPlugins, startProfile, createProfile, renameProfile, removeProfile })
+  const injected = useRef({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile })
 
   const refresh = (): void => {
     void injected.current.profiles().then(setProfileList, () => { /* keep last list */ })
@@ -162,6 +163,16 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
       const result = await injected.current.startProfile(name)
       setOutput(result.message)
       if (result.ok && result.url !== undefined) window.open(result.url, '_blank')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const onStop = async (name: string): Promise<void> => {
+    setBusy('stop-' + name)
+    try {
+      const result = await injected.current.stopProfile(name)
+      setOutput(result.message)
     } finally {
       setBusy(null)
     }
@@ -229,6 +240,13 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
                     <span style={{ flex: 'none' }}>
                       <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onStart(profile.name)}>
                         {busy === 'start-' + profile.name ? t('starting') : t('startButton')}
+                      </Button>
+                    </span>
+                  )}
+                  {running && !profile.isCurrent && (
+                    <span style={{ flex: 'none' }}>
+                      <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onStop(profile.name)}>
+                        {busy === 'stop-' + profile.name ? t('stopping') : t('stopButton')}
                       </Button>
                     </span>
                   )}

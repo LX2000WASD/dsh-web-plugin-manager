@@ -1,7 +1,20 @@
 {
-  "name": "dsh-plugin-manager",
+  "name": "dsh-web-plugin-manager",
   "version": "0.1.0",
-  "description": "Manage DeepSeek Harness plugins from the Web UI: list, enable/disable, install, and remove bundles.",
+  "description": "Manage DeepSeek Harness (DSH) plugins from the Web UI: list, enable/disable, install/remove, environments, and a GitHub-awesome-driven marketplace.",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "plugin-manager",
+    "marketplace"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LX2000WASD/dsh-web-plugin-manager.git"
+  },
   "type": "module",
   "exports": {
     ".": {

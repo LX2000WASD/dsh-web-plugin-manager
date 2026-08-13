@@ -68,7 +68,7 @@ async function call<T>(op: string, body: Record<string, unknown>): Promise<T> {
 
 /** Contribute the catalog (shadowing official) and management tabs. */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-manager: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-web-plugin-manager: dictionaries')
 
   const t = ctx.locale.bind(NS)
   const catalogInjected = (): PluginCatalogTabInjected => ({
@@ -110,6 +110,7 @@ export function apply(ctx: ClientContext): void {
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
     copyPlugins: (from, to, names) => call<CommandResult>('copyPlugins', { from, to, names }),
     startProfile: (name) => call<StartResult>('startProfile', { name }),
+    stopProfile: (name) => call<MutationResult>('stopProfile', { name }),
     createProfile: (name, template) => call<MutationResult>('createProfile', { name, template }),
     renameProfile: (oldName, newName) => call<MutationResult>('renameProfile', { oldName, newName }),
     removeProfile: (name) => call<MutationResult>('removeProfile', { name }),

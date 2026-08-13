@@ -34,7 +34,7 @@
  *    official `[]` template instead.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, renameSync, rmSync } from 'node:fs'
 
 /** Marker lines delimiting one managed block. */
 const START = '# dsh-plugin-manager:managed:start'
@@ -372,10 +372,10 @@ function normalizeDocument(lines: readonly string[]): string {
   return hasRow ? text : EMPTY_TEMPLATE
 }
 
-/** Persist new content with an atomic write. */
+/** Persist new content with an atomic write (tmp + rename). */
 export function writePatch(patchPath: string, content: string): void {
   const tmp = patchPath + '.tmp'
   writeFileSync(tmp, content, 'utf8')
-  writeFileSync(patchPath, content, 'utf8')
-  try { readFileSync(tmp, 'utf8') } finally { /* tmp left for review */ }
+  renameSync(tmp, patchPath)
+  try { rmSync(tmp, { force: true }) } catch { /* best-effort cleanup */ }
 }

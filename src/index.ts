@@ -308,7 +308,7 @@ export class PluginManagerService extends Service {
       // PLUGINS.md rows: | name | [org/repo](url) | description | status |
       const mdResponse = await fetch(
         'https://raw.githubusercontent.com/AdamPlatin123/awesome-dsh-plugins/main/PLUGINS.md',
-        { headers: { 'user-agent': 'dsh-plugin-manager' } },
+        { headers: { 'user-agent': 'dsh-web-plugin-manager' } },
       )
       if (!mdResponse.ok) throw new Error('catalog fetch HTTP ' + mdResponse.status)
       const markdown = await mdResponse.text()
@@ -618,7 +618,7 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
       const args = ['clone']
       if (ref !== undefined) args.push('-b', ref)
       args.push('--depth', '1', repo, dest)
-      execFileSync('git', args, { stdio: 'pipe' })
+      execFileSync('git', args, { stdio: 'pipe', timeout: 3 * 60 * 1000 })
     }
     const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
     if (existsSync(join(pkgDir, 'package.json'))) {
@@ -688,7 +688,7 @@ function discoverWorkspacePackages(root: string): string[] {
           try {
             const manifest = JSON.parse(readFileSync(join(full, 'package.json'), 'utf8')) as Record<string, unknown>
             const dsh = manifest['dsh'] as Record<string, unknown> | undefined
-            const isPlugin = dsh?.bundle !== undefined || typeof manifest['apply'] === 'function'
+            const isPlugin = dsh?.bundle !== undefined
             if (isPlugin) found.push(full)
           } catch { /* unreadable manifest: skip */ }
         } else {
@@ -1394,7 +1394,7 @@ export function apply(ctx: Context, config: PluginManagerConfig): void {
     webCtx.effect(() => {
       const disposers = registerRoutes(webCtx, service)
       return () => { for (const dispose of disposers) dispose() }
-    }, 'dsh-plugin-manager: routes')
+    }, 'dsh-web-plugin-manager: routes')
   })
   // V2-E: agent tools, when the host provides the tools service (web
   // profiles do; headless may not — inject simply never fires).
@@ -1402,7 +1402,7 @@ export function apply(ctx: Context, config: PluginManagerConfig): void {
     toolsCtx.effect(() => {
       const disposers = registerTools(toolsCtx, service, config.profile)
       return () => { for (const dispose of disposers) dispose() }
-    }, 'dsh-plugin-manager: tools')
+    }, 'dsh-web-plugin-manager: tools')
   })
 }
 

@@ -3,7 +3,7 @@
 # package.json dsh.client declaration (no separate Loader row).
 - insert:
     - id: plugin-manager
-      name: 'dsh-plugin-manager'
+      name: 'dsh-web-plugin-manager'
       config:
         profile: 'web'
 # Shadow the official read-only plugin list: our catalog tab (same slot id
