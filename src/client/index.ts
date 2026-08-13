@@ -1,6 +1,8 @@
 /**
- * dsh-plugin-manager browser half: registers the Manage tab inside the
- * official Plugins settings section (settings.plugins.tab).
+ * dsh-plugin-manager browser half: registers two settings tabs.
+ *  - PluginCatalogTab shadows the official read-only inventory (same slot
+ *    id 'all', lower priority) with live enable/disable, filtering, sorting.
+ *  - PluginManagerSettingsTab is the install/uninstall management page.
  * Communicates with the host through the /api2/plugin-manager REST surface
  * (same-origin fetch).
  */
@@ -12,10 +14,14 @@ import type {
   CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo,
 } from '../types.ts'
 import {
+  PluginCatalogTab, type PluginCatalogTabInjected,
+} from './PluginCatalogTab.tsx'
+import {
   PluginManagerSettingsTab, type PluginManagerTabInjected,
 } from './PluginManagerSettingsTab.tsx'
 import { en, zh, type PluginManagerLocaleKey } from './locales.ts'
 
+export type { PluginCatalogTabInjected, PluginCatalogTabProps } from './PluginCatalogTab.tsx'
 export type { PluginManagerTabInjected, PluginManagerTabProps } from './PluginManagerSettingsTab.tsx'
 export type { PluginManagerLocaleKey } from './locales.ts'
 
@@ -52,19 +58,35 @@ async function call<T>(op: string, body: Record<string, unknown>): Promise<T> {
   return envelope.value as T
 }
 
-/** Contribute the Manage tab to the Plugins settings section. */
+/** Contribute the catalog (shadowing official) and management tabs. */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-manager: dictionaries')
 
   const t = ctx.locale.bind(NS)
-  const injected = (): PluginManagerTabInjected => ({
+  const catalogInjected = (): PluginCatalogTabInjected => ({
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
     list: (profile) => call<PluginManagerSnapshot>('list', { profile }),
     setEnabled: (profile, entryId, enabled) => call<MutationResult>('setEnabled', { profile, entryId, enabled }),
+  })
+  const managerInjected = (): PluginManagerTabInjected => ({
+    profiles: () => call<ProfileInfo[]>('listProfiles', {}),
+    list: (profile) => call<PluginManagerSnapshot>('list', { profile }),
     install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
     remove: (profile, name) => call<CommandResult>('remove', { profile, name }),
     removeInsert: (profile, rowId) => call<MutationResult>('removeInsert', { profile, rowId }),
   })
+
+  // Shadow the official read-only inventory: same slot id 'all', lower
+  // priority wins per the slots shadowing contract (lowest renders).
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: 'all',
+    order: 10,
+    priority: -1,
+    label: () => t('catalogTab'),
+    locale: NS,
+    inject: catalogInjected,
+  }, PluginCatalogTab))
 
   ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
     name: 'settings.plugins.tab',
@@ -72,6 +94,6 @@ export function apply(ctx: ClientContext): void {
     order: 20,
     label: () => t('tab'),
     locale: NS,
-    inject: injected,
+    inject: managerInjected,
   }, PluginManagerSettingsTab))
 }

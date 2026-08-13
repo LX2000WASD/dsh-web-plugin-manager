@@ -1,13 +1,11 @@
 /**
- * Plugin Manager settings tab: install/remove packages, live-mount rows, and
- * toggle entries. Renders inside the official Plugins settings section
- * (settings.plugins.tab) with official ui-primitives and --dsw-* tokens.
+ * Plugin Manager management tab: install/remove packages and live-mount
+ * rows. Viewing/toggling lives in the catalog tab (PluginCatalogTab); this
+ * tab only manages installation state.
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import {
-  Button, IconSearchOutline16, Input,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo,
@@ -18,7 +16,6 @@ import type { PluginManagerLocaleKey } from './locales.ts'
 export interface PluginManagerTabInjected {
   readonly profiles: () => Promise<ProfileInfo[]>
   readonly list: (profile: string) => Promise<PluginManagerSnapshot>
-  readonly setEnabled: (profile: string, entryId: string, enabled: boolean) => Promise<MutationResult>
   readonly install: (profile: string, spec: string) => Promise<CommandResult>
   readonly remove: (profile: string, name: string) => Promise<CommandResult>
   readonly removeInsert: (profile: string, rowId: string) => Promise<MutationResult>
@@ -41,22 +38,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', flexDirection: 'column', gap: '14px',
     width: '100%', maxWidth: '760px', color: 'var(--dsw-alias-label-primary)',
   },
-  toolbar: { display: 'flex', alignItems: 'center', gap: '10px' },
+  toolbar: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
   heading: { display: 'flex', alignItems: 'baseline', gap: '7px', padding: '0 2px' },
   headingTitle: { margin: 0, fontSize: '13px', lineHeight: '20px', fontWeight: 600 },
   headingCount: {
     fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
     fontVariantNumeric: 'tabular-nums',
-  },
-  search: {
-    display: 'flex', alignItems: 'center', gap: '8px', width: '100%', height: '36px',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '8px',
-    padding: '0 12px', boxSizing: 'border-box',
-    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-tertiary)',
-  },
-  searchInput: {
-    flex: 1, minWidth: 0, border: 0, outline: 'none', background: 'transparent',
-    color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: '13px',
   },
   cards: {
     display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
@@ -90,13 +77,6 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent)',
     color: 'var(--dsw-alias-state-success-primary)',
   },
-  statusDot: {
-    display: 'inline-block', width: '7px', height: '7px', flex: 'none',
-    borderRadius: '999px', background: 'var(--dsw-alias-label-tertiary)',
-  },
-  statusDotActive: { background: 'var(--dsw-alias-state-success-primary)' },
-  statusDotFailed: { background: 'var(--dsw-alias-state-error-primary)' },
-  statusDotLoading: { background: 'var(--dsw-alias-state-business-primary)' },
   output: {
     maxHeight: '200px', overflow: 'auto', whiteSpace: 'pre-wrap',
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
@@ -111,25 +91,16 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '0 10px', outline: 'none', background: 'var(--dsw-alias-bg-layer-1)',
     color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: '13px',
   },
-}
-
-/** Compact a module specifier like the official inventory. */
-function moduleShortName(moduleName: string): string {
-  const unscoped = moduleName.startsWith('@') ? moduleName.slice(moduleName.indexOf('/') + 1) : moduleName
-  return unscoped
-    .replace(/^cordis:/, '')
-    .replace(/^cordis-plugin-/, '')
-    .replace(/^dsh-(?:host-|client-)?/, '')
+  filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
 }
 
 /** Render the management tab. */
-export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, remove, removeInsert, t }: PluginManagerTabProps): ReactNode {
+export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, t }: PluginManagerTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
   const [state, setState] = useState<ViewState>({ status: 'loading' })
   const [busy, setBusy] = useState<string | null>(null)
   const [spec, setSpec] = useState('')
-  const [query, setQuery] = useState('')
   const [output, setOutput] = useState<string>('')
 
   const refresh = (profile: string): void => {
@@ -161,19 +132,6 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
     refresh(name)
   }
 
-  const onToggle = async (entryId: string, enable: boolean): Promise<void> => {
-    if (selected.length === 0) return
-    if (!enable && !window.confirm(t('confirmDisable'))) return
-    setBusy(entryId)
-    try {
-      const result = await setEnabled(selected, entryId, enable)
-      setOutput(result.message)
-      refresh(selected)
-    } finally {
-      setBusy(null)
-    }
-  }
-
   const onInstall = async (): Promise<void> => {
     const trimmed = spec.trim()
     if (selected.length === 0 || trimmed.length === 0) return
@@ -181,9 +139,9 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
     try {
       const result = await install(selected, trimmed)
       const mounted = result.installed !== undefined && result.installed.length > 0
-        ? `\n✓ ${t('installMounted')}`
+        ? '\n✓ ' + t('installMounted')
         : ''
-      setOutput(`$ dsh plugin --profile ${selected} add ${trimmed}\n${result.output}${mounted}`)
+      setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output + mounted)
       setSpec('')
       refresh(selected)
     } finally {
@@ -196,7 +154,7 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
     setBusy(name)
     try {
       const result = await remove(selected, name)
-      setOutput(`$ dsh plugin --profile ${selected} remove ${name}\n${result.output}`)
+      setOutput('$ dsh plugin --profile ' + selected + ' remove ' + name + '\n' + result.output)
       refresh(selected)
     } finally {
       setBusy(null)
@@ -216,41 +174,13 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
   }
 
   const snapshot = state.status === 'ready' ? state.snapshot : undefined
-  const normalizedQuery = query.trim().toLocaleLowerCase()
-  const entries = useMemo(
-    () => (snapshot?.entries ?? []).filter(
-      entry => normalizedQuery.length === 0
-        || entry.entryId.toLocaleLowerCase().includes(normalizedQuery)
-        || entry.moduleName.toLocaleLowerCase().includes(normalizedQuery),
-    ),
-    [snapshot, normalizedQuery],
-  )
-  const packages = useMemo(
-    () => (snapshot?.packages ?? []).filter(
-      pkg => normalizedQuery.length === 0 || pkg.name.toLocaleLowerCase().includes(normalizedQuery),
-    ),
-    [snapshot, normalizedQuery],
-  )
-  const insertRows = useMemo(
-    () => (snapshot?.insertRows ?? []).filter(
-      row => normalizedQuery.length === 0
-        || row.id.toLocaleLowerCase().includes(normalizedQuery)
-        || row.name.toLocaleLowerCase().includes(normalizedQuery),
-    ),
-    [snapshot, normalizedQuery],
-  )
-
-  const dotStyle = (phase: string | null): React.CSSProperties => {
-    if (phase === 'active') return { ...styles.statusDot, ...styles.statusDotActive }
-    if (phase === 'failed') return { ...styles.statusDot, ...styles.statusDotFailed }
-    if (phase === 'loading' || phase === 'pending') return { ...styles.statusDot, ...styles.statusDotLoading }
-    return styles.statusDot
-  }
+  const packages = useMemo(() => snapshot?.packages ?? [], [snapshot])
+  const insertRows = useMemo(() => snapshot?.insertRows ?? [], [snapshot])
 
   return (
     <div style={styles.section}>
       <div style={styles.toolbar}>
-        <label htmlFor="pm-profile" style={{ ...styles.status, display: 'inline-flex', alignItems: 'center' }}>{t('profileLabel')}</label>
+        <label htmlFor="pm-profile" style={{ ...styles.filterLabel, display: 'inline-flex', alignItems: 'center' }}>{t('profileLabel')}</label>
         <select
           id="pm-profile"
           style={styles.select}
@@ -272,18 +202,6 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
 
       {snapshot !== undefined && (
         <>
-          <label style={styles.search}>
-            <IconSearchOutline16 aria-hidden="true" />
-            <input
-              type="search"
-              style={styles.searchInput}
-              value={query}
-              placeholder={t('search')}
-              aria-label={t('search')}
-              onChange={(event) => setQuery(event.currentTarget.value)}
-            />
-          </label>
-
           <div style={styles.heading}>
             <h3 style={styles.headingTitle}>{t('packages')}</h3>
             <span style={styles.headingCount}>{packages.length}</span>
@@ -349,41 +267,6 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
               {busy === 'install' ? t('installing') : t('installButton')}
             </Button>
           </div>
-
-          <div style={styles.heading}>
-            <h3 style={styles.headingTitle}>{t('entries')}</h3>
-            <span style={styles.headingCount}>{entries.length}</span>
-          </div>
-          {entries.length === 0 ? <p style={styles.status}>{t('noEntries')}</p> : (
-            <ul style={styles.cards}>
-              {entries.map((entry) => {
-                const title = moduleShortName(entry.moduleName)
-                return (
-                  <li key={entry.entryId} style={styles.card} data-plugin-entry={entry.entryId}>
-                    <div style={styles.cardRow}>
-                      <span
-                        style={dotStyle(entry.fiberPhase)}
-                        data-phase={entry.fiberPhase ?? 'unobserved'}
-                        role="img"
-                        aria-label={entry.fiberPhase ?? t('unobserved')}
-                        title={entry.fiberPhase ?? t('unobserved')}
-                      />
-                      <span style={styles.cardTitle} title={entry.moduleName}>{title}</span>
-                      <span style={styles.cardSub}>{entry.entryId}</span>
-                      <span style={{ ...styles.tag, ...(entry.enabled ? styles.tagOn : {}) }}>
-                        {entry.enabled ? t('enabled') : t('disabled')}
-                      </span>
-                      <span style={{ marginLeft: 'auto' }}>
-                        <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onToggle(entry.entryId, !entry.enabled)}>
-                          {entry.enabled ? t('disableButton') : t('enableButton')}
-                        </Button>
-                      </span>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
 
           {output.length > 0 && (
             <div>
