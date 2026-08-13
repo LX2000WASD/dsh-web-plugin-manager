@@ -29,7 +29,7 @@ dsh plugin --profile <name> add .
 - **Patch 编辑**：`src/patch.ts` —— 文件末尾追加/移除标记块（`# dsh-plugin-manager:managed:start/end`），行级操作，不重写用户内容；处理 YAML 陷阱（`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板、空块清理）
 - **稳定行视图**：Loader entry id 每次挂载随机（`Math.random` hex），patch 定位必须用 include 树行 id（`EntryOptions.id`，官方语义稳定）；随机行（无显式 id）不可经 patch 启停，UI 不提供开关
 - **Agent 工具**：`src/tools.ts` —— 依赖注入（`PluginToolsHost`）避免循环依赖；`ctx.inject(['tools'])` 在 host 提供 tools 服务时注册（web 有、headless 无则跳过）
-- **Client**：`src/client/` —— 注册 `settings.plugins.tab`（id `manager`），同源 fetch 调 REST
+- **Client**：`src/client/` —— 注册 `settings.plugins.tab` 两个 tab：`all`（遮蔽官方只读列表：bundle patch 禁用 `ui-settings-plugin-inventory` + 同 id 低 priority 双保险，卸载自动恢复）+ `manager`（安装/卸载）；同源 fetch 调 REST
 - **通信**：不走 Typert Remote（独立插件无法携带生成的 reflection 产物；且 SRC 发现只覆盖 root context 服务）——用官方 webServer 路由 + 同源 fetch
 
 ## 已知限制
