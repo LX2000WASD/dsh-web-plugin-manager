@@ -229,8 +229,10 @@ export class PluginManagerService extends Service {
 
 
   /**
-   * Launch a profile instance on a free port (web environments only) and
-   * wait until its web server answers. Returns the browser URL.
+   * Launch a profile instance (web environments only): opens a terminal
+   * window running dsh on a free port (closing the terminal stops the
+   * instance). Falls back to a detached background process when no
+   * terminal emulator is available. Waits until the web server answers.
    */
   async startProfile(name: string): Promise<StartResult> {
     const dir = profileDir(name)
@@ -244,12 +246,17 @@ export class PluginManagerService extends Service {
     }
     try {
       const port = await findFreePort(3090)
-      const child = spawn('dsh', ['--profile', name, '--port', String(port)], {
-        cwd: process.cwd(),
-        detached: true,
-        stdio: 'ignore',
-      })
-      child.unref()
+      const terminal = await openInTerminal('dsh --profile ' + name + ' --port ' + port)
+      if (!terminal.opened) {
+        // No terminal emulator: background fallback (visible via ps; the
+        // profile scan still reports it as running).
+        const child = spawn('dsh', ['--profile', name, '--port', String(port)], {
+          cwd: process.cwd(),
+          detached: true,
+          stdio: 'ignore',
+        })
+        child.unref()
+      }
       // Wait for the web server to answer (up to ~10s).
       const deadline = Date.now() + 10_000
       for (;;) {
@@ -259,7 +266,9 @@ export class PluginManagerService extends Service {
             ok: true,
             port,
             url: "http://127.0.0.1:" + port,
-            message: "started " + name + " on http://127.0.0.1:" + port,
+            message: terminal.opened
+              ? "opened " + name + " in " + terminal.terminal + " — closing that terminal stops the instance (" + terminal.command + ")"
+              : "started " + name + " in the background (no terminal emulator found) on http://127.0.0.1:" + port,
           }
         }
         await new Promise(resolve => setTimeout(resolve, 500))
@@ -539,6 +548,67 @@ function scanRuns(): Map<string, RunInfo> {
     /* ps unavailable: no runs reported */
   }
   return runs
+}
+/** Result of trying to open a terminal window. */
+interface TerminalOpen {
+  readonly opened: boolean
+  readonly terminal?: string
+  readonly command?: string
+}
+
+/**
+ * Open a terminal window running `command` (cross-platform). The instance
+ * then lives and dies with that terminal session. Linux probes common
+ * emulators; macOS uses Terminal.app via osascript; Windows uses
+ * `start cmd /k`. Returns opened=false when nothing is available.
+ */
+async function openInTerminal(command: string): Promise<TerminalOpen> {
+  if (process.platform === 'darwin') {
+    spawn('osascript', ['-e', 'tell application "Terminal" to do script "' + command.replace(/"/g, '\\"') + '"'], { stdio: 'ignore' }).unref()
+    return { opened: true, terminal: 'Terminal.app', command }
+  }
+  if (process.platform === 'win32') {
+    spawn('cmd', ['/c', 'start', '', 'cmd', '/k', command], { stdio: 'ignore' }).unref()
+    return { opened: true, terminal: 'cmd', command }
+  }
+  const candidates = [
+    'gnome-terminal', 'konsole', 'x-terminal-emulator', 'xterm', 'kitty', 'alacritty', 'wezterm',
+  ]
+  for (const bin of candidates) {
+    if (!hasBinary(bin)) continue
+    const argv = terminalArgs(bin, command)
+    try {
+      spawn(bin, argv, { stdio: 'ignore' }).unref()
+      return { opened: true, terminal: bin, command }
+    } catch {
+      /* try the next emulator */
+    }
+  }
+  return { opened: false }
+}
+
+/** Whether a binary exists on PATH. */
+function hasBinary(bin: string): boolean {
+  try {
+    execFileSync('which', [bin], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Terminal-emulator specific argv for running one command and keeping the window. */
+function terminalArgs(bin: string, command: string): string[] {
+  const body = ['bash', '-c', command + '; echo; read -p "Press Enter to close..."']
+  switch (bin) {
+    case 'gnome-terminal': return ['--', ...body]
+    case 'wezterm': return ['start', '--', ...body]
+    case 'konsole':
+    case 'x-terminal-emulator':
+    case 'xterm':
+    case 'alacritty': return ['-e', ...body]
+    default: return body
+  }
 }
 /** Find the first free port from `start` upward. */
 async function findFreePort(start: number): Promise<number> {
