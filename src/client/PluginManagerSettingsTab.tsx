@@ -11,6 +11,7 @@ import type {
   CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
+import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
 export interface PluginManagerTabInjected {
@@ -108,7 +109,9 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 
   const load = (profile: string): void => {
     if (profile.length === 0) return
-    setState({ status: 'loading' })
+    // Keep showing the previous snapshot during refreshes so the page does
+    // not collapse to the top (only the first load shows the loading state).
+    setState(current => current.status === 'ready' ? current : { status: 'loading' })
     void injected.current.list(profile).then(
       (snapshot) => setState({ status: 'ready', snapshot }),
       (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
@@ -185,18 +188,13 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   return (
     <div style={styles.section}>
       <div style={styles.toolbar}>
-        <label htmlFor="pm-profile" style={{ ...styles.filterLabel, display: 'inline-flex', alignItems: 'center' }}>{t('profileLabel')}</label>
-        <select
-          id="pm-profile"
-          style={styles.select}
+        <span style={styles.filterLabel}>{t('profileLabel')}</span>
+        <PmSelect
+          ariaLabel={t('profileLabel')}
           value={selected}
-          disabled={profileList.length === 0 || busy !== null}
-          onChange={(event) => onSelect(event.target.value)}
-        >
-          {profileList.map((profile) => (
-            <option key={profile.name} value={profile.name}>{profile.name}</option>
-          ))}
-        </select>
+          options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
+          onChange={onSelect}
+        />
         <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => load(selected)}>
           {t('refresh')}
         </Button>

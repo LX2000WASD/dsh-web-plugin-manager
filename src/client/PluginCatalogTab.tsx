@@ -12,6 +12,7 @@ import {
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
+import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
 export interface PluginCatalogTabInjected {
@@ -175,7 +176,9 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
 
   const load = (profile: string): void => {
     if (profile.length === 0) return
-    setState({ status: 'loading' })
+    // Keep showing the previous snapshot during refreshes so the page does
+    // not collapse to the top (only the first load shows the loading state).
+    setState(current => current.status === 'ready' ? current : { status: 'loading' })
     void injected.current.list(profile).then(
       (snapshot) => setState({ status: 'ready', snapshot }),
       (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
@@ -280,18 +283,13 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
 }
 `}</style>
       <div style={styles.toolbar}>
-        <label htmlFor="pm-profile" style={{ ...styles.filterLabel, display: 'inline-flex', alignItems: 'center' }}>{t('profileLabel')}</label>
-        <select
-          id="pm-profile"
-          style={styles.select}
+        <span style={styles.filterLabel}>{t('profileLabel')}</span>
+        <PmSelect
+          ariaLabel={t('profileLabel')}
           value={selected}
-          disabled={profileList.length === 0 || busy !== null}
-          onChange={(event) => onSelect(event.target.value)}
-        >
-          {profileList.map((profile) => (
-            <option key={profile.name} value={profile.name}>{profile.name}</option>
-          ))}
-        </select>
+          options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
+          onChange={onSelect}
+        />
         <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => load(selected)}>
           {t('refresh')}
         </Button>
@@ -316,25 +314,27 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
 
           <div style={styles.filterRow}>
             <span style={styles.filterLabel}>{t('filterLabel')}</span>
-            <select
-              style={styles.select}
+            <PmSelect
+              ariaLabel={t('filterLabel')}
               value={filter}
-              onChange={(event) => setFilter(event.currentTarget.value as CatalogFilter)}
-            >
-              <option value="installed">{t('filterInstalled')}</option>
-              <option value="builtin">{t('filterBuiltin')}</option>
-              <option value="all">{t('filterAll')}</option>
-            </select>
+              options={[
+                { value: 'installed', label: t('filterInstalled') },
+                { value: 'builtin', label: t('filterBuiltin') },
+                { value: 'all', label: t('filterAll') },
+              ]}
+              onChange={(value) => setFilter(value as CatalogFilter)}
+            />
             <span style={styles.filterLabel}>{t('sortLabel')}</span>
-            <select
-              style={styles.select}
+            <PmSelect
+              ariaLabel={t('sortLabel')}
               value={sort}
-              onChange={(event) => setSort(event.currentTarget.value as CatalogSort)}
-            >
-              <option value="default">{t('sortDefault')}</option>
-              <option value="az">{t('sortAz')}</option>
-              <option value="enabled">{t('sortEnabled')}</option>
-            </select>
+              options={[
+                { value: 'default', label: t('sortDefault') },
+                { value: 'az', label: t('sortAz') },
+                { value: 'enabled', label: t('sortEnabled') },
+              ]}
+              onChange={(value) => setSort(value as CatalogSort)}
+            />
             <Button size="sm" variant="ghost" onClick={() => setDescending(current => !current)}>
               {descending ? t('sortDesc') : t('sortAsc')}
             </Button>

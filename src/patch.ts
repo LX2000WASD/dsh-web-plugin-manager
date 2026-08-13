@@ -176,6 +176,103 @@ export function removeDisableBlock(content: string, entryId: string): string {
   return normalizeDocument(without)
 }
 
+/** Escaped literal for one row id inside a line-level regex. */
+function rowIdPattern(entryId: string): string {
+  return entryId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Line-level top-row regex for one entry id. */
+function topRowPattern(entryId: string): RegExp {
+  return new RegExp('^-\\s*id:\\s*' + rowIdPattern(entryId) + '\\s*$')
+}
+
+/**
+ * Line-level enable of a user-written top-level row: drop its `disabled:`
+ * child and, when nothing else remains under it, the row itself. Returns the
+ * new content and whether anything changed.
+ */
+export function applyRowEnabled(content: string, entryId: string): { content: string; changed: boolean } {
+  assertSafeEntryId(entryId)
+  const lines = content.length === 0 ? [] : content.split('\n')
+  const pattern = topRowPattern(entryId)
+  const out: string[] = []
+  let changed = false
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    if (pattern.test(line)) {
+      out.push(line)
+      i += 1
+      // Consume the row's indented subtree, dropping the disabled child.
+      const children: string[] = []
+      while (i < lines.length && lines[i]!.startsWith(' ')) {
+        const child = lines[i]!
+        if (/^\s*disabled:\s*(true|false)/.test(child)) {
+          changed = true
+          i += 1
+          continue
+        }
+        children.push(child)
+        i += 1
+      }
+      if (children.length === 0) {
+        // Nothing left under the row: drop the empty patch row too.
+        out.pop()
+      } else {
+        out.push(...children)
+      }
+      continue
+    }
+    out.push(line)
+    i += 1
+  }
+  return changed ? { content: normalizeDocument(out), changed: true } : { content, changed: false }
+}
+
+/**
+ * Line-level disable of a user-written top-level row: add or update its
+ * `disabled: true` child. Returns the new content and whether anything
+ * changed (false when no such top-level row exists — the caller falls back
+ * to the managed block).
+ */
+export function applyRowDisabled(content: string, entryId: string): { content: string; changed: boolean } {
+  assertSafeEntryId(entryId)
+  const lines = content.length === 0 ? [] : content.split('\n')
+  const pattern = topRowPattern(entryId)
+  const out: string[] = []
+  let changed = false
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    if (pattern.test(line)) {
+      out.push(line)
+      i += 1
+      let disabledSeen = false
+      while (i < lines.length && lines[i]!.startsWith(' ')) {
+        const child = lines[i]!
+        if (/^\s*disabled:\s*(true|false)/.test(child)) {
+          out.push('  disabled: true')
+          disabledSeen = true
+          changed = true
+          i += 1
+          continue
+        }
+        out.push(child)
+        i += 1
+      }
+      if (!disabledSeen) {
+        out.push('  disabled: true')
+        changed = true
+      }
+      continue
+    }
+    out.push(line)
+    i += 1
+  }
+  return changed ? { content: out.join('\n') + '\n', changed: true } : { content, changed: false }
+}
+
+
 /**
  * Add (or refresh) the insert block mounting one non-bundle plugin. The name
  * is single-quoted (YAML @ trap) and the row id is validated.

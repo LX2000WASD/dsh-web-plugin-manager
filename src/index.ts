@@ -40,8 +40,9 @@ import type {
   ProfileInfo, RuntimeEntry,
 } from './types.ts'
 import {
-  addDisableBlock, addInsertRow, hasManagedDisable, readInsertRows,
-  readManagedIds, removeDisableBlock, removeInsertRow, writePatch,
+  addDisableBlock, addInsertRow, applyRowDisabled, applyRowEnabled,
+  hasManagedDisable, readInsertRows, readManagedIds, removeDisableBlock,
+  removeInsertRow, writePatch,
 } from './patch.ts'
 import { registerTools } from './tools.ts'
 
@@ -222,10 +223,25 @@ export class PluginManagerService extends Service {
     }
     try {
       const current = readPatch(dir)
-      const next = enabled
-        ? removeDisableBlock(current, entryId)
-        : addDisableBlock(current, entryId)
-      if (next !== current) writePatch(patchPath(dir), next)
+      // 1. Drop our managed block first (refresh-in-place semantics; the
+      //    line-level edit must not see the block's own row).
+      const withoutBlock = removeDisableBlock(current, entryId)
+      // 2. Line-level edit of a user-written top-level row (the common case:
+      //    the row exists in the profile patch and its disabled field must
+      //    actually change).
+      const rowEdit = enabled
+        ? applyRowEnabled(withoutBlock, entryId)
+        : applyRowDisabled(withoutBlock, entryId)
+      if (rowEdit.changed) {
+        writePatch(patchPath(dir), rowEdit.content)
+      } else if (enabled) {
+        // No user row: enabling means the block removal above is the edit.
+        if (withoutBlock !== current) writePatch(patchPath(dir), withoutBlock)
+      } else {
+        // No user row: fall back to a managed block.
+        const next = addDisableBlock(withoutBlock, entryId)
+        if (next !== withoutBlock) writePatch(patchPath(dir), next)
+      }
       return {
         ok: true,
         message: enabled
