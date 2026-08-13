@@ -82,6 +82,16 @@ export interface MutationResult {
   readonly message: string
 }
 
+/** Result of launching a profile instance. */
+export interface StartResult {
+  readonly ok: boolean
+  /** Allocated port, when the instance started. */
+  readonly port?: number
+  /** Browser URL of the started instance. */
+  readonly url?: string
+  readonly message: string
+}
+
 /** Result of an install/remove subprocess run. */
 export interface CommandResult {
   readonly ok: boolean

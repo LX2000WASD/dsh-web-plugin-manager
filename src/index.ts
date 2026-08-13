@@ -26,7 +26,8 @@
  *    ctx.tools when the host provides it (src/tools.ts).
  */
 
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { connect, createServer } from 'node:net'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -37,7 +38,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
 import type {
   CommandResult, InsertRow, ManagedPackage, MutationResult, PluginManagerSnapshot,
-  ProfileInfo, RuntimeEntry,
+  ProfileInfo, RuntimeEntry, StartResult,
 } from './types.ts'
 import {
   addDisableBlock, addInsertRow, applyRowDisabled, applyRowEnabled,
@@ -219,6 +220,49 @@ export class PluginManagerService extends Service {
     try {
       rmSync(dir, { recursive: true, force: true })
       return { ok: true, message: "removed profile " + name }
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+
+  /**
+   * Launch a profile instance on a free port (web environments only) and
+   * wait until its web server answers. Returns the browser URL.
+   */
+  async startProfile(name: string): Promise<StartResult> {
+    const dir = profileDir(name)
+    if (!existsSync(dir)) return { ok: false, message: "profile not found: " + name }
+    const manifest = readManifest(dir)
+    const dsh = (manifest['dsh'] ?? {}) as Record<string, unknown>
+    const profileManifest = (dsh['profile'] ?? {}) as Record<string, unknown>
+    const bundles = Array.isArray(profileManifest['bundles']) ? profileManifest['bundles'] as string[] : []
+    if (!bundles.includes('@deepseek-ai/dsh-web-app')) {
+      return { ok: false, message: name + " has no web surface (not a web environment)" }
+    }
+    try {
+      const port = await findFreePort(3090)
+      const child = spawn('dsh', ['--profile', name, '--port', String(port)], {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: 'ignore',
+      })
+      child.unref()
+      // Wait for the web server to answer (up to ~10s).
+      const deadline = Date.now() + 10_000
+      for (;;) {
+        if (Date.now() > deadline) break
+        if (await probePort(port)) {
+          return {
+            ok: true,
+            port,
+            url: "http://127.0.0.1:" + port,
+            message: "started " + name + " on http://127.0.0.1:" + port,
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+      return { ok: false, port, message: "started but did not become ready within 10s: http://127.0.0.1:" + port }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
@@ -426,6 +470,32 @@ async function installSpec(profile: string, spec: string): Promise<CommandResult
     }
   }
 }
+/** Find the first free port from `start` upward. */
+async function findFreePort(start: number): Promise<number> {
+  for (let port = start; port < start + 200; port += 1) {
+    const free = await new Promise<boolean>((resolve) => {
+      const server = createServer()
+      server.once('error', () => resolve(false))
+      server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)))
+    })
+    if (free) return port
+  }
+  throw new Error('no free port found')
+}
+
+/** Whether a TCP port accepts connections. */
+function probePort(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect(port, '127.0.0.1')
+    const done = (ok: boolean): void => {
+      socket.destroy()
+      resolve(ok)
+    }
+    socket.once('connect', () => done(true))
+    socket.once('error', () => done(false))
+  })
+}
+
 /** A loader entry with the fields we read (structural, loader types stay optional). */
 interface RowEntryLike {
   readonly id: string
@@ -736,6 +806,11 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.createProfile(name, template) })
           return
         }
+        case 'startProfile': {
+          const name = typeof body['name'] === 'string' ? body['name'] : ''
+          sendJson(res, 200, { ok: true, value: await service.startProfile(name) })
+          return
+        }
         case 'copyPlugins': {
           const from = typeof body['from'] === 'string' ? body['from'] : ''
           const to = typeof body['to'] === 'string' ? body['to'] : ''
@@ -772,7 +847,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

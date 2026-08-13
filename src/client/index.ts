@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
-  CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo,
+  CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
 } from '../types.ts'
 import {
   PluginCatalogTab, type PluginCatalogTabInjected,
@@ -105,6 +105,7 @@ export function apply(ctx: ClientContext): void {
   const environmentsInjected = (): PluginEnvironmentsTabInjected => ({
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
     copyPlugins: (from, to, names) => call<CommandResult>('copyPlugins', { from, to, names }),
+    startProfile: (name) => call<StartResult>('startProfile', { name }),
     createProfile: (name, template) => call<MutationResult>('createProfile', { name, template }),
     renameProfile: (oldName, newName) => call<MutationResult>('renameProfile', { oldName, newName }),
     removeProfile: (name) => call<MutationResult>('removeProfile', { name }),

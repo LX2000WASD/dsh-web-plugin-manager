@@ -4,9 +4,9 @@
  */
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommandResult, MutationResult, ProfileInfo } from '../types.ts'
+import type { CommandResult, MutationResult, ProfileInfo, StartResult } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
 
@@ -14,6 +14,7 @@ import { PmSelect } from './PmSelect.tsx'
 export interface PluginEnvironmentsTabInjected {
   readonly profiles: () => Promise<ProfileInfo[]>
   readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
+  readonly startProfile: (name: string) => Promise<StartResult>
   readonly createProfile: (name: string, template: string) => Promise<MutationResult>
   readonly renameProfile: (oldName: string, newName: string) => Promise<MutationResult>
   readonly removeProfile: (name: string) => Promise<MutationResult>
@@ -67,6 +68,21 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-state-success-primary)',
   },
   status: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)', margin: 0 },
+  cardHeader: {
+    boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: '8px',
+    width: '100%', minHeight: '52px', padding: '0 10px 0 0',
+  },
+  titleButton: {
+    boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    gap: '12px', flex: 1, minWidth: 0, minHeight: '52px', border: 0, padding: '12px 14px',
+    background: 'transparent', color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer',
+  },
+  cardTrailing: { display: 'inline-flex', flex: 'none', alignItems: 'center', gap: '7px', minWidth: 0 },
+  cardDetails: {
+    borderTop: '1px solid var(--dsw-alias-border-l2)', padding: '10px 14px 12px',
+    background: 'var(--dsw-alias-bg-module-platform)',
+  },
+  detailsActions: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
   output: {
@@ -79,18 +95,19 @@ const styles: Record<string, React.CSSProperties> = {
 }
 
 /** Render the environment management tab. */
-export function PluginEnvironmentsTab({ profiles, copyPlugins, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
+export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [newName, setNewName] = useState('')
   const [template, setTemplate] = useState('web')
   const [output, setOutput] = useState('')
+  const [expanded, setExpanded] = useState<string | null>(null)
   // Plugin transfer state: package names, source, target.
   const [transferNames, setTransferNames] = useState('')
   const [transferFrom, setTransferFrom] = useState('')
   const [transferTo, setTransferTo] = useState('')
 
-  const injected = useRef({ profiles, copyPlugins, createProfile, renameProfile, removeProfile })
+  const injected = useRef({ profiles, copyPlugins, startProfile, createProfile, renameProfile, removeProfile })
 
   const refresh = (): void => {
     void injected.current.profiles().then(setProfileList, () => { /* keep last list */ })
@@ -139,6 +156,17 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, createProfile, re
     }
   }
 
+  const onStart = async (name: string): Promise<void> => {
+    setBusy('start-' + name)
+    try {
+      const result = await injected.current.startProfile(name)
+      setOutput(result.message)
+      if (result.ok && result.url !== undefined) window.open(result.url, '_blank')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const onTransfer = async (): Promise<void> => {
     const names = transferNames.split(/[,\s]+/).map(name => name.trim()).filter(name => name.length > 0)
     if (names.length === 0 || transferFrom.length === 0 || transferTo.length === 0) return
@@ -154,33 +182,72 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, createProfile, re
 
   return (
     <div style={styles.section}>
+      <style>{`
+.pm-card {
+  min-width: 0; overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-3);
+}
+.pm-card[data-open='true'] { border-color: var(--dsw-alias-border-l1); }
+.pm-card-title-btn:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -2px;
+}
+`}</style>
       <div style={styles.heading}>
         <h3 style={styles.headingTitle}>{t('envList')}</h3>
         <span style={styles.headingCount}>{profileList.length}</span>
       </div>
       {profileList.length === 0 ? <p style={styles.status}>{t('noProfiles')}</p> : (
         <ul style={styles.cards}>
-          {profileList.map((profile) => (
-            <li key={profile.name} style={styles.card}>
-              <div style={styles.cardRow}>
-                <span style={styles.cardTitle} title={profile.name}>{profile.name}</span>
-                {profile.isOfficial ? <span style={styles.tag}>{t('officialBadge')}</span> : null}
-                {profile.isCurrent ? <span style={{ ...styles.tag, ...styles.tagOn }}>{t('currentBadge')}</span> : null}
-                <span style={{ marginLeft: 'auto' }}>
-                  {!profile.isOfficial && !profile.isCurrent && (
-                    <>
-                      <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRename(profile.name)}>
-                        {t('renameButton')}
+          {profileList.map((profile) => {
+            const open = expanded === profile.name
+            const canStart = profile.bundles.includes('@deepseek-ai/dsh-web-app')
+            return (
+              <li key={profile.name} className="pm-card" data-open={open ? 'true' : undefined}>
+                <div style={styles.cardHeader}>
+                  <button
+                    className="pm-card-title-btn"
+                    style={styles.titleButton}
+                    type="button"
+                    aria-expanded={open}
+                    onClick={() => setExpanded(current => current === profile.name ? null : profile.name)}
+                  >
+                    <span style={styles.cardTitle} title={profile.name}>{profile.name}</span>
+                    <span style={styles.cardTrailing}>
+                      {profile.isOfficial ? <span style={styles.tag}>{t('officialBadge')}</span> : null}
+                      {profile.isCurrent ? <span style={{ ...styles.tag, ...styles.tagOn }}>{t('currentBadge')}</span> : null}
+                      <IconChevronDownOutline14 size={12} aria-hidden="true" />
+                    </span>
+                  </button>
+                  {canStart && (
+                    <span style={{ flex: 'none' }}>
+                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onStart(profile.name)}>
+                        {busy === 'start-' + profile.name ? t('starting') : t('startButton')}
                       </Button>
-                      <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRemove(profile.name)}>
-                        {t('removeButton')}
-                      </Button>
-                    </>
+                    </span>
                   )}
-                </span>
-              </div>
-            </li>
-          ))}
+                </div>
+                {open && (
+                  <div style={styles.cardDetails}>
+                    <div style={styles.detailsActions}>
+                      {!profile.isOfficial && !profile.isCurrent && (
+                        <>
+                          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRename(profile.name)}>
+                            {t('renameButton')}
+                          </Button>
+                          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRemove(profile.name)}>
+                            {t('removeButton')}
+                          </Button>
+                        </>
+                      )}
+                      {profile.isOfficial && <span style={styles.filterLabel}>{t('officialReadonly')}</span>}
+                    </div>
+                  </div>
+                )}
+              </li>
+            )
+          })}
         </ul>
       )}
 
