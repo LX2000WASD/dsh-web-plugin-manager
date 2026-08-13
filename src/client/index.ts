@@ -19,10 +19,14 @@ import {
 import {
   PluginManagerSettingsTab, type PluginManagerTabInjected,
 } from './PluginManagerSettingsTab.tsx'
+import {
+  PluginEnvironmentsTab, type PluginEnvironmentsTabInjected,
+} from './PluginEnvironmentsTab.tsx'
 import { en, zh, type PluginManagerLocaleKey } from './locales.ts'
 
 export type { PluginCatalogTabInjected, PluginCatalogTabProps } from './PluginCatalogTab.tsx'
 export type { PluginManagerTabInjected, PluginManagerTabProps } from './PluginManagerSettingsTab.tsx'
+export type { PluginEnvironmentsTabInjected, PluginEnvironmentsTabProps } from './PluginEnvironmentsTab.tsx'
 export type { PluginManagerLocaleKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -74,9 +78,7 @@ export function apply(ctx: ClientContext): void {
     install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
     remove: (profile, name) => call<CommandResult>('remove', { profile, name }),
     removeInsert: (profile, rowId) => call<MutationResult>('removeInsert', { profile, rowId }),
-    createProfile: (name) => call<MutationResult>('createProfile', { name }),
-    renameProfile: (oldName, newName) => call<MutationResult>('renameProfile', { oldName, newName }),
-    removeProfile: (name) => call<MutationResult>('removeProfile', { name }),
+    copyPlugins: (from, to, names) => call<CommandResult>('copyPlugins', { from, to, names }),
   })
 
   // Shadow the official read-only inventory: same slot id 'all', lower
@@ -99,4 +101,20 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: managerInjected,
   }, PluginManagerSettingsTab))
+
+  const environmentsInjected = (): PluginEnvironmentsTabInjected => ({
+    profiles: () => call<ProfileInfo[]>('listProfiles', {}),
+    createProfile: (name, template) => call<MutationResult>('createProfile', { name, template }),
+    renameProfile: (oldName, newName) => call<MutationResult>('renameProfile', { oldName, newName }),
+    removeProfile: (name) => call<MutationResult>('removeProfile', { name }),
+  })
+
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: 'environments',
+    order: 30,
+    label: () => t('envTab'),
+    locale: NS,
+    inject: environmentsInjected,
+  }, PluginEnvironmentsTab))
 }

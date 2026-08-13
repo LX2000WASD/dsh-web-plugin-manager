@@ -20,9 +20,7 @@ export interface PluginManagerTabInjected {
   readonly install: (profile: string, spec: string) => Promise<CommandResult>
   readonly remove: (profile: string, name: string) => Promise<CommandResult>
   readonly removeInsert: (profile: string, rowId: string) => Promise<MutationResult>
-  readonly createProfile: (name: string) => Promise<MutationResult>
-  readonly renameProfile: (oldName: string, newName: string) => Promise<MutationResult>
-  readonly removeProfile: (name: string) => Promise<MutationResult>
+  readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -99,7 +97,7 @@ const styles: Record<string, React.CSSProperties> = {
 }
 
 /** Render the management tab. */
-export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, createProfile, renameProfile, removeProfile, t }: PluginManagerTabProps): ReactNode {
+export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, t }: PluginManagerTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
   const [state, setState] = useState<ViewState>({ status: 'loading' })
@@ -108,7 +106,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const [output, setOutput] = useState<string>('')
 
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
-  const injected = useRef({ profiles, list, install, remove, removeInsert, createProfile, renameProfile, removeProfile })
+  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins })
 
   const load = (profile: string): void => {
     if (profile.length === 0) return
@@ -184,55 +182,17 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     }
   }
 
-  const [newProfile, setNewProfile] = useState('')
+  // Copy-to-environment: per-package target selection.
+  const [copyTargets, setCopyTargets] = useState<Record<string, string>>({})
+  const otherEnvironments = profileList.filter(profile => profile.name !== selected)
 
-  const refreshProfiles = (): void => {
-    void injected.current.profiles().then((items) => {
-      setProfileList(items)
-      if (!items.some(profile => profile.name === selected)) {
-        const current = items.find(profile => profile.isCurrent === true) ?? items[0]
-        if (current !== undefined) {
-          setSelected(current.name)
-          load(current.name)
-        }
-      }
-    }, () => { /* keep the last list on failure */ })
-  }
-
-  const onCreateProfile = async (): Promise<void> => {
-    const name = newProfile.trim()
-    if (name.length === 0) return
-    setBusy('profile-create')
+  const onCopy = async (pkgName: string): Promise<void> => {
+    const target = copyTargets[pkgName] ?? otherEnvironments[0]?.name
+    if (target === undefined) return
+    setBusy('copy-' + pkgName)
     try {
-      const result = await injected.current.createProfile(name)
-      setOutput(result.message)
-      setNewProfile('')
-      refreshProfiles()
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const onRenameProfile = async (oldName: string): Promise<void> => {
-    const newName = window.prompt(t('renamePrompt'), oldName)
-    if (newName === null || newName.trim().length === 0 || newName.trim() === oldName) return
-    setBusy('profile-rename')
-    try {
-      const result = await injected.current.renameProfile(oldName, newName.trim())
-      setOutput(result.message)
-      refreshProfiles()
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const onRemoveProfile = async (name: string): Promise<void> => {
-    if (!window.confirm(t('confirmRemoveProfile') + ' ' + name + '?')) return
-    setBusy('profile-remove')
-    try {
-      const result = await injected.current.removeProfile(name)
-      setOutput(result.message)
-      refreshProfiles()
+      const result = await injected.current.copyPlugins(selected, target, [pkgName])
+      setOutput('$ copy ' + pkgName + ' -> ' + target + '\n' + result.output)
     } finally {
       setBusy(null)
     }
@@ -276,6 +236,19 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                       {pkg.isBundle ? t('bundleBadge') : t('dependencyBadge')}
                     </span>
                     <span style={{ marginLeft: 'auto' }}>
+                      {otherEnvironments.length > 0 && (
+                        <>
+                          <PmSelect
+                            ariaLabel={t('copyToLabel')}
+                            value={copyTargets[pkg.name] ?? otherEnvironments[0]!.name}
+                            options={otherEnvironments.map(profile => ({ value: profile.name, label: profile.name }))}
+                            onChange={(value) => setCopyTargets(current => ({ ...current, [pkg.name]: value }))}
+                          />
+                          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onCopy(pkg.name)}>
+                            {t('copyButton')}
+                          </Button>
+                        </>
+                      )}
                       <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRemove(pkg.name)}>
                         {t('removeButton')}
                       </Button>
@@ -328,43 +301,6 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
             </Button>
           </div>
 
-
-          <div style={styles.heading}>
-            <h3 style={styles.headingTitle}>{t('envManage')}</h3>
-            <span style={styles.headingCount}>{profileList.filter(p => !p.isOfficial).length}</span>
-          </div>
-          <ul style={styles.cards}>
-            {profileList.filter(p => !p.isOfficial).map((profile) => (
-              <li key={profile.name} style={styles.card}>
-                <div style={styles.cardRow}>
-                  <span style={styles.cardTitle} title={profile.name}>{profile.name}</span>
-                  {profile.isCurrent ? <span style={{ ...styles.tag, ...styles.tagOn }}>{t("currentBadge")}</span> : null}
-                  <span style={{ marginLeft: 'auto' }}>
-                    <Button size="sm" variant="ghost" disabled={busy !== null || profile.isCurrent} onClick={() => void onRenameProfile(profile.name)}>
-                      {t('renameButton')}
-                    </Button>
-                    <Button size="sm" variant="ghost" disabled={busy !== null || profile.isCurrent} onClick={() => void onRemoveProfile(profile.name)}>
-                      {t('removeButton')}
-                    </Button>
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
-          <div style={styles.toolbar}>
-            <Input
-              type="text"
-              value={newProfile}
-              placeholder={t("createPlaceholder")}
-              disabled={busy !== null}
-              onChange={(event) => setNewProfile(event.currentTarget.value)}
-              onKeyDown={(event) => { if (event.key === 'Enter') void onCreateProfile() }}
-              style={{ flex: 1 }}
-            />
-            <Button variant="primary" disabled={busy !== null || newProfile.trim().length === 0} onClick={() => void onCreateProfile()}>
-              {t('createButton')}
-            </Button>
-          </div>
 
           {output.length > 0 && (
             <div>

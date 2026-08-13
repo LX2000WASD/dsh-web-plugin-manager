@@ -157,25 +157,33 @@ export class PluginManagerService extends Service {
   }
 
 
-  /** Create a minimal custom profile (official skeleton, empty bundle stack). */
-  createProfile(name: string): MutationResult {
+  /** Create a custom profile from an official template (web/headless). */
+  async createProfile(name: string, template: string): Promise<MutationResult> {
     if (!/^[A-Za-z0-9._-]+$/.test(name) || name.length > 120) {
       return { ok: false, message: "invalid profile name: " + JSON.stringify(name) }
     }
     if (isOfficialProfile(name)) return { ok: false, message: name + " is an official profile" }
     const dir = profileDir(name)
     if (existsSync(dir)) return { ok: false, message: "profile already exists: " + name }
+    const bundles = template === "headless"
+      ? ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"]
+      : ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
     try {
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, "package.json"), JSON.stringify({
         name: "dsh-profile-" + name,
         private: true,
         dependencies: {},
-        dsh: { profile: { bundles: [] } },
+        // Template layer stack, official-style (bundles are not deps).
+        dsh: { profile: { bundles } },
       }, undefined, 2) + "\n")
       writeFileSync(join(dir, "cordis.patch.yml"), PATCH_TEMPLATE)
       writeFileSync(join(dir, "pnpm-workspace.yaml"), PNPM_WORKSPACE_TEMPLATE)
-      return { ok: true, message: "created profile " + name }
+      // Official bundles resolve through the shared profiles/node_modules
+      // fallback (official web/headless have no own node_modules either),
+      // so the template is just the declared layer stack. Custom plugins
+      // install into this profile via pnpm as usual.
+      return { ok: true, message: "created " + template + " profile " + name }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
@@ -324,35 +332,35 @@ export class PluginManagerService extends Service {
    * it live, no restart.
    */
   async install(profile: string, spec: string): Promise<CommandResult> {
-    const before = readBundles(profile)
-    const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
-    if (!result.ok) return result
-    restoreInBoxBundles(profile, before)
-    const installed = resolveInstalledName(profile, spec)
-    if (installed === null || exportsBundlePatch(profile, installed)) {
-      return { ...result, installed: installed !== null ? [installed] : [] }
+    return installSpec(profile, spec)
+  }
+
+  /**
+   * Copy installed plugins from one profile to another (custom-plugin
+   * transfer). Each package is reinstalled into the target using its
+   * recorded install source (path/git/tarball/name).
+   */
+  async copyPlugins(fromProfile: string, toProfile: string, names: readonly string[]): Promise<CommandResult> {
+    if (!existsSync(profileDir(fromProfile))) return { ok: false, exitCode: 1, output: "source profile not found: " + fromProfile }
+    if (!existsSync(profileDir(toProfile))) return { ok: false, exitCode: 1, output: "target profile not found: " + toProfile }
+    const manifest = readManifest(profileDir(fromProfile)) as { dependencies?: Record<string, string> }
+    const deps = manifest.dependencies ?? {}
+    const outputs: string[] = []
+    let allOk = true
+    for (const name of names) {
+      const source = typeof deps[name] === 'string' && deps[name] !== '' ? deps[name] : name
+      const result = await installSpec(toProfile, source)
+      outputs.push("# " + name + " -> " + toProfile + ": " + (result.ok ? "ok" : "FAILED") + "\n" + result.output.trim())
+      if (!result.ok) allOk = false
     }
-    // Non-bundle plugin: write the managed insert row (live mount).
-    const rowId = slugify(installed)
-    try {
-      const dir = profileDir(profile)
-      const current = readPatch(dir)
-      const next = addInsertRow(current, rowId, installed)
-      if (next !== current) writePatch(patchPath(dir), next)
-      return {
-        ...result,
-        installed: [installed],
-        output: result.output
-          + `\n[plugin-manager] mounted ${installed} as insert row ${rowId} (live via config HMR)`,
-      }
-    } catch (error: unknown) {
-      return {
-        ...result,
-        installed: [installed],
-        output: result.output + `\n[plugin-manager] install ok but insert row failed: ${error instanceof Error ? error.message : String(error)}`,
-      }
+    return {
+      ok: allOk,
+      exitCode: allOk ? 0 : 1,
+      output: outputs.join("\n\n"),
+      installed: [...names],
     }
   }
+
 
   /** Remove an installed bundle via dsh plugin (preserving in-box bundles). */
   async remove(profile: string, name: string): Promise<CommandResult> {
@@ -382,6 +390,41 @@ export class PluginManagerService extends Service {
   }
 }
 
+/**
+ * Shared install path: pnpm add through the official CLI, resolve the real
+ * package name, mount non-bundle plugins as managed insert rows, and
+ * restore in-box bundles the reconcile may have dropped.
+ */
+async function installSpec(profile: string, spec: string): Promise<CommandResult> {
+  const before = readBundles(profile)
+  const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
+  if (!result.ok) return result
+  restoreInBoxBundles(profile, before)
+  const installed = resolveInstalledName(profile, spec)
+  if (installed === null || exportsBundlePatch(profile, installed)) {
+    return { ...result, installed: installed !== null ? [installed] : [] }
+  }
+  // Non-bundle plugin: write the managed insert row (live mount).
+  const rowId = slugify(installed)
+  try {
+    const dir = profileDir(profile)
+    const current = readPatch(dir)
+    const next = addInsertRow(current, rowId, installed)
+    if (next !== current) writePatch(patchPath(dir), next)
+    return {
+      ...result,
+      installed: [installed],
+      output: result.output
+        + `\n[plugin-manager] mounted ${installed} as insert row ${rowId} (live via config HMR)`,
+    }
+  } catch (error: unknown) {
+    return {
+      ...result,
+      installed: [installed],
+      output: result.output + `\n[plugin-manager] install ok but insert row failed: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
 /** A loader entry with the fields we read (structural, loader types stay optional). */
 interface RowEntryLike {
   readonly id: string
@@ -649,7 +692,15 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         }
         case 'createProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          sendJson(res, 200, { ok: true, value: service.createProfile(name) })
+          const template = typeof body['template'] === 'string' ? body['template'] : 'web'
+          sendJson(res, 200, { ok: true, value: await service.createProfile(name, template) })
+          return
+        }
+        case 'copyPlugins': {
+          const from = typeof body['from'] === 'string' ? body['from'] : ''
+          const to = typeof body['to'] === 'string' ? body['to'] : ''
+          const names = Array.isArray(body['names']) ? body['names'] as string[] : []
+          sendJson(res, 200, { ok: true, value: await service.copyPlugins(from, to, names) })
           return
         }
         case 'renameProfile': {
@@ -681,7 +732,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers
