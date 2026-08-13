@@ -305,10 +305,6 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                             <dd>{pkg.installedAt !== undefined ? formatTime(pkg.installedAt) : t('unknown')}</dd>
                           </div>
                           <div style={styles.detailsRow}>
-                            <dt>{t('updatedAt')}</dt>
-                            <dd>{t('unknown')}</dd>
-                          </div>
-                          <div style={styles.detailsRow}>
                             <dt>{t('repository')}</dt>
                             <dd>
                               {pkg.repository !== undefined ? (

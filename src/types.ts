@@ -45,14 +45,11 @@ export interface ManagedPackage {
   readonly isBundle: boolean
   /** Whether this package is listed in dsh.profile.bundles. */
   readonly inLayerStack: boolean
-  /** Disabled-by-manager patch ids affecting rows this package owns, if any. */
-  readonly managedDisabledIds: readonly string[]
+
   /** Installed version from the package manifest. */
   readonly version?: string
   /** Install time (node_modules link mtime). */
   readonly installedAt?: string
-  /** Last update time; not tracked yet (reserved for the future marketplace). */
-  readonly updatedAt?: string
   /** Upstream repository URL from the package manifest, when declared. */
   readonly repository?: string
 }

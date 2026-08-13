@@ -388,9 +388,6 @@ export class PluginManagerService extends Service {
         name,
         isBundle,
         inLayerStack: isBundle,
-        managedDisabledIds: isBundle && hasManagedDisable(patchPath(dir), name)
-          ? [name]
-          : [],
         ...readPackageInfo(dir, name),
       }
     })
@@ -1055,7 +1052,6 @@ function includeRows(ctx: Context, installed: InstalledSets): RuntimeEntry[] {
 function readPackageInfo(dir: string, name: string): {
   version?: string
   installedAt?: string
-  updatedAt?: string
   repository?: string
 } {
   const pkgPath = join(dir, 'node_modules', name, 'package.json')
@@ -1082,8 +1078,6 @@ function readPackageInfo(dir: string, name: string): {
     return {
       ...(typeof manifest.version === 'string' ? { version: manifest.version } : {}),
       ...(installedAt !== undefined ? { installedAt } : {}),
-      // Last-update tracking is not available yet (reserved for the future marketplace).
-      updatedAt: undefined,
       ...(repository !== undefined ? { repository } : {}),
     }
   } catch {
