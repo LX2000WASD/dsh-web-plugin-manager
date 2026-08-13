@@ -441,11 +441,14 @@ export class PluginManagerService extends Service {
   }
 
 
-  /** Remove an installed bundle via dsh plugin (preserving in-box bundles). */
+  /** Remove an installed package via dsh plugin (preserving in-box bundles). */
   async remove(profile: string, name: string): Promise<CommandResult> {
     const before = readBundles(profile)
     const result = await runDshPlugin(profile, 'remove', [name], process.cwd())
-    if (result.ok) restoreInBoxBundles(profile, before)
+    if (result.ok) {
+      restoreInBoxBundles(profile, before)
+      cleanupInsertRows(profile, name)
+    }
     return result
   }
 
@@ -571,8 +574,12 @@ async function openInTerminal(command: string): Promise<TerminalOpen> {
     spawn('cmd', ['/c', 'start', '', 'cmd', '/k', command], { stdio: 'ignore' }).unref()
     return { opened: true, terminal: 'cmd', command }
   }
+  // The user's explicit choice, then the system default terminal selector
+  // (x-terminal-emulator / update-alternatives), then common emulators.
+  const envTerminal = process.env.TERMINAL?.trim()
   const candidates = [
-    'gnome-terminal', 'konsole', 'x-terminal-emulator', 'xterm', 'kitty', 'alacritty', 'wezterm',
+    ...(envTerminal !== undefined && envTerminal.length > 0 ? [envTerminal.split(/\s+/)[0]!] : []),
+    'x-terminal-emulator', 'gnome-terminal', 'konsole', 'xterm', 'kitty', 'alacritty', 'wezterm',
   ]
   for (const bin of candidates) {
     if (!hasBinary(bin)) continue
@@ -782,6 +789,29 @@ function exportsBundlePatch(profile: string, packageName: string): boolean {
 /** Turn a package name into a safe insert-row id (scope slash → dash). */
 function slugify(name: string): string {
   return name.replace(/^@/, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase()
+}
+
+/**
+ * Remove managed insert rows whose package was just removed from the
+ * profile. A leftover insert row would fail to import on the next boot
+ * (the package directory is gone) — the bug that took the instance down
+ * during V2 testing.
+ */
+function cleanupInsertRows(profile: string, packageName: string): void {
+  try {
+    const dir = profileDir(profile)
+    const current = readPatch(dir)
+    const rows = readInsertRows(current)
+    let next = current
+    for (const row of rows) {
+      if (!row.managed || row.name !== packageName) continue
+      const result = removeInsertRow(next, row.id)
+      if (result.removed) next = result.content
+    }
+    if (next !== current) writePatch(patchPath(dir), next)
+  } catch {
+    /* patch cleanup is best-effort */
+  }
 }
 
 /** Read the current bundle list of a profile. */

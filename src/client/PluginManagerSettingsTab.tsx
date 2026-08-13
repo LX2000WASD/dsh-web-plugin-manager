@@ -4,7 +4,7 @@
  * tab only manages installation state.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -116,6 +116,10 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: '13px',
   },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+  foldButton: {
+    border: 0, background: 'transparent', padding: 0, cursor: 'pointer',
+    color: 'var(--dsw-alias-label-primary)', textAlign: 'left',
+  },
 }
 
 /** Format an ISO timestamp for display (local time). */
@@ -214,6 +218,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   }
 
   const [expandedPkg, setExpandedPkg] = useState<string | null>(null)
+  const [outputOpen, setOutputOpen] = useState(true)
 
   const snapshot = state.status === 'ready' ? state.snapshot : undefined
   const packages = useMemo(() => snapshot?.packages ?? [], [snapshot])
@@ -251,6 +256,21 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 
       {snapshot !== undefined && (
         <>
+          <div style={styles.toolbar}>
+            <Input
+              type="text"
+              value={spec}
+              placeholder={t('installPlaceholder')}
+              disabled={busy !== null}
+              onChange={(event: React.ChangeEvent<HTMLInputElement>) => setSpec(event.currentTarget.value)}
+              onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') void onInstall() }}
+              style={{ flex: 1 }}
+            />
+            <Button variant="primary" disabled={busy !== null || spec.trim().length === 0} onClick={() => void onInstall()}>
+              {busy === 'install' ? t('installing') : t('installButton')}
+            </Button>
+          </div>
+
           <div style={styles.heading}>
             <h3 style={styles.headingTitle}>{t('packages')}</h3>
             <span style={styles.headingCount}>{packages.length}</span>
@@ -345,8 +365,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
               value={spec}
               placeholder={t('installPlaceholder')}
               disabled={busy !== null}
-              onChange={(event) => setSpec(event.currentTarget.value)}
-              onKeyDown={(event) => { if (event.key === 'Enter') void onInstall() }}
+              onChange={(event: React.ChangeEvent<HTMLInputElement>) => setSpec(event.currentTarget.value)}
+              onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') void onInstall() }}
               style={{ flex: 1 }}
             />
             <Button variant="primary" disabled={busy !== null || spec.trim().length === 0} onClick={() => void onInstall()}>
@@ -358,9 +378,15 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
           {output.length > 0 && (
             <div>
               <div style={styles.heading}>
-                <h3 style={styles.headingTitle}>{t('commandOutput')}</h3>
+                <button
+                  type="button"
+                  style={{ ...styles.headingTitle, ...styles.foldButton }}
+                  onClick={() => setOutputOpen(current => !current)}
+                >
+                  {outputOpen ? '▾ ' : '▸ '}{t('commandOutput')}
+                </button>
               </div>
-              <pre style={styles.output}>{output}</pre>
+              {outputOpen && <pre style={styles.output}>{output}</pre>}
             </div>
           )}
         </>

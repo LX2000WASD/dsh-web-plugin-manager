@@ -3,7 +3,7 @@
  * (official web/headless are read-only), with web/headless templates.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import React, { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CommandResult, MutationResult, ProfileInfo, StartResult } from '../types.ts'
@@ -267,8 +267,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
           value={newName}
           placeholder={t('createPlaceholder')}
           disabled={busy !== null}
-          onChange={(event) => setNewName(event.currentTarget.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter') void onCreate() }}
+          onChange={(event: React.ChangeEvent<HTMLInputElement>) => setNewName(event.currentTarget.value)}
+          onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') void onCreate() }}
           style={{ width: '100%' }}
         />
         <div style={styles.toolbar}>
@@ -296,8 +296,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, cre
           value={transferNames}
           placeholder={t('transferPlaceholder')}
           disabled={busy !== null}
-          onChange={(event) => setTransferNames(event.currentTarget.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter') void onTransfer() }}
+          onChange={(event: React.ChangeEvent<HTMLInputElement>) => setTransferNames(event.currentTarget.value)}
+          onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') void onTransfer() }}
           style={{ width: '100%' }}
         />
         <div style={styles.toolbar}>
