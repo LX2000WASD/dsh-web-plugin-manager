@@ -474,8 +474,10 @@ export class PluginManagerService extends Service {
 
 /**
  * Shared install path: pnpm add through the official CLI, resolve the real
- * package name, mount non-bundle plugins as managed insert rows, and
- * restore in-box bundles the reconcile may have dropped.
+ * package name, mount non-bundle plugins as managed insert rows, restore
+ * in-box bundles, and run a quality check (undeclared runtime imports are
+ * the main reason third-party plugins take the instance down at boot —
+ * auto-rollback on failure).
  */
 async function installSpec(profile: string, spec: string): Promise<CommandResult> {
   const before = readBundles(profile)
@@ -483,9 +485,31 @@ async function installSpec(profile: string, spec: string): Promise<CommandResult
   if (!result.ok) return result
   restoreInBoxBundles(profile, before)
   const installed = resolveInstalledName(profile, spec)
-  if (installed === null || exportsBundlePatch(profile, installed)) {
-    return { ...result, installed: installed !== null ? [installed] : [] }
+  if (installed === null) return { ...result, installed: [] }
+
+  // Quality gate: scan the installed package entry for imports its manifest
+  // does not declare and the loader does not provide. Undeclared deps fail
+  // at boot (ERR_MODULE_NOT_FOUND) and take the whole profile down.
+  const issues = qualityIssues(profile, installed)
+  if (issues.length > 0) {
+    // Roll back: remove the dependency and any insert row written below.
+    await runDshPlugin(profile, 'remove', [installed], process.cwd())
+    restoreInBoxBundles(profile, before)
+    cleanupInsertRows(profile, installed)
+    return {
+      ok: false,
+      exitCode: 1,
+      output: result.output
+        + "\n[plugin-manager] QUALITY CHECK FAILED for " + installed + ":"
+        + issues.map(issue => "\n  - " + issue).join("")
+        + "\n[plugin-manager] rolled back the install to keep the profile bootable.",
+      installed: [installed],
+    }
   }
+
+  const isBundle = exportsBundlePatch(profile, installed)
+  if (isBundle) return { ...result, installed: [installed] }
+
   // Non-bundle plugin: write the managed insert row (live mount).
   const rowId = slugify(installed)
   try {
@@ -497,15 +521,93 @@ async function installSpec(profile: string, spec: string): Promise<CommandResult
       ...result,
       installed: [installed],
       output: result.output
-        + `\n[plugin-manager] mounted ${installed} as insert row ${rowId} (live via config HMR)`,
+        + "\n[plugin-manager] quality check passed; mounted " + installed + " as insert row " + rowId + " (live via config HMR)",
     }
   } catch (error: unknown) {
     return {
       ...result,
       installed: [installed],
-      output: result.output + `\n[plugin-manager] install ok but insert row failed: ${error instanceof Error ? error.message : String(error)}`,
+      output: result.output + "\n[plugin-manager] install ok but insert row failed: " + (error instanceof Error ? error.message : String(error)),
     }
   }
+}
+
+/**
+ * Specifiers the loader provides without the plugin declaring them: the
+ * client platform table plus the host-side cordis/dsh basics the profile
+ * bundles mount. Anything else a plugin imports must be in its manifest.
+ */
+const LOADER_PROVIDED = new Set([
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include',
+  '@deepseek-ai/cordis-plugin-group', '@deepseek-ai/cordis-plugin-hmr',
+  '@deepseek-ai/cordis-plugin-timer',
+  '@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-web-react',
+  '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-ui-attachment',
+  '@deepseek-ai/dsh-client-schema-form',
+])
+
+/** Bare specifiers imported by a JS entry (relative/node: paths excluded). */
+function scanImports(filePath: string): string[] {
+  try {
+    const code = readFileSync(filePath, 'utf8')
+    const found = new Set<string>()
+    const pattern = /(?:from\s+|import\s*\(\s*|require\(\s*)['"]([^'"]+)['"]/g
+    for (const match of code.matchAll(pattern)) {
+      const spec = match[1]!
+      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
+      found.add(spec)
+    }
+    return [...found]
+  } catch {
+    return []
+  }
+}
+
+/** Resolve a package's entry file (exports["."].default, main, or index.js). */
+function packageEntry(pkgDir: string, manifest: Record<string, unknown>): string | null {
+  const exportsField = manifest['exports'] as Record<string, unknown> | undefined
+  const dot = exportsField !== undefined ? exportsField['.'] as Record<string, unknown> | undefined : undefined
+  const candidates: unknown[] = [
+    dot !== undefined && typeof dot === 'object' ? (dot as Record<string, unknown>)['default'] : undefined,
+    manifest['main'],
+    manifest['module'],
+  ]
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
+    const resolved = join(pkgDir, candidate)
+    if (existsSync(resolved)) return resolved
+  }
+  const index = join(pkgDir, 'index.js')
+  return existsSync(index) ? index : null
+}
+
+/**
+ * Quality check for one installed package: undeclared bare imports that the
+ * loader does not provide are boot failures waiting to happen. Returns a
+ * list of issues (empty = healthy).
+ */
+function qualityIssues(profile: string, packageName: string): string[] {
+  const pkgDir = join(profileDir(profile), 'node_modules', packageName)
+  let manifest: Record<string, unknown>
+  try {
+    manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'))
+  } catch (error: unknown) {
+    return ["cannot read its package.json: " + (error instanceof Error ? error.message : String(error))]
+  }
+  const declared = new Set([
+    ...Object.keys((manifest['dependencies'] ?? {}) as Record<string, unknown>),
+    ...Object.keys((manifest['peerDependencies'] ?? {}) as Record<string, unknown>),
+  ])
+  const entry = packageEntry(pkgDir, manifest)
+  if (entry === null) return ["no resolvable entry file (exports/main/index.js)"]
+  const issues: string[] = []
+  for (const spec of scanImports(entry)) {
+    if (declared.has(spec) || LOADER_PROVIDED.has(spec)) continue
+    issues.push("imports " + spec + " but does not declare it (would fail at boot)")
+  }
+  return issues
 }
 /** One live dsh instance found by process scan. */
 interface RunInfo {
