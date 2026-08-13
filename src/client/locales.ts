@@ -64,6 +64,13 @@ export const zh = {
   cordisState: 'Cordis 状态',
   mounted: '已挂载',
   notMounted: '未挂载',
+  envManage: '环境管理',
+  currentBadge: '当前',
+  renameButton: '重命名',
+  createButton: '新建',
+  createPlaceholder: '新环境名称（仅小写字母/数字/._-）',
+  renamePrompt: '输入新环境名称：',
+  confirmRemoveProfile: '确定删除环境',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -131,4 +138,11 @@ export const en = {
   cordisState: 'Cordis state',
   mounted: 'mounted',
   notMounted: 'not mounted',
+  envManage: 'Environment management',
+  currentBadge: 'current',
+  renameButton: 'Rename',
+  createButton: 'Create',
+  createPlaceholder: 'New environment name (lowercase letters/digits/._-)',
+  renamePrompt: 'New environment name:',
+  confirmRemoveProfile: 'Delete environment',
 } satisfies Record<PluginManagerLocaleKey, string>

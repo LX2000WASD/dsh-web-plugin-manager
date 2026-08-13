@@ -15,6 +15,8 @@ export interface ProfileInfo {
   readonly dependencies: readonly string[]
   /** Whether this profile hosts the running plugin-manager (its dependency). */
   readonly isCurrent: boolean
+  /** Whether this is an official built-in profile (web/headless, never managed). */
+  readonly isOfficial: boolean
 }
 
 /** One plugin entry in the composed Loader tree (runtime view). */

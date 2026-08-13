@@ -30,7 +30,7 @@ export function PmSelect({ value, options, onChange, ariaLabel }: {
     <Menu
       open={open}
       anchor={(
-        <Button size="sm" variant="outline" aria-label={ariaLabel} onClick={() => setOpen(true)}>
+        <Button size="sm" variant="outline" aria-label={ariaLabel} onClick={() => setOpen(current => !current)}>
           {selected?.label ?? value}
           <IconChevronDownOutline14 size={12} aria-hidden="true" />
         </Button>

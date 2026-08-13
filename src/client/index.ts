@@ -74,6 +74,9 @@ export function apply(ctx: ClientContext): void {
     install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
     remove: (profile, name) => call<CommandResult>('remove', { profile, name }),
     removeInsert: (profile, rowId) => call<MutationResult>('removeInsert', { profile, rowId }),
+    createProfile: (name) => call<MutationResult>('createProfile', { name }),
+    renameProfile: (oldName, newName) => call<MutationResult>('renameProfile', { oldName, newName }),
+    removeProfile: (name) => call<MutationResult>('removeProfile', { name }),
   })
 
   // Shadow the official read-only inventory: same slot id 'all', lower

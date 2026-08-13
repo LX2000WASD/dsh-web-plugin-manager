@@ -27,7 +27,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -150,9 +150,70 @@ export class PluginManagerService extends Service {
         dependencies: Object.keys(dependencies ?? {}),
         // The profile hosting this running plugin is its dependency.
         isCurrent: Object.keys(dependencies ?? {}).includes(OUR_PACKAGE_NAME),
+        isOfficial: isOfficialProfile(entry.name),
       })
     }
     return out.sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+
+  /** Create a minimal custom profile (official skeleton, empty bundle stack). */
+  createProfile(name: string): MutationResult {
+    if (!/^[A-Za-z0-9._-]+$/.test(name) || name.length > 120) {
+      return { ok: false, message: "invalid profile name: " + JSON.stringify(name) }
+    }
+    if (isOfficialProfile(name)) return { ok: false, message: name + " is an official profile" }
+    const dir = profileDir(name)
+    if (existsSync(dir)) return { ok: false, message: "profile already exists: " + name }
+    try {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, "package.json"), JSON.stringify({
+        name: "dsh-profile-" + name,
+        private: true,
+        dependencies: {},
+        dsh: { profile: { bundles: [] } },
+      }, undefined, 2) + "\n")
+      writeFileSync(join(dir, "cordis.patch.yml"), PATCH_TEMPLATE)
+      writeFileSync(join(dir, "pnpm-workspace.yaml"), PNPM_WORKSPACE_TEMPLATE)
+      return { ok: true, message: "created profile " + name }
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** Rename a custom profile directory (never the hosting profile). */
+  renameProfile(oldName: string, newName: string): MutationResult {
+    if (!/^[A-Za-z0-9._-]+$/.test(newName) || newName.length > 120) {
+      return { ok: false, message: "invalid profile name: " + JSON.stringify(newName) }
+    }
+    if (isOfficialProfile(oldName) || isOfficialProfile(newName)) {
+      return { ok: false, message: "official profiles (web/headless) are not managed here" }
+    }
+    const oldDir = profileDir(oldName)
+    if (!existsSync(oldDir)) return { ok: false, message: "profile not found: " + oldName }
+    if (isHostProfile(oldName)) return { ok: false, message: "cannot rename the running profile (" + oldName + ")" }
+    const newDir = profileDir(newName)
+    if (existsSync(newDir)) return { ok: false, message: "profile already exists: " + newName }
+    try {
+      renameSync(oldDir, newDir)
+      return { ok: true, message: "renamed " + oldName + " to " + newName }
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** Delete a custom profile directory (never the hosting profile). */
+  removeProfile(name: string): MutationResult {
+    if (isOfficialProfile(name)) return { ok: false, message: "official profiles (web/headless) are not managed here" }
+    const dir = profileDir(name)
+    if (!existsSync(dir)) return { ok: false, message: "profile not found: " + name }
+    if (isHostProfile(name)) return { ok: false, message: "cannot remove the running profile (" + name + ")" }
+    try {
+      rmSync(dir, { recursive: true, force: true })
+      return { ok: true, message: "removed profile " + name }
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   /** Snapshot one profile: live entries + installed packages + bundle status. */
@@ -205,6 +266,7 @@ export class PluginManagerService extends Service {
         bundles,
         dependencies: packages.map(p => p.name),
         isCurrent: Object.keys(deps).includes(OUR_PACKAGE_NAME),
+        isOfficial: isOfficialProfile(profile),
       },
       entries,
       packages,
@@ -438,6 +500,42 @@ function readBundles(profile: string): string[] {
   return [...bundles]
 }
 
+/** Official built-in profiles the environment manager never touches. */
+const OFFICIAL_PROFILES = ['web', 'headless'] as const
+
+/** Whether a profile name is an official built-in. */
+function isOfficialProfile(name: string): boolean {
+  return (OFFICIAL_PROFILES as readonly string[]).includes(name)
+}
+
+/** Whether a profile hosts the running plugin-manager (its dependency). */
+function isHostProfile(name: string): boolean {
+  try {
+    const manifest = readManifest(profileDir(name)) as { dependencies?: Record<string, string> }
+    return Object.keys(manifest.dependencies ?? {}).includes(OUR_PACKAGE_NAME)
+  } catch {
+    return false
+  }
+}
+
+/** Official empty patch template for new profiles. */
+const PATCH_TEMPLATE = [
+  "# Your patch layer for this dsh profile, applied after every bundle layer:",
+  "# a top-level YAML array of loader patch entries (id-targeted config",
+  "# overrides, disables, and insert lists; `!!js` expressions allowed).",
+  '[]',
+].join('\n') + '\n'
+
+/** Hoisted-linker workspace for new profiles (mirrors the official template). */
+const PNPM_WORKSPACE_TEMPLATE = [
+  'packages:',
+  '  - .',
+  '',
+  'nodeLinker: hoisted',
+  'autoInstallPeers: false',
+  '',
+].join('\n')
+
 /** Installation-owned (in-box) bundles: never dependencies, always layers. */
 const IN_BOX_BUNDLES = [
   '@deepseek-ai/dsh-base',
@@ -549,6 +647,22 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.remove(profile, name) })
           return
         }
+        case 'createProfile': {
+          const name = typeof body['name'] === 'string' ? body['name'] : ''
+          sendJson(res, 200, { ok: true, value: service.createProfile(name) })
+          return
+        }
+        case 'renameProfile': {
+          const oldName = typeof body['oldName'] === 'string' ? body['oldName'] : ''
+          const newName = typeof body['newName'] === 'string' ? body['newName'] : ''
+          sendJson(res, 200, { ok: true, value: service.renameProfile(oldName, newName) })
+          return
+        }
+        case 'removeProfile': {
+          const name = typeof body['name'] === 'string' ? body['name'] : ''
+          sendJson(res, 200, { ok: true, value: service.removeProfile(name) })
+          return
+        }
         case 'removeInsert': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const rowId = typeof body['rowId'] === 'string' ? body['rowId'] : ''
@@ -567,7 +681,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers
