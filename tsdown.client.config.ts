@@ -9,7 +9,10 @@
  */
 import { defineConfig } from 'tsdown'
 
-const PLATFORM = ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client']
+const PLATFORM = [
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
+  '@deepseek-ai/dsh-client-ui-primitives',
+]
 
 export default defineConfig({
   name: 'dsh-plugin-manager/client',

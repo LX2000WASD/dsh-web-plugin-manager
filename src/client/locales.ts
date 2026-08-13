@@ -37,6 +37,10 @@ export const zh = {
   noInsertRows: '没有 insert 行。安装非 bundle 插件会自动实时挂载。',
   installMounted: '已识别为插件，已实时挂载（无需重启）',
   confirmDisable: '停用该条目？若其他条目依赖它，profile 可能无法启动（可在 cordis.patch.yml 手动恢复）。',
+  search: '搜索',
+  loading: '加载中…',
+  noEntries: '没有匹配的条目。',
+  unobserved: '未观察',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -77,4 +81,8 @@ export const en = {
   noInsertRows: 'No insert rows. Installing a non-bundle plugin mounts it live automatically.',
   installMounted: 'Recognized as a plugin and mounted live (no restart)',
   confirmDisable: 'Disable this entry? If other entries depend on it, the profile may fail to start (recoverable by editing cordis.patch.yml manually).',
+  search: 'Search',
+  loading: 'Loading…',
+  noEntries: 'No matching entries.',
+  unobserved: 'unobserved',
 } satisfies Record<PluginManagerLocaleKey, string>
