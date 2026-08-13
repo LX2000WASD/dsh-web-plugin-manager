@@ -411,7 +411,21 @@ export class PluginManagerService extends Service {
    * it live, no restart.
    */
   async install(profile: string, spec: string): Promise<CommandResult> {
-    return installSpec(profile, spec)
+    // Git sources (not published on npm, workspace subpackages) are cloned
+    // into a cache directory and installed from there — the "official path"
+    // for repositories that never reached the registry.
+    const prepared = prepareInstallSource(spec)
+    if (prepared.error !== undefined || prepared.spec === undefined) {
+      return { ok: false, exitCode: 1, output: '[plugin-manager] ' + (prepared.error ?? 'no install source') }
+    }
+    const result = await installSpec(profile, prepared.spec)
+    if (prepared.note !== undefined) {
+      return {
+        ...result,
+        output: result.output + '\n[plugin-manager] ' + prepared.note,
+      }
+    }
+    return result
   }
 
   /**
@@ -472,6 +486,95 @@ export class PluginManagerService extends Service {
   }
 }
 
+/**
+ * Prepare an install source. Git URLs (npm-unpublished repositories,
+ * workspace subpackages) are cloned into $DSH_HOME/plugin-manager-src and
+ * installed from there — the local-directory path the official CLI also
+ * supports. Custom subdir syntax: `repo#路径:packages/x` (the # in normal
+ * git specs is a ref/branch). The cache is kept: local-directory installs
+ * are pnpm links that need their source to stay in place.
+ */
+function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string } {
+  const trimmed = spec.trim()
+  const gitUrl = /^(?:git\+)?(https?:\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
+  const gitSsh = /^([^\s@]+@[^\s:]+:[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
+  const githubShort = /^github:([^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
+  const m = gitUrl ?? gitSsh ?? githubShort
+  if (m === null) return { spec: trimmed }
+  let repo = m[1]!
+  if (githubShort !== null && githubShort[1] !== undefined) repo = "https://github.com/" + githubShort[1]!.replace(/^\.git/, '')
+  const frag = m[2] ?? ''
+  // Our subdir convention: `#路径:<relative-dir>` (a plain #ref stays a git ref).
+  let ref: string | undefined
+  let subdir: string | undefined
+  if (frag.startsWith('路径:')) subdir = frag.slice(3)
+  else if (frag.length > 0) ref = frag
+  try {
+    const cacheRoot = join(dshHome(), 'plugin-manager-src')
+    mkdirSync(cacheRoot, { recursive: true })
+    const base = repo.replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/[^A-Za-z0-9._-]/g, '-')
+    const dirName = base + (ref !== undefined ? '-' + ref.replace(/[^A-Za-z0-9._-]/g, '-') : '')
+    const dest = join(cacheRoot, dirName)
+    if (!existsSync(dest)) {
+      const args = ['clone']
+      if (ref !== undefined) args.push('-b', ref)
+      args.push('--depth', '1', repo, dest)
+      execFileSync('git', args, { stdio: 'pipe' })
+    }
+    const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
+    if (!existsSync(join(pkgDir, 'package.json'))) {
+      // Auto-detect workspace packages when the root is not a package.
+      const candidates = discoverWorkspacePackages(dest)
+      if (candidates.length === 1) {
+        return { spec: candidates[0]!, note: 'cloned ' + repo + ' into ' + dest + ' (package: ' + candidates[0] + ')' }
+      }
+      if (candidates.length > 1) {
+        return {
+          error: 'the repository contains multiple packages (' + candidates.map(c => c.split('/').pop()).join(', ') + '); install with #路径:<dir> to pick one',
+        }
+      }
+      return { error: 'no package.json found at ' + pkgDir + ' (or anywhere in the repository)' }
+    }
+    return {
+      spec: pkgDir,
+      note: 'cloned ' + repo + (subdir !== undefined ? ' (' + subdir + ')' : '') + ' into ' + dest + ' — keep this cache directory: the installed package links to it',
+    }
+  } catch (error: unknown) {
+    return { error: 'git clone failed: ' + (error instanceof Error ? error.message : String(error)) }
+  }
+}
+
+/** Find cordis-style packages inside a cloned repository (depth 3). */
+function discoverWorkspacePackages(root: string): string[] {
+  const found: string[] = []
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 3) return
+    let entries: { name: string; isDirectory(): boolean }[] = []
+    try {
+      entries = readdirSync(dir, { withFileTypes: true }) as unknown as { name: string; isDirectory(): boolean }[]
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (existsSync(join(full, 'package.json'))) {
+          try {
+            const manifest = JSON.parse(readFileSync(join(full, 'package.json'), 'utf8')) as Record<string, unknown>
+            const dsh = manifest['dsh'] as Record<string, unknown> | undefined
+            const isPlugin = dsh?.bundle !== undefined || typeof manifest['apply'] === 'function'
+            if (isPlugin) found.push(full)
+          } catch { /* unreadable manifest: skip */ }
+        } else {
+          walk(full, depth + 1)
+        }
+      }
+    }
+  }
+  walk(root, 0)
+  return found
+}
 /**
  * Shared install path: pnpm add through the official CLI, resolve the real
  * package name, mount non-bundle plugins as managed insert rows, restore
