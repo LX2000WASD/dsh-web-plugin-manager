@@ -29,6 +29,8 @@ export interface RuntimeEntry {
   readonly fiberPhase: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | null
   /** Whether this entry is user-installed (profile dependency or insert row). */
   readonly installed: boolean
+  /** Whether the user patch layer explicitly manages this row (deviates from defaults). */
+  readonly modified: boolean
 }
 
 /** One installable/installed package's management view. */

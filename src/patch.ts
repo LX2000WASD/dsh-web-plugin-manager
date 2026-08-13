@@ -119,6 +119,21 @@ export function readInsertRows(content: string): PatchInsertRow[] {
   return rows
 }
 
+/**
+ * Read the ids of top-level rows in a patch file — rows the user (or the
+ * manager's managed blocks) explicitly manages. These rows' configured state
+ * deviates from the bundle defaults, which the UI highlights. Insert-block
+ * child rows (indented) are not targets and are excluded.
+ */
+export function readManagedIds(content: string): Set<string> {
+  const ids = new Set<string>()
+  for (const line of content.split('\n')) {
+    const match = /^-\s*id:\s*([^\s]+)/.exec(line)
+    if (match !== null) ids.add(match[1]!)
+  }
+  return ids
+}
+
 /** Whether a patch file already manages a disable block for the entry id. */
 export function hasManagedDisable(patchPath: string, entryId: string): boolean {
   if (!existsSync(patchPath)) return false

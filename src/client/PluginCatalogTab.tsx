@@ -64,12 +64,9 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
     alignItems: 'start', gap: '10px', margin: 0, padding: 0, listStyle: 'none',
   },
-  card: {
-    minWidth: 0, overflow: 'hidden',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
-    background: 'var(--dsw-alias-bg-layer-3)',
-  },
-  cardOpen: { borderColor: 'var(--dsw-alias-border-l1)' },
+  // Card look is driven by injected CSS classes (pm-card / pm-card-content):
+  // state (open, modified) and focus-visible styling are pure CSS attribute
+  // selectors, so no inline style can go stale when a card collapses.
   cardContent: {
     boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
     gap: '12px', width: '100%', minHeight: '52px', border: 0, padding: '12px 14px',
@@ -264,6 +261,24 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
 
   return (
     <div style={styles.section}>
+      <style>{`
+.pm-card {
+  min-width: 0; overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-3);
+}
+.pm-card[data-open='true'] { border-color: var(--dsw-alias-border-l1); }
+.pm-card[data-modified='true'] {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 55%, transparent);
+}
+.pm-card[data-modified='true'][data-open='true'] {
+  border-color: var(--dsw-alias-state-warn-secondary);
+}
+.pm-card-content:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -2px;
+}
+`}</style>
       <div style={styles.toolbar}>
         <label htmlFor="pm-profile" style={{ ...styles.filterLabel, display: 'inline-flex', alignItems: 'center' }}>{t('profileLabel')}</label>
         <select
@@ -342,11 +357,13 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
                 return (
                   <li
                     key={entry.entryId}
-                    style={open ? { ...styles.card, ...styles.cardOpen } : styles.card}
+                    className="pm-card"
                     data-plugin-entry={entry.entryId}
                     data-open={open ? 'true' : undefined}
+                    data-modified={entry.modified && !entry.installed ? 'true' : undefined}
                   >
                     <button
+                      className="pm-card-content"
                       style={styles.cardContent}
                       type="button"
                       aria-expanded={open}

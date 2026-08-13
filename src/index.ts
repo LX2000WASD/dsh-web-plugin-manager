@@ -41,7 +41,7 @@ import type {
 } from './types.ts'
 import {
   addDisableBlock, addInsertRow, hasManagedDisable, readInsertRows,
-  removeDisableBlock, removeInsertRow, writePatch,
+  readManagedIds, removeDisableBlock, removeInsertRow, writePatch,
 } from './patch.ts'
 import { registerTools } from './tools.ts'
 
@@ -184,6 +184,9 @@ export class PluginManagerService extends Service {
       managed: row.managed,
     }))
 
+    // Rows the user patch layer explicitly manages (deviate from defaults).
+    const managedIds = readManagedIds(patch)
+
     // Stable view: Loader entry ids are random per mount (Math.random
     // hex), so patch targeting must use the include-tree row id
     // (EntryOptions.id — stable across reloads; official semantics).
@@ -191,6 +194,7 @@ export class PluginManagerService extends Service {
       packageNames: new Set(packages.map(pkg => pkg.name)),
       insertNames: new Set(insertRows.map(row => row.name)),
       insertIds: new Set(insertRows.map(row => row.id)),
+      managedIds,
     })
 
     return {
@@ -330,6 +334,8 @@ interface InstalledSets {
   readonly packageNames: ReadonlySet<string>
   readonly insertNames: ReadonlySet<string>
   readonly insertIds: ReadonlySet<string>
+  /** Row ids the user patch layer explicitly manages (deviate from defaults). */
+  readonly managedIds: ReadonlySet<string>
 }
 
 /**
@@ -364,6 +370,7 @@ function includeRows(ctx: Context, installed: InstalledSets): RuntimeEntry[] {
         installed: installed.packageNames.has(name)
           || installed.insertNames.has(name)
           || installed.insertIds.has(options.id),
+        modified: installed.managedIds.has(options.id),
       }
       const current = seen.get(options.id)
       if (current === undefined || authority(candidate) > authority(current)) {
