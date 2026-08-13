@@ -63,7 +63,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'start', gap: '10px', margin: 0, padding: 0, listStyle: 'none',
   },
   card: {
-    minWidth: 0, overflow: 'hidden',
+    minWidth: 0, maxWidth: '100%', overflow: 'hidden',
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
     background: 'var(--dsw-alias-bg-layer-3)',
   },
@@ -76,7 +76,7 @@ const styles: Record<string, React.CSSProperties> = {
     textOverflow: 'ellipsis', whiteSpace: 'nowrap',
   },
   cardDesc: {
-    minWidth: 0, overflow: 'hidden', fontSize: '12px', lineHeight: '17px',
+    display: 'block', minWidth: 0, overflow: 'hidden', fontSize: '12px', lineHeight: '17px',
     color: 'var(--dsw-alias-label-secondary)', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
   },
   meta: {
@@ -260,7 +260,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
                     )}
                   </div>
                   {item.description !== undefined && item.description.length > 0 && (
-                    <div style={{ padding: '0 14px 10px' }}>
+                    <div style={{ minWidth: 0, overflow: 'hidden', padding: '0 14px 10px' }}>
                       <span style={styles.cardDesc} title={item.description}>{item.description}</span>
                     </div>
                   )}
