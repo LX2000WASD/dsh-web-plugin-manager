@@ -39,6 +39,10 @@ const styles: Record<string, React.CSSProperties> = {
   },
   toolbar: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
   heading: { display: 'flex', alignItems: 'baseline', gap: '7px', padding: '0 2px' },
+  pageTitle: {
+    margin: 0, fontSize: '16px', lineHeight: '24px', fontWeight: 600,
+    color: 'var(--dsw-alias-label-primary)',
+  },
   headingTitle: { margin: 0, fontSize: '13px', lineHeight: '20px', fontWeight: 600 },
   headingCount: {
     fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
@@ -178,6 +182,9 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
 
   return (
     <div style={styles.section}>
+      <div style={styles.heading}>
+        <h2 style={styles.pageTitle}>{t('marketList')}</h2>
+      </div>
       <div style={styles.toolbar}>
         <span style={styles.filterLabel}>{t('sortLabel')}</span>
         <PmSelect
@@ -213,7 +220,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
       {state.status === 'ready' && (
         <>
           <div style={styles.heading}>
-            <h3 style={styles.headingTitle}>{t('marketList')}</h3>
+            <h3 style={styles.headingTitle}>{t('marketCount')}</h3>
             <span style={styles.headingCount}>{rows.length}</span>
             <span style={styles.filterLabel}>
               {state.result.fromCache ? t('marketCached') + (state.result.cachedAt !== undefined ? ' ' + shortDate(state.result.cachedAt) : '') : t('marketFresh')}
