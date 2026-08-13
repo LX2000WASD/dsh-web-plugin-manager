@@ -96,8 +96,17 @@ export const zh = {
   officialReadonly: '官方环境只读，不可修改',
   installedAt: '安装时间',
   updatedAt: '更新时间',
+  createdAt: '发布时间',
   repository: '原仓库',
   unknown: '未知',
+  marketTab: '市场',
+  marketList: '插件市场',
+  marketCached: '缓存于',
+  marketFresh: '实时',
+  noMarketItems: '没有市场条目。',
+  sortStars: '星数',
+  sortUpdated: '更新时间',
+  sortCreated: '发布时间',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -197,6 +206,15 @@ export const en = {
   officialReadonly: 'Official environment is read-only',
   installedAt: 'Installed at',
   updatedAt: 'Updated at',
+  createdAt: 'Created at',
   repository: 'Repository',
   unknown: 'unknown',
+  marketTab: 'Marketplace',
+  marketList: 'Plugin marketplace',
+  marketCached: 'cached at',
+  marketFresh: 'fresh',
+  noMarketItems: 'No marketplace entries.',
+  sortStars: 'Stars',
+  sortUpdated: 'Updated',
+  sortCreated: 'Created',
 } satisfies Record<PluginManagerLocaleKey, string>

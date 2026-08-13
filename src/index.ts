@@ -37,8 +37,8 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
 import type {
-  CommandResult, InsertRow, ManagedPackage, MutationResult, PluginManagerSnapshot,
-  ProfileInfo, RuntimeEntry, StartResult,
+  CommandResult, InsertRow, ManagedPackage, MarketplaceItem, MarketplaceResult,
+  MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry, StartResult,
 } from './types.ts'
 import {
   addDisableBlock, addInsertRow, applyRowDisabled, applyRowEnabled,
@@ -276,6 +276,79 @@ export class PluginManagerService extends Service {
       return { ok: false, port, message: "started but did not become ready within 10s: http://127.0.0.1:" + port }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+
+  /** Fetch the marketplace listing (GitHub topic search, 24h cache). */
+  async marketplace(refresh: boolean): Promise<MarketplaceResult> {
+    const cacheDir = join(dshHome(), 'plugin-manager-cache')
+    const cachePath = join(cacheDir, 'marketplace.json')
+    mkdirSync(cacheDir, { recursive: true })
+    // Serve the cache unless it is missing, stale (>24h), or refresh is forced.
+    if (!refresh) {
+      try {
+        const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { fetchedAt?: unknown; items?: unknown }
+        const fetchedAt = typeof cached.fetchedAt === 'string' ? Date.parse(cached.fetchedAt) : NaN
+        const items = Array.isArray(cached.items) ? cached.items as MarketplaceItem[] : []
+        if (!Number.isNaN(fetchedAt) && Date.now() - fetchedAt < 24 * 60 * 60 * 1000 && items.length > 0) {
+          return {
+            ok: true,
+            items,
+            cachedAt: typeof cached.fetchedAt === 'string' ? cached.fetchedAt : undefined,
+            fromCache: true,
+            message: 'served from cache',
+          }
+        }
+      } catch { /* no/ broken cache: refetch */ }
+    }
+    try {
+      // GitHub search does not accept a bare `+OR+` query; search each
+      // topic separately and merge (dedupe by full_name).
+      const seenNames = new Set<string>()
+      const rawItems: Array<Record<string, unknown>> = []
+      for (const topic of ['dsh', 'dsh-plugin']) {
+        const response = await fetch(
+          'https://api.github.com/search/repositories?q=topic:' + topic + '&sort=stars&order=desc&per_page=100',
+          { headers: { 'user-agent': 'dsh-plugin-manager' } },
+        )
+        if (!response.ok) throw new Error('GitHub API HTTP ' + response.status)
+        const payload = await response.json() as { items?: Array<Record<string, unknown>> }
+        for (const item of payload.items ?? []) {
+          const fullName = typeof item['full_name'] === 'string' ? item['full_name'] : ''
+          // The official deepseek-ai org hosts the harness itself, not plugins.
+          if (fullName.length === 0 || seenNames.has(fullName) || fullName.startsWith('deepseek-ai/')) continue
+          seenNames.add(fullName)
+          rawItems.push(item)
+        }
+      }
+      const items: MarketplaceItem[] = rawItems.flatMap((item) => {
+        const name = typeof item['full_name'] === 'string' ? item['full_name'] : ''
+        const url = typeof item['html_url'] === 'string' ? item['html_url'] : ''
+        if (name.length === 0 || url.length === 0) return []
+        return [{
+          name,
+          displayName: name.split('/').pop() ?? name,
+          ...(typeof item['description'] === 'string' && item['description'] !== '' ? { description: item['description'] } : {}),
+          stars: typeof item['stargazers_count'] === 'number' ? item['stargazers_count'] : 0,
+          updatedAt: typeof item['updated_at'] === 'string' ? item['updated_at'] : '',
+          createdAt: typeof item['created_at'] === 'string' ? item['created_at'] : '',
+          url,
+        }]
+      })
+      const now = new Date().toISOString()
+      writeFileSync(cachePath, JSON.stringify({ fetchedAt: now, items }, undefined, 2) + '\n')
+      return { ok: true, items, fromCache: false, message: 'fetched ' + items.length + ' repositories' }
+    } catch (error: unknown) {
+      // Fall back to the cache when the network fails.
+      try {
+        const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { fetchedAt?: unknown; items?: unknown }
+        const items = Array.isArray(cached.items) ? cached.items as MarketplaceItem[] : []
+        if (items.length > 0) {
+          return { ok: true, items, cachedAt: typeof cached.fetchedAt === 'string' ? cached.fetchedAt : undefined, fromCache: true, message: 'network failed; served from cache: ' + (error instanceof Error ? error.message : String(error)) }
+        }
+      } catch { /* no cache either */ }
+      return { ok: false, items: [], fromCache: false, message: error instanceof Error ? error.message : String(error) }
     }
   }
 
@@ -1186,6 +1259,11 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.stopProfile(name) })
           return
         }
+        case 'marketplace': {
+          const refresh = body['refresh'] === true
+          sendJson(res, 200, { ok: true, value: await service.marketplace(refresh) })
+          return
+        }
         case 'startProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
           sendJson(res, 200, { ok: true, value: await service.startProfile(name) })
@@ -1227,7 +1305,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

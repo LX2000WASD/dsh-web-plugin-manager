@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
-  CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
+  CommandResult, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
 } from '../types.ts'
 import {
   PluginCatalogTab, type PluginCatalogTabInjected,
@@ -22,11 +22,15 @@ import {
 import {
   PluginEnvironmentsTab, type PluginEnvironmentsTabInjected,
 } from './PluginEnvironmentsTab.tsx'
+import {
+  PluginMarketplaceTab, type PluginMarketplaceTabInjected,
+} from './PluginMarketplaceTab.tsx'
 import { en, zh, type PluginManagerLocaleKey } from './locales.ts'
 
 export type { PluginCatalogTabInjected, PluginCatalogTabProps } from './PluginCatalogTab.tsx'
 export type { PluginManagerTabInjected, PluginManagerTabProps } from './PluginManagerSettingsTab.tsx'
 export type { PluginEnvironmentsTabInjected, PluginEnvironmentsTabProps } from './PluginEnvironmentsTab.tsx'
+export type { PluginMarketplaceTabInjected, PluginMarketplaceTabProps } from './PluginMarketplaceTab.tsx'
 export type { PluginManagerLocaleKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -119,4 +123,19 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: environmentsInjected,
   }, PluginEnvironmentsTab))
+
+  // Marketplace: a first-level settings entry (after the official Plugins).
+  const marketplaceInjected = (): PluginMarketplaceTabInjected => ({
+    marketplace: (refresh) => call<MarketplaceResult>('marketplace', { refresh }),
+    install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
+  })
+
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'marketplace',
+    order: 20,
+    label: () => t('marketTab'),
+    locale: NS,
+    inject: marketplaceInjected,
+  }, PluginMarketplaceTab))
 }

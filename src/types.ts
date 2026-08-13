@@ -84,6 +84,33 @@ export interface MutationResult {
   readonly message: string
 }
 
+/** One marketplace plugin entry (from the GitHub topic search). */
+export interface MarketplaceItem {
+  /** Repository name (owner/repo). */
+  readonly name: string
+  /** Display name (repo basename). */
+  readonly displayName: string
+  readonly description?: string
+  /** Star count. */
+  readonly stars: number
+  /** Last push time. */
+  readonly updatedAt: string
+  /** Creation time. */
+  readonly createdAt: string
+  /** Repository URL (the git install source). */
+  readonly url: string
+}
+
+/** Marketplace listing result. */
+export interface MarketplaceResult {
+  readonly ok: boolean
+  readonly items: readonly MarketplaceItem[]
+  /** When the cached snapshot was fetched (ISO), when served from cache. */
+  readonly cachedAt?: string
+  readonly fromCache: boolean
+  readonly message: string
+}
+
 /** Result of launching a profile instance. */
 export interface StartResult {
   readonly ok: boolean
