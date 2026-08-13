@@ -7,13 +7,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, IconSearchOutline16, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommandResult, MarketplaceItem, MarketplaceResult } from '../types.ts'
+import type { CommandResult, MarketplaceItem, MarketplaceResult, ProfileInfo } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
 export interface PluginMarketplaceTabInjected {
   readonly marketplace: (refresh: boolean) => Promise<MarketplaceResult>
+  readonly profiles: () => Promise<ProfileInfo[]>
   readonly install: (profile: string, spec: string) => Promise<CommandResult>
 }
 
@@ -78,6 +79,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px', lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)',
     fontVariantNumeric: 'tabular-nums',
   },
+  tagOn: {
+    background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent)',
+    color: 'var(--dsw-alias-state-success-primary)',
+  },
   tag: {
     display: 'inline-flex', alignItems: 'center', flex: 'none', minHeight: '20px',
     borderRadius: '5px', padding: '1px 6px', background: 'var(--dsw-alias-bg-layer-1)',
@@ -107,15 +112,17 @@ function shortDate(iso: string): string {
 }
 
 /** Render the marketplace page. */
-export function PluginMarketplaceTab({ marketplace, install, t }: PluginMarketplaceTabProps): ReactNode {
+export function PluginMarketplaceTab({ marketplace, profiles, install, t }: PluginMarketplaceTabProps): ReactNode {
   const [state, setState] = useState<ViewState>({ status: 'loading' })
   const [busy, setBusy] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<MarketSort>('stars')
   const [descending, setDescending] = useState(false)
   const [output, setOutput] = useState('')
+  const [profileList, setProfileList] = useState<ProfileInfo[]>([])
+  const [targetProfile, setTargetProfile] = useState('web')
 
-  const injected = useRef({ marketplace, install })
+  const injected = useRef({ marketplace, profiles, install })
 
   const load = (refresh: boolean): void => {
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
@@ -127,13 +134,18 @@ export function PluginMarketplaceTab({ marketplace, install, t }: PluginMarketpl
 
   useEffect(() => {
     load(false)
+    void injected.current.profiles().then((items) => {
+      setProfileList(items)
+      const current = items.find(profile => profile.isCurrent === true)
+      if (current !== undefined) setTargetProfile(current.name)
+    }, () => { /* keep web default */ })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const onInstall = async (item: MarketplaceItem): Promise<void> => {
     setBusy(item.name)
     try {
-      const result = await injected.current.install('web', item.url)
+      const result = await injected.current.install(targetProfile, item.url)
       setOutput('$ install ' + item.name + '\n' + result.output)
     } finally {
       setBusy(null)
@@ -181,6 +193,13 @@ export function PluginMarketplaceTab({ marketplace, install, t }: PluginMarketpl
         <Button size="sm" variant="ghost" onClick={() => setDescending(current => !current)}>
           {descending ? t('sortDesc') : t('sortAsc')}
         </Button>
+        <span style={styles.filterLabel}>{t('installTarget')}</span>
+        <PmSelect
+          ariaLabel={t('installTarget')}
+          value={targetProfile}
+          options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
+          onChange={setTargetProfile}
+        />
       </div>
 
       {state.status === 'error' && <p style={styles.error} role="alert">{t('error')}: {state.message}</p>}
@@ -215,6 +234,11 @@ export function PluginMarketplaceTab({ marketplace, install, t }: PluginMarketpl
                       {item.displayName}
                     </a>
                     <span style={styles.tag}>★ {item.stars}</span>
+                    {item.status !== undefined && item.status.length > 0 && (
+                      <span style={{ ...styles.tag, ...(item.status.includes('✅') ? styles.tagOn : {}) }} title={item.status}>
+                        {item.status.includes('✅') ? t('statusVerified') : t('statusPending')}
+                      </span>
+                    )}
                     <span style={{ marginLeft: 'auto' }}>
                       <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onInstall(item)}>
                         {busy === item.name ? t('installing') : t('installButton')}

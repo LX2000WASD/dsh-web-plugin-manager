@@ -303,46 +303,57 @@ export class PluginManagerService extends Service {
       } catch { /* no/ broken cache: refetch */ }
     }
     try {
-      // GitHub search does not accept a bare `+OR+` query; search each
-      // topic separately and merge (dedupe by full_name).
-      const seenNames = new Set<string>()
-      const rawItems: Array<Record<string, unknown>> = []
-      for (const topic of ['dsh', 'dsh-plugin']) {
-        const response = await fetch(
-          'https://api.github.com/search/repositories?q=topic:' + topic + '&sort=stars&order=desc&per_page=100',
-          { headers: { 'user-agent': 'dsh-plugin-manager' } },
-        )
-        if (!response.ok) throw new Error('GitHub API HTTP ' + response.status)
-        const payload = await response.json() as { items?: Array<Record<string, unknown>> }
-        for (const item of payload.items ?? []) {
-          const fullName = typeof item['full_name'] === 'string' ? item['full_name'] : ''
-          // The official deepseek-ai org hosts the harness itself, not plugins.
-          if (fullName.length === 0 || seenNames.has(fullName) || fullName.startsWith('deepseek-ai/')) continue
-          // topic tags are widely misused; keep only repos whose name or
-          // description signals the DSH ecosystem (dsh as a word or prefix,
-          // harness, cordis — so "DeepHash" or "crash" do not match).
-          const description = typeof item['description'] === 'string' ? item['description'] : ''
-          const text = (fullName + ' ' + description).toLocaleLowerCase()
-          const dshSignal = /(^|[^a-z0-9])dsh([^a-z0-9]|$)/.test(text) || text.includes('dsh-')
-          if (!dshSignal && !text.includes('harness') && !text.includes('cordis')) continue
-          seenNames.add(fullName)
-          rawItems.push(item)
-        }
+      // Primary source: the maintained awesome-dsh-plugins catalog — its
+      // referenced repositories are curated (checked against mainline).
+      // PLUGINS.md rows: | name | [org/repo](url) | description | status |
+      const mdResponse = await fetch(
+        'https://raw.githubusercontent.com/AdamPlatin123/awesome-dsh-plugins/main/PLUGINS.md',
+        { headers: { 'user-agent': 'dsh-plugin-manager' } },
+      )
+      if (!mdResponse.ok) throw new Error('catalog fetch HTTP ' + mdResponse.status)
+      const markdown = await mdResponse.text()
+      const rows: Array<{ fullName: string; description: string; status: string }> = []
+      for (const line of markdown.split('\n')) {
+        const match = /^\|\s*([^|]+?)\s*\|\s*\[([^|]+?)\]\(https?:\/\/github\.com\/([^/)]+\/[^/)]+)\)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|/.exec(line)
+        if (match === null) continue
+        const fullName = match[3]!.trim()
+        if (fullName.length === 0 || fullName.startsWith('deepseek-ai/')) continue
+        rows.push({
+          fullName,
+          description: match[4]!.trim(),
+          status: match[5]!.trim(),
+        })
       }
-      const items: MarketplaceItem[] = rawItems.flatMap((item) => {
-        const name = typeof item['full_name'] === 'string' ? item['full_name'] : ''
-        const url = typeof item['html_url'] === 'string' ? item['html_url'] : ''
-        if (name.length === 0 || url.length === 0) return []
-        return [{
-          name,
-          displayName: name.split('/').pop() ?? name,
-          ...(typeof item['description'] === 'string' && item['description'] !== '' ? { description: item['description'] } : {}),
-          stars: typeof item['stargazers_count'] === 'number' ? item['stargazers_count'] : 0,
-          updatedAt: typeof item['updated_at'] === 'string' ? item['updated_at'] : '',
-          createdAt: typeof item['created_at'] === 'string' ? item['created_at'] : '',
-          url,
-        }]
-      })
+      if (rows.length === 0) throw new Error('no rows parsed from the catalog')
+      // Enrich with GitHub repository metadata (stars/dates). Unauthenticated
+      // rate limit is 60/h; the list is small and cached for 24h.
+      const items: MarketplaceItem[] = []
+      for (const row of rows) {
+        let stars = 0
+        let updatedAt = ''
+        let createdAt = ''
+        try {
+          const repoResponse = await fetch('https://api.github.com/repos/' + row.fullName, {
+            headers: { 'user-agent': 'dsh-plugin-manager' },
+          })
+          if (repoResponse.ok) {
+            const repo = await repoResponse.json() as { stargazers_count?: unknown; updated_at?: unknown; created_at?: unknown }
+            stars = typeof repo.stargazers_count === 'number' ? repo.stargazers_count : 0
+            updatedAt = typeof repo.updated_at === 'string' ? repo.updated_at : ''
+            createdAt = typeof repo.created_at === 'string' ? repo.created_at : ''
+          }
+        } catch { /* rate-limited or offline: keep zeros */ }
+        items.push({
+          name: row.fullName,
+          displayName: row.fullName.split('/').pop() ?? row.fullName,
+          ...(row.description.length > 0 ? { description: row.description } : {}),
+          stars,
+          updatedAt,
+          createdAt,
+          url: 'https://github.com/' + row.fullName,
+          status: row.status,
+        })
+      }
       const now = new Date().toISOString()
       writeFileSync(cachePath, JSON.stringify({ fetchedAt: now, items }, undefined, 2) + '\n')
       return { ok: true, items, fromCache: false, message: 'fetched ' + items.length + ' repositories' }
@@ -498,11 +509,19 @@ export class PluginManagerService extends Service {
     if (prepared.error !== undefined || prepared.spec === undefined) {
       return { ok: false, exitCode: 1, output: '[plugin-manager] ' + (prepared.error ?? 'no install source') }
     }
-    const result = await installSpec(profile, prepared.spec)
-    if (prepared.note !== undefined) {
+    // npm-first: when the cloned package is published on the registry, prefer
+    // the npm install (faster, no local link); fall back to the git clone.
+    const npmName = prepared.packageName !== undefined ? probeNpmPublished(prepared.packageName) : undefined
+    const result = npmName !== undefined
+      ? await installSpec(profile, npmName)
+      : await installSpec(profile, prepared.spec)
+    const note = npmName !== undefined
+      ? 'installed from npm (' + npmName + '; the repository also publishes it)'
+      : prepared.note
+    if (note !== undefined) {
       return {
         ...result,
-        output: result.output + '\n[plugin-manager] ' + prepared.note,
+        output: result.output + '\n[plugin-manager] ' + note,
       }
     }
     return result
@@ -574,7 +593,7 @@ export class PluginManagerService extends Service {
  * git specs is a ref/branch). The cache is kept: local-directory installs
  * are pnpm links that need their source to stay in place.
  */
-function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string } {
+function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string; packageName?: string } {
   const trimmed = spec.trim()
   const gitUrl = /^(?:git\+)?(https?:\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
   const gitSsh = /^([^\s@]+@[^\s:]+:[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
@@ -602,6 +621,18 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
       execFileSync('git', args, { stdio: 'pipe' })
     }
     const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
+    if (existsSync(join(pkgDir, 'package.json'))) {
+      try {
+        const manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as { name?: unknown }
+        if (typeof manifest.name === 'string' && manifest.name.length > 0) {
+          return {
+            spec: pkgDir,
+            packageName: manifest.name,
+            note: 'cloned ' + repo + (subdir !== undefined ? ' (' + subdir + ')' : '') + ' into ' + dest,
+          }
+        }
+      } catch { /* unreadable manifest: continue below */ }
+    }
     if (!existsSync(join(pkgDir, 'package.json'))) {
       // Auto-detect workspace packages when the root is not a package.
       const candidates = discoverWorkspacePackages(dest)
@@ -621,6 +652,20 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
     }
   } catch (error: unknown) {
     return { error: 'git clone failed: ' + (error instanceof Error ? error.message : String(error)) }
+  }
+}
+
+/** Whether a package name exists on the npm registry (short timeout). */
+function probeNpmPublished(packageName: string): string | undefined {
+  try {
+    const output = execFileSync('npm', ['view', packageName, 'version'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return output.trim().length > 0 ? packageName : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -686,7 +731,7 @@ async function installSpec(profile: string, spec: string): Promise<CommandResult
         + "\n[plugin-manager] QUALITY CHECK FAILED for " + installed + ":"
         + issues.map(issue => "\n  - " + issue).join("")
         + "\n[plugin-manager] rolled back the install to keep the profile bootable.",
-      installed: [installed],
+      installed: [],
     }
   }
 

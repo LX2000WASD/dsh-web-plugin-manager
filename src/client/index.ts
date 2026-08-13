@@ -128,6 +128,7 @@ export function apply(ctx: ClientContext): void {
   const marketplaceInjected = (): PluginMarketplaceTabInjected => ({
     marketplace: (refresh) => call<MarketplaceResult>('marketplace', { refresh }),
     install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
+    profiles: () => call<ProfileInfo[]>('listProfiles', {}),
   })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({

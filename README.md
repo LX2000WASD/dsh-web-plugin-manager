@@ -10,8 +10,12 @@
 | 实时启停 | 受控编辑 profile 的 `cordis.patch.yml`（managed-block 机制，保留用户内容，可逆可审阅）；**配置 HMR 即时生效，零重启**（boot 自动挂载 watch-only HMR，官方 0811 机制），重启后持久 |
 | 安装 | 调用官方 `dsh plugin` CLI（复用 pnpm reconcile），保护 in-box bundles（base/web-app/headless）；**非 bundle 插件自动写 insert 行并实时挂载**；安装后按依赖 key 解析真实包名 |
 | 卸载 | bundle 走官方 remove；非 bundle（managed insert 行）实时卸载 |
-| agent 工具 | `plugin_status` / `plugin_install` / `plugin_uninstall` / `plugin_toggle`（目标 profile 由配置 `profile` 指定，默认 `web`） |
-| 多 profile | 扫描 `$DSH_HOME/profiles`，UI 下拉选择 |
+| agent 工具 | plugin_status / plugin_install / plugin_uninstall / plugin_toggle（目标 profile 由配置 profile 指定，默认 web） |
+| 多 profile | 扫描 $DSH_HOME/profiles，UI 下拉选择（管理/市场页均可选安装目标） |
+| 环境管理 | 设置 → 插件 → 环境：复制/转移插件、创建/重命名/删除 profile、终端启动（$TERMINAL → x-terminal-emulator → 常见模拟器回退，detached 兜底） |
+| 市场 | 设置一级菜单「市场」：数据源为 awesome-dsh-plugins 的 PLUGINS.md（表格含 ✅/待测 状态列）+ GitHub repo API 补星数/更新时间，24h 缓存；选择安装目标环境后一键安装 |
+| 质量门 | 安装后扫描入口 import vs 声明依赖（LOADER_PROVIDED 白名单放行平台包），未声明运行时依赖（如 @deepseek-ai/dsh-tools）自动回滚，避免实例启动失败 |
+| npm 优先 | git 源安装前 clone 读 package.json 的 name，npm view 探测已发布则优先走 npm 安装，否则回退本地 clone（$DSH_HOME/plugin-manager-src/ 缓存） |
 
 ## 安装
 
@@ -37,6 +41,9 @@ dsh plugin --profile <name> add .
 - **禁用被依赖的条目可能导致 profile 启动失败**（官方 fail-loud 设计）；恢复方法：手动编辑该 profile 的 `cordis.patch.yml` 删除 `# dsh-plugin-manager:managed:start/end` 之间的禁用块
 - 安装来自 git 的 bundle 需要用户在终端放行 `pnpm allowBuilds`（命令输出会回显）
 - 随机行（无显式 id 的挂载行）不可经此启停——它们的 id 每次挂载变化，无法被 patch 定位
+- **git 子包安装**：pnpm git 依赖不支持 subdir（#ref 是 git ref），自建 clone 流程；多包仓库用 #路径:<dir> 约定指定子目录
+- **质量门可能误伤**：未声明运行时依赖的插件会被拦截回滚（保守策略）；若插件确实由 Loader/host 提供该模块，需在插件 manifest 声明或加入白名单
+- 市场条目来源于 awesome 目录，个别仓库可能已删除/私有（安装时报 Repository not found）
 
 ## 构建
 

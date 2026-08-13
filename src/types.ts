@@ -99,6 +99,8 @@ export interface MarketplaceItem {
   readonly createdAt: string
   /** Repository URL (the git install source). */
   readonly url: string
+  /** Catalog status (e.g. ✅ verified, 待测 pending). */
+  readonly status?: string
 }
 
 /** Marketplace listing result. */
