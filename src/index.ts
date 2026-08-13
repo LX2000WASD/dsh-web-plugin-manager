@@ -29,7 +29,8 @@
 import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -48,6 +49,18 @@ export type * from './types.ts'
 
 /** Route prefix for the REST surface. */
 export const ROUTE_PREFIX = '/api2/plugin-manager'
+
+/** This package's own name (identifies the hosting profile). */
+export const OUR_PACKAGE_NAME = (() => {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+    ) as { name?: unknown }
+    return typeof manifest.name === 'string' ? manifest.name : 'dsh-plugin-manager'
+  } catch {
+    return 'dsh-plugin-manager'
+  }
+})()
 
 /** Resolve the Harness home directory (DSH_HOME env, then ~/.dsh). */
 function dshHome(): string {
@@ -134,6 +147,8 @@ export class PluginManagerService extends Service {
         path: dir,
         bundles,
         dependencies: Object.keys(dependencies ?? {}),
+        // The profile hosting this running plugin is its dependency.
+        isCurrent: Object.keys(dependencies ?? {}).includes(OUR_PACKAGE_NAME),
       })
     }
     return out.sort((a, b) => a.name.localeCompare(b.name))
@@ -175,7 +190,13 @@ export class PluginManagerService extends Service {
     }))
 
     return {
-      profile: { name: profile, path: dir, bundles, dependencies: packages.map(p => p.name) },
+      profile: {
+        name: profile,
+        path: dir,
+        bundles,
+        dependencies: packages.map(p => p.name),
+        isCurrent: Object.keys(deps).includes(OUR_PACKAGE_NAME),
+      },
       entries,
       packages,
       insertRows,

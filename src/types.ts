@@ -13,6 +13,8 @@ export interface ProfileInfo {
   readonly bundles: readonly string[]
   /** Direct npm dependencies declared in the profile package.json. */
   readonly dependencies: readonly string[]
+  /** Whether this profile hosts the running plugin-manager (its dependency). */
+  readonly isCurrent: boolean
 }
 
 /** One plugin entry in the composed Loader tree (runtime view). */

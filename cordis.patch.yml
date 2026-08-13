@@ -6,3 +6,9 @@
       name: 'dsh-plugin-manager'
       config:
         profile: 'web'
+# Shadow the official read-only plugin list: our catalog tab (same slot id
+# 'all') takes over this profile's Plugins settings page. The bundle patch
+# layer applies only while this plugin is installed — removing it restores
+# the official inventory automatically.
+- id: ui-settings-plugin-inventory
+  disabled: true

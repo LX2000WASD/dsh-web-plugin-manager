@@ -116,8 +116,10 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     void profiles().then((items) => {
       setProfileList(items)
       if (items.length > 0) {
-        setSelected(items[0]!.name)
-        refresh(items[0]!.name)
+        // Default to the profile hosting this running plugin, else the first.
+        const current = items.find(profile => profile.isCurrent === true) ?? items[0]!
+        setSelected(current.name)
+        refresh(current.name)
       } else {
         setState({ status: 'ready', snapshot: undefined as unknown as PluginManagerSnapshot })
       }
