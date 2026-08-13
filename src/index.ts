@@ -318,6 +318,13 @@ export class PluginManagerService extends Service {
           const fullName = typeof item['full_name'] === 'string' ? item['full_name'] : ''
           // The official deepseek-ai org hosts the harness itself, not plugins.
           if (fullName.length === 0 || seenNames.has(fullName) || fullName.startsWith('deepseek-ai/')) continue
+          // topic tags are widely misused; keep only repos whose name or
+          // description signals the DSH ecosystem (dsh as a word or prefix,
+          // harness, cordis — so "DeepHash" or "crash" do not match).
+          const description = typeof item['description'] === 'string' ? item['description'] : ''
+          const text = (fullName + ' ' + description).toLocaleLowerCase()
+          const dshSignal = /(^|[^a-z0-9])dsh([^a-z0-9]|$)/.test(text) || text.includes('dsh-')
+          if (!dshSignal && !text.includes('harness') && !text.includes('cordis')) continue
           seenNames.add(fullName)
           rawItems.push(item)
         }
