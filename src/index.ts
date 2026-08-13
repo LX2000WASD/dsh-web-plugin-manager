@@ -1163,9 +1163,18 @@ function isOfficialProfile(name: string): boolean {
 
 /** Whether a profile hosts the running plugin-manager (its dependency). */
 function isHostProfile(name: string): boolean {
+  // The profile hosting this running instance — renaming or removing it would
+  // break the live process. Other profiles that merely install the plugin
+  // (e.g. via copyPlugins) remain manageable.
   try {
-    const manifest = readManifest(profileDir(name)) as { dependencies?: Record<string, string> }
-    return Object.keys(manifest.dependencies ?? {}).includes(OUR_PACKAGE_NAME)
+    const argv = process.argv
+    const flagIndex = argv.indexOf('--profile')
+    if (flagIndex >= 0 && argv[flagIndex + 1] !== undefined) {
+      return name === argv[flagIndex + 1]
+    }
+    // `dsh web` / `dsh headless` command mode (no --profile flag).
+    const candidate = argv.find(arg => !arg.startsWith('-') && !arg.endsWith('bin.js') && !arg.includes('node'))
+    return candidate !== undefined && name === candidate
   } catch {
     return false
   }
