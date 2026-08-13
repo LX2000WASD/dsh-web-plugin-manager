@@ -63,6 +63,7 @@ export function apply(ctx: ClientContext): void {
     setEnabled: (profile, entryId, enabled) => call<MutationResult>('setEnabled', { profile, entryId, enabled }),
     install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
     remove: (profile, name) => call<CommandResult>('remove', { profile, name }),
+    removeInsert: (profile, rowId) => call<MutationResult>('removeInsert', { profile, rowId }),
   })
 
   ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({

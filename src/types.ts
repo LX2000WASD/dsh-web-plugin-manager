@@ -39,6 +39,16 @@ export interface ManagedPackage {
   readonly managedDisabledIds: readonly string[]
 }
 
+/** One insert row (non-bundle plugin mount) in the profile patch file. */
+export interface InsertRow {
+  /** Insert row id (the mounted entry id). */
+  readonly id: string
+  /** Module specifier (package name) the row mounts. */
+  readonly name: string
+  /** Whether the row lives inside a plugin-manager managed block. */
+  readonly managed: boolean
+}
+
 /** Complete snapshot for one profile. */
 export interface PluginManagerSnapshot {
   readonly profile: ProfileInfo
@@ -46,6 +56,8 @@ export interface PluginManagerSnapshot {
   readonly entries: readonly RuntimeEntry[]
   /** Installed packages with bundle status. */
   readonly packages: readonly ManagedPackage[]
+  /** Insert rows (non-bundle plugin mounts) in the profile patch file. */
+  readonly insertRows: readonly InsertRow[]
 }
 
 /** Result of an enable/disable mutation. */
@@ -59,4 +71,6 @@ export interface CommandResult {
   readonly ok: boolean
   readonly exitCode: number | null
   readonly output: string
+  /** Real package names resolved from the profile manifest after install. */
+  readonly installed?: readonly string[]
 }

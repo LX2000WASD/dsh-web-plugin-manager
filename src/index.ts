@@ -10,14 +10,20 @@
  *  - the live Loader tree (`ctx.loader.entries()`, like the official
  *    read-only inventory),
  *  - the profile manifest (`dsh.profile.bundles` layer stack),
- *  - the profile's installed dependencies (`package.json`).
+ *  - the profile's installed dependencies (`package.json`),
+ *  - insert rows in the profile `cordis.patch.yml` (live-mounted non-bundle
+ *    plugins).
  *
- * Write side:
+ * Write side (V2):
  *  - enable/disable edits the profile's `cordis.patch.yml` through the
  *    managed-block mechanism (src/patch.ts) — reversible, reviewable, never
- *    rewrites user content;
- *  - install/remove shells out to the official `dsh plugin` CLI, which owns
- *    the pnpm reconcile of `dsh.profile.bundles`.
+ *    rewrites user content; config HMR applies it live, no restart;
+ *  - install/remove shells out to the official `dsh plugin` CLI (pnpm +
+ *    reconcile of `dsh.profile.bundles`); after install the real package name
+ *    is resolved from the manifest, and a non-bundle plugin is additionally
+ *    mounted as a managed insert row (config HMR live, no restart);
+ *  - agent tools (plugin_status/install/uninstall/toggle) register on
+ *    ctx.tools when the host provides it (src/tools.ts).
  */
 
 import { execFile } from 'node:child_process'
@@ -27,11 +33,16 @@ import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import z from '@deepseek-ai/schemastery'
 import type {
-  CommandResult, ManagedPackage, MutationResult, PluginManagerSnapshot,
+  CommandResult, InsertRow, ManagedPackage, MutationResult, PluginManagerSnapshot,
   ProfileInfo, RuntimeEntry,
 } from './types.ts'
-import { addDisableBlock, hasManagedDisable, removeDisableBlock, writePatch } from './patch.ts'
+import {
+  addDisableBlock, addInsertRow, hasManagedDisable, readInsertRows,
+  removeDisableBlock, removeInsertRow, writePatch,
+} from './patch.ts'
+import { registerTools } from './tools.ts'
 
 export type * from './types.ts'
 
@@ -139,21 +150,10 @@ export class PluginManagerService extends Service {
     const bundles = (Array.isArray(profileManifest['bundles']) ? profileManifest['bundles'] : []) as string[]
     const deps = (manifest['dependencies'] ?? {}) as Record<string, string>
 
-    const entries: RuntimeEntry[] = []
-    for (const entry of this.ctx.loader.entries()) {
-      if (entry.options.group) continue
-      const state = entry.fiber?.state
-      const phase = state === undefined
-        ? null
-        : state === 0 ? 'pending' : state === 1 ? 'loading' : state === 2 ? 'active'
-        : state === 3 ? 'failed' : state === 4 ? null : 'unloading'
-      entries.push({
-        entryId: entry.id,
-        moduleName: entry.options.name,
-        enabled: !entry.disabled,
-        fiberPhase: phase,
-      })
-    }
+    // Stable view: Loader entry ids are random per mount (Math.random
+    // hex), so patch targeting must use the include-tree row id
+    // (EntryOptions.id — stable across reloads; official semantics).
+    const entries = includeRows(this.ctx)
 
     const patch = readPatch(dir)
     const packages: ManagedPackage[] = Object.keys(deps).map((name) => {
@@ -168,44 +168,83 @@ export class PluginManagerService extends Service {
       }
     })
 
+    const insertRows: InsertRow[] = readInsertRows(patch).map((row) => ({
+      id: row.id,
+      name: row.name,
+      managed: row.managed,
+    }))
+
     return {
       profile: { name: profile, path: dir, bundles, dependencies: packages.map(p => p.name) },
       entries,
       packages,
+      insertRows,
     }
   }
 
-  /** Enable or disable one Loader entry via the managed patch block. */
+  /** Enable or disable one plugin row via the managed patch block (live). */
   setEnabled(profile: string, entryId: string, enabled: boolean): MutationResult {
     const dir = profileDir(profile)
     if (!existsSync(dir)) return { ok: false, message: `profile not found: ${profile}` }
-    // Loader entry ids carry the include-group prefix (include:minimal); a
-    // targeted patch row addresses the plain row id (minimal).
-    const rowId = entryId.startsWith('include:') ? entryId.slice('include:'.length) : entryId
-    if (rowId.includes(':')) return { ok: false, message: `unsupported entry id: ${JSON.stringify(entryId)}` }
+    // entryId is the include-tree row id (stable). Random-mount ids (8-hex)
+    // cannot be patch-targeted; the UI does not offer toggles for them.
+    if (entryId.includes(':') || !isStableRowId(entryId)) {
+      return { ok: false, message: `not a patch-targetable row id: ${JSON.stringify(entryId)}` }
+    }
     try {
       const current = readPatch(dir)
       const next = enabled
-        ? removeDisableBlock(current, rowId)
-        : addDisableBlock(current, rowId)
+        ? removeDisableBlock(current, entryId)
+        : addDisableBlock(current, entryId)
       if (next !== current) writePatch(patchPath(dir), next)
       return {
         ok: true,
         message: enabled
-          ? `enabled ${rowId} (restart required)`
-          : `disabled ${rowId} (restart required)`,
+          ? `enabled ${entryId} (live via config HMR)`
+          : `disabled ${entryId} (live via config HMR)`,
       }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
   }
 
-  /** Install a bundle via dsh plugin (preserving in-box bundles). */
+  /**
+   * Install a plugin via dsh plugin (preserving in-box bundles). After a
+   * successful add, the real package name is resolved from the manifest
+   * (V2-C: pnpm dependency values may be path/git source strings; the
+   * dependency key is the package name). A non-bundle plugin (no dsh.bundle
+   * declaration) is then mounted as a managed insert row — config HMR applies
+   * it live, no restart.
+   */
   async install(profile: string, spec: string): Promise<CommandResult> {
     const before = readBundles(profile)
     const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
-    if (result.ok) restoreInBoxBundles(profile, before)
-    return result
+    if (!result.ok) return result
+    restoreInBoxBundles(profile, before)
+    const installed = resolveInstalledName(profile, spec)
+    if (installed === null || exportsBundlePatch(profile, installed)) {
+      return { ...result, installed: installed !== null ? [installed] : [] }
+    }
+    // Non-bundle plugin: write the managed insert row (live mount).
+    const rowId = slugify(installed)
+    try {
+      const dir = profileDir(profile)
+      const current = readPatch(dir)
+      const next = addInsertRow(current, rowId, installed)
+      if (next !== current) writePatch(patchPath(dir), next)
+      return {
+        ...result,
+        installed: [installed],
+        output: result.output
+          + `\n[plugin-manager] mounted ${installed} as insert row ${rowId} (live via config HMR)`,
+      }
+    } catch (error: unknown) {
+      return {
+        ...result,
+        installed: [installed],
+        output: result.output + `\n[plugin-manager] install ok but insert row failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
   }
 
   /** Remove an installed bundle via dsh plugin (preserving in-box bundles). */
@@ -215,6 +254,109 @@ export class PluginManagerService extends Service {
     if (result.ok) restoreInBoxBundles(profile, before)
     return result
   }
+
+  /** Remove one managed insert row (non-bundle plugin, live unmount). */
+  removeInsert(profile: string, rowId: string): MutationResult {
+    const dir = profileDir(profile)
+    if (!existsSync(dir)) return { ok: false, message: `profile not found: ${profile}` }
+    try {
+      const current = readPatch(dir)
+      const rows = readInsertRows(current)
+      const row = rows.find(r => r.id === rowId)
+      if (row === undefined) return { ok: false, message: `insert row not found: ${rowId}` }
+      if (!row.managed) return { ok: false, message: `row ${rowId} is user-owned; remove it manually` }
+      const { content, removed } = removeInsertRow(current, rowId)
+      if (!removed) return { ok: false, message: `no managed insert row: ${rowId}` }
+      writePatch(patchPath(dir), content)
+      return { ok: true, message: `removed insert row ${rowId} (live via config HMR)` }
+    } catch (error: unknown) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+}
+
+/** A loader entry with the fields we read (structural, loader types stay optional). */
+interface RowEntryLike {
+  readonly id: string
+  readonly options?: { readonly id?: string; readonly name?: string; readonly group?: boolean | null }
+  readonly disabled?: boolean
+  readonly fiber?: { readonly state?: number }
+  readonly subtree?: { entries(): Iterable<RowEntryLike> }
+}
+
+/** Loader random-mount ids are 8-hex (Math.random().toString(16).slice(2, 10)). */
+function isStableRowId(id: string): boolean {
+  return !/^[0-9a-f]{8}$/.test(id)
+}
+
+/** Map a fiber state number to the wire phase label. */
+function phaseOf(state: number | undefined): RuntimeEntry['fiberPhase'] {
+  if (state === undefined) return null
+  if (state === 0) return 'pending'
+  if (state === 1) return 'loading'
+  if (state === 2) return 'active'
+  if (state === 3) return 'failed'
+  if (state === 4) return null
+  return 'unloading'
+}
+
+/**
+ * Read the composed include-tree rows as the stable runtime view. Loader
+ * entry ids are random per mount, so patch targeting must use the include
+ * row id (EntryOptions.id — stable across reloads by official semantics).
+ * Random-mount rows (no explicit id) keep their random id and are excluded
+ * from patch-targetable operations by the UI (isStableRowId).
+ */
+function includeRows(ctx: Context): RuntimeEntry[] {
+  const loader = ctx.get('loader') as { entries(): Iterable<RowEntryLike> } | undefined
+  if (loader === undefined) return []
+  for (const entry of loader.entries()) {
+    if (entry.id !== 'include') continue
+    const rows: RuntimeEntry[] = []
+    for (const row of entry.subtree?.entries() ?? []) {
+      const options = row.options
+      if (options === undefined || options.id === undefined || options.group) continue
+      rows.push({
+        entryId: options.id,
+        moduleName: options.name ?? '',
+        enabled: !row.disabled,
+        fiberPhase: phaseOf(row.fiber?.state),
+      })
+    }
+    return rows
+  }
+  return []
+}
+
+/**
+ * Resolve the real package name after an install: pnpm writes the package's
+ * own name as the dependency key, while the requested source may have been a
+ * path/git/tarball locator. Exact match first, then a dependency value
+ * containing the source string.
+ */
+function resolveInstalledName(profile: string, source: string): string | null {
+  const manifest = readManifest(profileDir(profile)) as { dependencies?: Record<string, string> }
+  const deps = manifest.dependencies ?? {}
+  if (typeof deps[source] === 'string') return source
+  const hit = Object.keys(deps).find(key => deps[key] === source || deps[key]?.includes(source))
+  return hit ?? null
+}
+
+/** Whether an installed package declares dsh.bundle (bundle-plugin shape). */
+function exportsBundlePatch(profile: string, packageName: string): boolean {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(profileDir(profile), 'node_modules', packageName, 'package.json'), 'utf8'),
+    ) as { dsh?: { bundle?: { patch?: unknown } } }
+    return manifest.dsh?.bundle?.patch !== undefined
+  } catch {
+    return false
+  }
+}
+
+/** Turn a package name into a safe insert-row id (scope slash → dash). */
+function slugify(name: string): string {
+  return name.replace(/^@/, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase()
 }
 
 /** Read the current bundle list of a profile. */
@@ -337,6 +479,12 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.remove(profile, name) })
           return
         }
+        case 'removeInsert': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          const rowId = typeof body['rowId'] === 'string' ? body['rowId'] : ''
+          sendJson(res, 200, { ok: true, value: service.removeInsert(profile, rowId) })
+          return
+        }
         default:
           sendJson(res, 404, { ok: false, error: { code: 'unknown-op', message: op } })
       }
@@ -349,17 +497,27 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers
 }
 
-/** Plugin entry: mount the service and (when web is present) the routes. */
+/** Plugin entry config: target profile for the agent tools. */
+export interface PluginManagerConfig {
+  /** Profile the agent tools (plugin_status/install/uninstall/toggle) manage. */
+  profile: string
+}
+
+export const Config = z.object({
+  profile: z.string().default('web'),
+}) as unknown as z<PluginManagerConfig>
+
+/** Plugin entry: mount the service, routes, and (when present) agent tools. */
 export const name = 'plugin-manager'
 export const inject = ['loader']
 
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: PluginManagerConfig): void {
   const service = new PluginManagerService(ctx)
   // webServer is a sibling include-group row; ctx.inject waits for it like
   // the official agent-tool-presentation waits for codeRuntime.
@@ -368,6 +526,14 @@ export function apply(ctx: Context): void {
       const disposers = registerRoutes(webCtx, service)
       return () => { for (const dispose of disposers) dispose() }
     }, 'dsh-plugin-manager: routes')
+  })
+  // V2-E: agent tools, when the host provides the tools service (web
+  // profiles do; headless may not — inject simply never fires).
+  ctx.inject(['tools'], (toolsCtx: Context) => {
+    toolsCtx.effect(() => {
+      const disposers = registerTools(toolsCtx, service, config.profile)
+      return () => { for (const dispose of disposers) dispose() }
+    }, 'dsh-plugin-manager: tools')
   })
 }
 

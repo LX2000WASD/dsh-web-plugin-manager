@@ -29,6 +29,14 @@ export const zh = {
   entryId: '条目',
   module: '模块',
   confirmRemove: '从 profile 中删除此包？',
+  insertRows: '实时挂载插件',
+  liveBadge: '实时',
+  userBadge: '用户',
+  uninstallButton: '卸载',
+  confirmUninstall: '卸载此实时挂载插件？',
+  noInsertRows: '没有 insert 行。安装非 bundle 插件会自动实时挂载。',
+  installMounted: '已识别为插件，已实时挂载（无需重启）',
+  confirmDisable: '停用该条目？若其他条目依赖它，profile 可能无法启动（可在 cordis.patch.yml 手动恢复）。',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -61,4 +69,12 @@ export const en = {
   entryId: 'entry',
   module: 'module',
   confirmRemove: 'Remove this package from the profile?',
+  insertRows: 'Live-mounted plugins',
+  liveBadge: 'live',
+  userBadge: 'user',
+  uninstallButton: 'Uninstall',
+  confirmUninstall: 'Unmount this live-mounted plugin?',
+  noInsertRows: 'No insert rows. Installing a non-bundle plugin mounts it live automatically.',
+  installMounted: 'Recognized as a plugin and mounted live (no restart)',
+  confirmDisable: 'Disable this entry? If other entries depend on it, the profile may fail to start (recoverable by editing cordis.patch.yml manually).',
 } satisfies Record<PluginManagerLocaleKey, string>

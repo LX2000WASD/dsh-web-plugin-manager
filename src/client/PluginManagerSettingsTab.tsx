@@ -17,6 +17,7 @@ export interface PluginManagerTabInjected {
   readonly setEnabled: (profile: string, entryId: string, enabled: boolean) => Promise<MutationResult>
   readonly install: (profile: string, spec: string) => Promise<CommandResult>
   readonly remove: (profile: string, name: string) => Promise<CommandResult>
+  readonly removeInsert: (profile: string, rowId: string) => Promise<MutationResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -40,7 +41,7 @@ const styles: Record<string, React.CSSProperties> = {
 }
 
 /** Render the management tab. */
-export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, remove, t }: PluginManagerTabProps): ReactNode {
+export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, remove, removeInsert, t }: PluginManagerTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
   const [state, setState] = useState<ViewState>({ status: 'loading' })
@@ -79,6 +80,7 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
 
   const onToggle = async (entryId: string, enable: boolean): Promise<void> => {
     if (selected.length === 0) return
+    if (!enable && !window.confirm(t('confirmDisable'))) return
     setBusy(entryId)
     try {
       const result = await setEnabled(selected, entryId, enable)
@@ -95,7 +97,10 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
     setBusy('install')
     try {
       const result = await install(selected, trimmed)
-      setOutput(`$ dsh plugin --profile ${selected} add ${trimmed}\n${result.output}`)
+      const mounted = result.installed !== undefined && result.installed.length > 0
+        ? `\n✓ ${t('installMounted')}`
+        : ''
+      setOutput(`$ dsh plugin --profile ${selected} add ${trimmed}\n${result.output}${mounted}`)
       setSpec('')
       refresh(selected)
     } finally {
@@ -109,6 +114,18 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
     try {
       const result = await remove(selected, name)
       setOutput(`$ dsh plugin --profile ${selected} remove ${name}\n${result.output}`)
+      refresh(selected)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const onUninstall = async (rowId: string): Promise<void> => {
+    if (!window.confirm(t('confirmUninstall'))) return
+    setBusy(rowId)
+    try {
+      const result = await removeInsert(selected, rowId)
+      setOutput(result.message)
       refresh(selected)
     } finally {
       setBusy(null)
@@ -174,6 +191,28 @@ export function PluginManagerSettingsTab({ profiles, list, setEnabled, install, 
               {busy === 'install' ? t('installing') : t('installButton')}
             </button>
           </div>
+
+          <h3>{t('insertRows')}</h3>
+          {(snapshot.insertRows ?? []).length === 0 ? <p>{t('noInsertRows')}</p> : (
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {(snapshot.insertRows ?? []).map((row) => (
+                <li key={row.id} style={styles.row}>
+                  <span style={styles.mono}>{row.id}</span>
+                  <span style={{ ...styles.mono, opacity: 0.7 }}>{row.name}</span>
+                  <span style={{ ...styles.badge, color: row.managed ? '#2a7' : '#888' }}>
+                    {row.managed ? t('liveBadge') : t('userBadge')}
+                  </span>
+                  <span style={{ marginLeft: 'auto' }}>
+                    {row.managed && (
+                      <button type="button" disabled={busy !== null} onClick={() => void onUninstall(row.id)}>
+                        {t('uninstallButton')}
+                      </button>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
 
           <h3>{t('entries')}</h3>
           {entries.length === 0 ? <p>—</p> : (

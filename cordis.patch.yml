@@ -4,3 +4,5 @@
 - insert:
     - id: plugin-manager
       name: 'dsh-plugin-manager'
+      config:
+        profile: 'web'
