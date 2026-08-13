@@ -261,23 +261,21 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                 const open = expandedPkg === pkg.name
                 return (
                   <li key={pkg.name} className="pm-card" data-open={open ? 'true' : undefined}>
-                    <div style={styles.cardRow}>
-                      <button
-                        className="pm-card-content"
-                        style={styles.cardContent}
-                        type="button"
-                        aria-expanded={open}
-                        onClick={() => setExpandedPkg(current => current === pkg.name ? null : pkg.name)}
-                      >
-                        <span style={styles.cardTitle} title={pkg.name}>{pkg.name}</span>
-                        <span style={styles.cardTrailing}>
-                          <span style={{ ...styles.tag, ...(pkg.isBundle ? styles.tagOn : {}) }}>
-                            {pkg.isBundle ? t('bundleBadge') : t('dependencyBadge')}
-                          </span>
-                          <IconChevronDownOutline14 size={12} aria-hidden="true" />
+                    <button
+                      className="pm-card-content"
+                      style={styles.cardContent}
+                      type="button"
+                      aria-expanded={open}
+                      onClick={() => setExpandedPkg(current => current === pkg.name ? null : pkg.name)}
+                    >
+                      <span style={styles.cardTitle} title={pkg.name}>{pkg.name}</span>
+                      <span style={styles.cardTrailing}>
+                        <span style={{ ...styles.tag, ...(pkg.isBundle ? styles.tagOn : {}) }}>
+                          {pkg.isBundle ? t('bundleBadge') : t('dependencyBadge')}
                         </span>
-                      </button>
-                    </div>
+                        <IconChevronDownOutline14 size={12} aria-hidden="true" />
+                      </span>
+                    </button>
                     {open ? (
                       <div style={styles.cardDetails}>
                         <code style={styles.entryValue}>{pkg.name}{pkg.version ? '@' + pkg.version : ''}</code>
