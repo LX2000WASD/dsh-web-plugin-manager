@@ -165,11 +165,6 @@ export class PluginManagerService extends Service {
     const bundles = (Array.isArray(profileManifest['bundles']) ? profileManifest['bundles'] : []) as string[]
     const deps = (manifest['dependencies'] ?? {}) as Record<string, string>
 
-    // Stable view: Loader entry ids are random per mount (Math.random
-    // hex), so patch targeting must use the include-tree row id
-    // (EntryOptions.id — stable across reloads; official semantics).
-    const entries = includeRows(this.ctx)
-
     const patch = readPatch(dir)
     const packages: ManagedPackage[] = Object.keys(deps).map((name) => {
       const isBundle = bundles.includes(name)
@@ -188,6 +183,15 @@ export class PluginManagerService extends Service {
       name: row.name,
       managed: row.managed,
     }))
+
+    // Stable view: Loader entry ids are random per mount (Math.random
+    // hex), so patch targeting must use the include-tree row id
+    // (EntryOptions.id — stable across reloads; official semantics).
+    const entries = includeRows(this.ctx, {
+      packageNames: new Set(packages.map(pkg => pkg.name)),
+      insertNames: new Set(insertRows.map(row => row.name)),
+      insertIds: new Set(insertRows.map(row => row.id)),
+    })
 
     return {
       profile: {
@@ -321,6 +325,13 @@ function phaseOf(state: number | undefined): RuntimeEntry['fiberPhase'] {
   return 'unloading'
 }
 
+/** Sets used to decide whether a row is user-installed. */
+interface InstalledSets {
+  readonly packageNames: ReadonlySet<string>
+  readonly insertNames: ReadonlySet<string>
+  readonly insertIds: ReadonlySet<string>
+}
+
 /**
  * Read the composed include-tree rows as the stable runtime view. Loader
  * entry ids are random per mount, so patch targeting must use the include
@@ -328,7 +339,7 @@ function phaseOf(state: number | undefined): RuntimeEntry['fiberPhase'] {
  * Random-mount rows (no explicit id) keep their random id and are excluded
  * from patch-targetable operations by the UI (isStableRowId).
  */
-function includeRows(ctx: Context): RuntimeEntry[] {
+function includeRows(ctx: Context, installed: InstalledSets): RuntimeEntry[] {
   const loader = ctx.get('loader') as { entries(): Iterable<RowEntryLike> } | undefined
   if (loader === undefined) return []
   for (const entry of loader.entries()) {
@@ -337,11 +348,15 @@ function includeRows(ctx: Context): RuntimeEntry[] {
     for (const row of entry.subtree?.entries() ?? []) {
       const options = row.options
       if (options === undefined || options.id === undefined || options.group) continue
+      const name = options.name ?? ''
       rows.push({
         entryId: options.id,
-        moduleName: options.name ?? '',
+        moduleName: name,
         enabled: !row.disabled,
         fiberPhase: phaseOf(row.fiber?.state),
+        installed: installed.packageNames.has(name)
+          || installed.insertNames.has(name)
+          || installed.insertIds.has(options.id),
       })
     }
     return rows

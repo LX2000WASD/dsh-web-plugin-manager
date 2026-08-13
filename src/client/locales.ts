@@ -7,7 +7,7 @@ export const zh = {
   tab: '管理',
   heading: '插件管理',
   intro: '为所选 profile 安装、删除、启停插件。启停变更在下次重启后生效（Web HMR 已关闭）。',
-  profileLabel: 'Profile',
+  profileLabel: '配置文件',
   refresh: '刷新',
   packages: '已安装包',
   entries: '运行时条目',
@@ -60,6 +60,10 @@ export const zh = {
   active: '运行中',
   failed: '失败',
   unloading: '卸载中',
+  configState: '配置状态',
+  cordisState: 'Cordis 状态',
+  mounted: '已挂载',
+  notMounted: '未挂载',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -123,4 +127,8 @@ export const en = {
   active: 'active',
   failed: 'failed',
   unloading: 'unloading',
+  configState: 'Configuration',
+  cordisState: 'Cordis state',
+  mounted: 'mounted',
+  notMounted: 'not mounted',
 } satisfies Record<PluginManagerLocaleKey, string>

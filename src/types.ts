@@ -27,6 +27,8 @@ export interface RuntimeEntry {
   readonly enabled: boolean
   /** Live fiber phase: pending/loading/active/failed/unloading, null when unobserved. */
   readonly fiberPhase: 'pending' | 'loading' | 'active' | 'failed' | 'unloading' | null
+  /** Whether this entry is user-installed (profile dependency or insert row). */
+  readonly installed: boolean
 }
 
 /** One installable/installed package's management view. */

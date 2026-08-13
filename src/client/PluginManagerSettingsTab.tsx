@@ -4,7 +4,7 @@
  * tab only manages installation state.
  */
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -103,23 +103,26 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const [spec, setSpec] = useState('')
   const [output, setOutput] = useState<string>('')
 
-  const refresh = (profile: string): void => {
+  // Stable identity for the once-only boot effect (see PluginCatalogTab).
+  const injected = useRef({ profiles, list, install, remove, removeInsert })
+
+  const load = (profile: string): void => {
     if (profile.length === 0) return
     setState({ status: 'loading' })
-    void list(profile).then(
+    void injected.current.list(profile).then(
       (snapshot) => setState({ status: 'ready', snapshot }),
       (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
     )
   }
 
   useEffect(() => {
-    void profiles().then((items) => {
+    void injected.current.profiles().then((items) => {
       setProfileList(items)
       if (items.length > 0) {
         // Default to the profile hosting this running plugin, else the first.
         const current = items.find(profile => profile.isCurrent === true) ?? items[0]!
         setSelected(current.name)
-        refresh(current.name)
+        load(current.name)
       } else {
         setState({ status: 'ready', snapshot: undefined as unknown as PluginManagerSnapshot })
       }
@@ -127,11 +130,11 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles])
+  }, [])
 
   const onSelect = (name: string): void => {
     setSelected(name)
-    refresh(name)
+    load(name)
   }
 
   const onInstall = async (): Promise<void> => {
@@ -145,7 +148,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
         : ''
       setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output + mounted)
       setSpec('')
-      refresh(selected)
+      load(selected)
     } finally {
       setBusy(null)
     }
@@ -157,7 +160,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     try {
       const result = await remove(selected, name)
       setOutput('$ dsh plugin --profile ' + selected + ' remove ' + name + '\n' + result.output)
-      refresh(selected)
+      load(selected)
     } finally {
       setBusy(null)
     }
@@ -169,7 +172,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     try {
       const result = await removeInsert(selected, rowId)
       setOutput(result.message)
-      refresh(selected)
+      load(selected)
     } finally {
       setBusy(null)
     }
@@ -194,7 +197,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
             <option key={profile.name} value={profile.name}>{profile.name}</option>
           ))}
         </select>
-        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => refresh(selected)}>
+        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => load(selected)}>
           {t('refresh')}
         </Button>
       </div>

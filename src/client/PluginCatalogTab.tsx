@@ -5,7 +5,7 @@
  * hidden by default), and sorting (default / A-Z / enabled × asc/desc).
  */
 
-import { useEffect, useId, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Button, IconChevronDownOutline14, IconSearchOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -110,6 +110,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'grid', gridTemplateColumns: '76px minmax(0, 1fr)', gap: '6px 10px',
     margin: '8px 0 0', color: 'var(--dsw-alias-label-tertiary)', fontSize: '11px', lineHeight: '17px',
   },
+  detailsRow: { display: 'contents' },
   status: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)', margin: 0 },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
   select: {
@@ -130,14 +131,14 @@ function moduleShortName(moduleName: string): string {
     .replace(/^dsh-(?:host-|client-)?/, '')
 }
 
-/** Whether an entry is user-installed (a profile dependency or insert row). */
-function isInstalled(entry: RuntimeEntry, snapshot: PluginManagerSnapshot): boolean {
-  const packageNames = new Set(snapshot.packages.map(pkg => pkg.name))
-  const insertNames = new Set(snapshot.insertRows.map(row => row.name))
-  const insertIds = new Set(snapshot.insertRows.map(row => row.id))
-  return packageNames.has(entry.moduleName)
-    || insertNames.has(entry.moduleName)
-    || insertIds.has(entry.entryId)
+/** Author:module display id (@scope/pkg → scope:pkg, else local:name). */
+function authorModule(moduleName: string): string {
+  if (moduleName.startsWith('@')) {
+    const rest = moduleName.slice(1)
+    const slash = rest.indexOf('/')
+    if (slash > 0) return rest.slice(0, slash) + ':' + rest.slice(slash + 1)
+  }
+  return 'local:' + moduleName
 }
 
 /** Render the catalog (shadows the official read-only inventory). */
@@ -153,23 +154,19 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
   const [descending, setDescending] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
 
-  const refresh = (profile: string): void => {
-    if (profile.length === 0) return
-    setState({ status: 'loading' })
-    void list(profile).then(
-      (snapshot) => setState({ status: 'ready', snapshot }),
-      (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
-    )
-  }
+  // Stable identity for the once-only boot effect: injected faces may be
+  // rebuilt by the slot renderer on parent re-renders, and depending on them
+  // would re-run the load and grow the list on every interaction.
+  const injected = useRef({ profiles, list, setEnabled })
 
   useEffect(() => {
-    void profiles().then((items) => {
+    void injected.current.profiles().then((items) => {
       setProfileList(items)
       if (items.length > 0) {
         // Default to the profile hosting this running plugin, else the first.
         const current = items.find(profile => profile.isCurrent === true) ?? items[0]!
         setSelected(current.name)
-        refresh(current.name)
+        load(current.name)
       } else {
         setState({ status: 'ready', snapshot: undefined as unknown as PluginManagerSnapshot })
       }
@@ -177,12 +174,21 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
       setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles])
+  }, [])
+
+  const load = (profile: string): void => {
+    if (profile.length === 0) return
+    setState({ status: 'loading' })
+    void injected.current.list(profile).then(
+      (snapshot) => setState({ status: 'ready', snapshot }),
+      (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
+    )
+  }
 
   const onSelect = (name: string): void => {
     setSelected(name)
     setExpanded(null)
-    refresh(name)
+    load(name)
   }
 
   const onToggle = async (entryId: string, enable: boolean): Promise<void> => {
@@ -190,9 +196,9 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
     if (!enable && !window.confirm(t('confirmDisable'))) return
     setBusy(entryId)
     try {
-      const result = await setEnabled(selected, entryId, enable)
+      const result = await injected.current.setEnabled(selected, entryId, enable)
       setExpanded(null)
-      refresh(selected)
+      load(selected)
     } finally {
       setBusy(null)
     }
@@ -205,8 +211,8 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
     if (snapshot === undefined) return []
     const base = snapshot.entries
     const filtered = base.filter((entry) => {
-      if (filter === 'installed' && !isInstalled(entry, snapshot)) return false
-      if (filter === 'builtin' && isInstalled(entry, snapshot)) return false
+      if (filter === 'installed' && !entry.installed) return false
+      if (filter === 'builtin' && entry.installed) return false
       if (normalizedQuery.length === 0) return true
       return entry.entryId.toLocaleLowerCase().includes(normalizedQuery)
         || entry.moduleName.toLocaleLowerCase().includes(normalizedQuery)
@@ -241,6 +247,15 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
     return t('unloading')
   }
 
+  const cordisLabel = (phase: string | null, tfn: PluginCatalogTabProps['t']): string => {
+    if (phase === 'active') return tfn('mounted')
+    if (phase === null) return tfn('notMounted')
+    if (phase === 'pending') return tfn('pending')
+    if (phase === 'loading') return tfn('loadingPhase')
+    if (phase === 'failed') return tfn('failed')
+    return tfn('unloading')
+  }
+
   return (
     <div style={styles.section}>
       <div style={styles.toolbar}>
@@ -256,7 +271,7 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
             <option key={profile.name} value={profile.name}>{profile.name}</option>
           ))}
         </select>
-        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => refresh(selected)}>
+        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => load(selected)}>
           {t('refresh')}
         </Button>
       </div>
@@ -316,7 +331,6 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
             <ul style={styles.cards}>
               {rows.map((entry) => {
                 const title = moduleShortName(entry.moduleName)
-                const installed = isInstalled(entry, snapshot)
                 const open = expanded === entry.entryId
                 const detailId = catalogId + '-details-' + encodeURIComponent(entry.entryId)
                 return (
@@ -335,7 +349,6 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
                     >
                       <strong style={styles.cardTitle} title={entry.moduleName}>{title}</strong>
                       <span style={styles.cardTrailing}>
-                        {installed ? <span style={{ ...styles.configTag, ...styles.configTagOn }}>{t('installedBadge')}</span> : null}
                         {entry.enabled ? (
                           <span
                             style={dotStyle(entry.fiberPhase)}
@@ -358,15 +371,15 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
                     </button>
                     {open ? (
                       <div style={styles.cardDetails} id={detailId}>
-                        <code style={styles.entryValue} data-loader-entry>{entry.entryId}</code>
+                        <code style={styles.entryValue} data-loader-entry>{authorModule(entry.moduleName)}</code>
                         <dl style={styles.details}>
-                          <div>
-                            <dt>{t('module')}</dt>
-                            <dd>{entry.moduleName}</dd>
+                          <div style={styles.detailsRow}>
+                            <dt>{t('configState')}</dt>
+                            <dd>{entry.enabled ? t('enabled') : t('disabled')}</dd>
                           </div>
-                          <div>
-                            <dt>{t('phase')}</dt>
-                            <dd>{phaseLabel(entry.fiberPhase)}</dd>
+                          <div style={styles.detailsRow}>
+                            <dt>{t('cordisState')}</dt>
+                            <dd>{cordisLabel(entry.fiberPhase, t)}</dd>
                           </div>
                         </dl>
                         <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'flex-end' }}>
