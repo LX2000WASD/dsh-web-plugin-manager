@@ -221,6 +221,18 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 
   return (
     <div style={styles.section}>
+      <style>{`
+.pm-card {
+  min-width: 0; overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-3);
+}
+.pm-card[data-open='true'] { border-color: var(--dsw-alias-border-l1); }
+.pm-card-content:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -2px;
+}
+`}</style>
       <div style={styles.toolbar}>
         <span style={styles.filterLabel}>{t('profileLabel')}</span>
         <PmSelect

@@ -32,6 +32,7 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%', maxWidth: '760px', color: 'var(--dsw-alias-label-primary)',
   },
   toolbar: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
+  formCol: { display: 'flex', flexDirection: 'column', gap: '8px' },
   heading: { display: 'flex', alignItems: 'baseline', gap: '7px', padding: '0 2px' },
   headingTitle: { margin: 0, fontSize: '13px', lineHeight: '20px', fontWeight: 600 },
   headingCount: {
@@ -186,7 +187,7 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, createProfile, re
       <div style={styles.heading}>
         <h3 style={styles.headingTitle}>{t('createEnv')}</h3>
       </div>
-      <div style={styles.toolbar}>
+      <div style={styles.formCol}>
         <Input
           type="text"
           value={newName}
@@ -194,26 +195,28 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, createProfile, re
           disabled={busy !== null}
           onChange={(event) => setNewName(event.currentTarget.value)}
           onKeyDown={(event) => { if (event.key === 'Enter') void onCreate() }}
-          style={{ flex: 1 }}
+          style={{ width: '100%' }}
         />
-        <PmSelect
-          ariaLabel={t('templateLabel')}
-          value={template}
-          options={[
-            { value: 'web', label: t('templateWeb') },
-            { value: 'headless', label: t('templateHeadless') },
-          ]}
-          onChange={setTemplate}
-        />
-        <Button variant="primary" disabled={busy !== null || newName.trim().length === 0} onClick={() => void onCreate()}>
-          {busy === 'create' ? t('creating') : t('createButton')}
-        </Button>
+        <div style={styles.toolbar}>
+          <PmSelect
+            ariaLabel={t('templateLabel')}
+            value={template}
+            options={[
+              { value: 'web', label: t('templateWeb') },
+              { value: 'headless', label: t('templateHeadless') },
+            ]}
+            onChange={setTemplate}
+          />
+          <Button variant="primary" disabled={busy !== null || newName.trim().length === 0} onClick={() => void onCreate()}>
+            {busy === 'create' ? t('creating') : t('createButton')}
+          </Button>
+        </div>
       </div>
 
       <div style={styles.heading}>
         <h3 style={styles.headingTitle}>{t('transferTitle')}</h3>
       </div>
-      <div style={styles.toolbar}>
+      <div style={styles.formCol}>
         <Input
           type="text"
           value={transferNames}
@@ -221,24 +224,26 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, createProfile, re
           disabled={busy !== null}
           onChange={(event) => setTransferNames(event.currentTarget.value)}
           onKeyDown={(event) => { if (event.key === 'Enter') void onTransfer() }}
-          style={{ flex: 1 }}
+          style={{ width: '100%' }}
         />
-        <PmSelect
-          ariaLabel={t('transferFrom')}
-          value={transferFrom}
-          options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
-          onChange={setTransferFrom}
-        />
-        <span style={styles.filterLabel}>{t('transferArrow')}</span>
-        <PmSelect
-          ariaLabel={t('transferTo')}
-          value={transferTo}
-          options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
-          onChange={setTransferTo}
-        />
-        <Button variant="primary" disabled={busy !== null || transferNames.trim().length === 0 || transferFrom.length === 0 || transferTo.length === 0 || transferFrom === transferTo} onClick={() => void onTransfer()}>
-          {busy === 'transfer' ? t('transferring') : t('transferButton')}
-        </Button>
+        <div style={styles.toolbar}>
+          <PmSelect
+            ariaLabel={t('transferFrom')}
+            value={transferFrom}
+            options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
+            onChange={setTransferFrom}
+          />
+          <span style={styles.filterLabel}>{t('transferArrow')}</span>
+          <PmSelect
+            ariaLabel={t('transferTo')}
+            value={transferTo}
+            options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
+            onChange={setTransferTo}
+          />
+          <Button variant="primary" disabled={busy !== null || transferNames.trim().length === 0 || transferFrom.length === 0 || transferTo.length === 0 || transferFrom === transferTo} onClick={() => void onTransfer()}>
+            {busy === 'transfer' ? t('transferring') : t('transferButton')}
+          </Button>
+        </div>
       </div>
 
       {output.length > 0 && (

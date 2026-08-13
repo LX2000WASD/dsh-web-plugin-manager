@@ -30,8 +30,26 @@ export function PmSelect({ value, options, onChange, ariaLabel }: {
     <Menu
       open={open}
       anchor={(
-        <Button size="sm" variant="outline" aria-label={ariaLabel} onClick={() => setOpen(current => !current)}>
-          {selected?.label ?? value}
+        <Button
+          size="sm"
+          variant="outline"
+          aria-label={ariaLabel}
+          title={selected?.label ?? value}
+          style={{ maxWidth: 160 }}
+          onClick={() => setOpen(current => !current)}
+        >
+          <span
+            style={{
+              display: 'inline-block',
+              maxWidth: 120,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              verticalAlign: 'middle',
+            }}
+          >
+            {selected?.label ?? value}
+          </span>
           <IconChevronDownOutline14 size={12} aria-hidden="true" />
         </Button>
       )}
