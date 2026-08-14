@@ -31,7 +31,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process'
 import { connect, createServer } from 'node:net'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { basename, delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -74,10 +74,15 @@ function dshHome(): string {
   return process.env.DSH_HOME ?? join(homedir(), '.dsh')
 }
 
+/** The safe-profile-name rule (shared by profileDir and hostProfileName). */
+function isSafeProfileName(name: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(name) && name.length <= 120
+}
+
 /** Resolve one profile's directory, rejecting traversal. */
 function profileDir(name: string): string {
-  if (!/^[A-Za-z0-9._-]+$/.test(name) || name.length > 120) {
-    throw new Error(`unsafe profile name: ${JSON.stringify(name)}`)
+  if (!isSafeProfileName(name)) {
+    throw new Error("unsafe profile name: " + JSON.stringify(name))
   }
   return join(dshHome(), 'profiles', name)
 }
@@ -2253,22 +2258,63 @@ function isOfficialProfile(name: string): boolean {
 }
 
 /**
- * The name of the profile hosting this running instance (from the launch
- * argv), or null when it cannot be determined.
+ * The name of the profile hosting this running instance, or null when it
+ * cannot be determined safely.
+ *
+ * Sources, in order:
+ *   1. the --profile <name> flag in the launch argv (explicit, official);
+ *   2. the subcommand form (dsh web / dsh headless) - searched ONLY past
+ *      argv[0..1] (node executable + script path): an nvm/volta install
+ *      makes the script a symlink named dsh, so argv[1] is the binary's
+ *      own path; scanning the whole argv would take it as the profile name
+ *      and crash the boot with an unsafe-profile-name error (issue #1);
+ *   3. the plugin's own install location (<profile>/node_modules/
+ *      dsh-web-plugin-manager, npm/yarn layouts) as a last resort.
+ *
+ * Any candidate that is not a safe profile name yields null - the caller
+ * (apply) treats null as "no host", never crashing the plugin tree.
  */
 function hostProfileName(): string | null {
   try {
     const argv = process.argv
     const flagIndex = argv.indexOf('--profile')
     if (flagIndex >= 0 && argv[flagIndex + 1] !== undefined) {
-      return argv[flagIndex + 1]!
+      const flagged = argv[flagIndex + 1]!
+      return isSafeProfileName(flagged) ? flagged : null
     }
-    // `dsh web` / `dsh headless` command mode (no --profile flag).
-    const candidate = argv.find(arg => !arg.startsWith('-') && !arg.endsWith('bin.js') && !arg.includes('node'))
-    return candidate ?? null
+    // dsh web / dsh headless command mode (no --profile flag): only the
+    // args after the node executable and the script path are candidates.
+    const candidate = argv.slice(2).find(arg => !arg.startsWith('-') && !arg.endsWith('bin.js') && !arg.includes('node'))
+    if (candidate !== undefined && isSafeProfileName(candidate)) return candidate
+    // Last resort: derive the hosting profile from the install location
+    // (npm/yarn keep <profile>/node_modules/<pkg>; pnpm/link installs
+    // resolve elsewhere and simply yield null here).
+    return locationProfileName()
   } catch {
     return null
   }
+}
+
+/**
+ * Derive the hosting profile from the plugin's module location: the first
+ * ancestor directory whose package.json is named dsh-profile-<basename>
+ * (the official and createProfile naming). null when not found (pnpm and
+ * link: installs resolve outside the profile tree).
+ */
+function locationProfileName(): string | null {
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let depth = 0; depth < 10; depth += 1) {
+    if (isSafeProfileName(basename(dir))) {
+      try {
+        const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: unknown }
+        if (manifest.name === 'dsh-profile-' + basename(dir)) return basename(dir)
+      } catch { /* not a manifest level: keep walking */ }
+    }
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+  return null
 }
 
 /** Whether a profile hosts the running plugin-manager (its dependency). */
