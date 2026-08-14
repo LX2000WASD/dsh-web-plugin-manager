@@ -15,7 +15,7 @@ const PLATFORM = [
 ]
 
 export default defineConfig({
-  name: 'dsh-plugin-manager/client',
+  name: 'dsh-web-plugin-manager/client',
   entry: { client: 'src/client/index.ts' },
   outDir: 'dist',
   format: 'cjs',
@@ -37,7 +37,7 @@ export default defineConfig({
     entryFileNames: 'client.js',
     // The handoff: register this bundle's factory with the client-modules
     // loader; externals resolve through the injected require (module table).
-    banner: 'window.__ModuleLoader__.load({ id: "dsh-plugin-manager", factory: (require) => {',
+    banner: 'window.__ModuleLoader__.load({ id: "dsh-web-plugin-manager", factory: (require) => {',
     footer: 'return module.exports; } });',
     intro: 'var module = { exports: {} }; var exports = module.exports;',
   },

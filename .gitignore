@@ -2,6 +2,9 @@
 dist/
 node_modules/
 
+# pnpm 11 auto-generated workspace file (minimumReleaseAgeExclude bookkeeping)
+pnpm-workspace.yaml
+
 # Project docs and references (kept out of the plugin package repo)
 docs/
 reference/

@@ -58,9 +58,9 @@ export const OUR_PACKAGE_NAME = (() => {
     const manifest = JSON.parse(
       readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
     ) as { name?: unknown }
-    return typeof manifest.name === 'string' ? manifest.name : 'dsh-plugin-manager'
+    return typeof manifest.name === 'string' ? manifest.name : 'dsh-web-plugin-manager'
   } catch {
-    return 'dsh-plugin-manager'
+    return 'dsh-web-plugin-manager'
   }
 })()
 
@@ -334,7 +334,7 @@ export class PluginManagerService extends Service {
         let createdAt = ''
         try {
           const repoResponse = await fetch('https://api.github.com/repos/' + row.fullName, {
-            headers: { 'user-agent': 'dsh-plugin-manager' },
+            headers: { 'user-agent': 'dsh-web-plugin-manager' },
           })
           if (repoResponse.ok) {
             const repo = await repoResponse.json() as { stargazers_count?: unknown; updated_at?: unknown; created_at?: unknown }
