@@ -60,6 +60,7 @@ dsh plugin --profile <name> add .
 - **更新检测边界**：本地目录安装（非 git）无上游可比，报告"不可检测"；git URL 源需要 manifest 记录安装 commit（gitHead）才能比较
 - **健康检查为静态+尽力而为**：服务冲突依赖源码正则扫描，动态注册（字符串拼接的服务名）检测不到；peer 版本比较为简化 semver（`^`/`~`/`>=`/`<=`/`>`/`<`/精确/星号）
 - 市场条目来源于 awesome 目录，个别仓库可能已删除/私有（安装时报 `Repository not found`）
+- **nvm 用户注意**：子进程命令（dsh/npm/pnpm/git）解析按「运行中 node 目录 → PATH → $NVM_DIR」兜底，并把命中的工具目录注入子进程与终端窗口的 PATH——即使宿主进程不在 nvm 激活的 shell 中启动（桌面启动器/服务/nohup）也能工作；仅当 dsh 完全未安装时才需要从 nvm 激活的终端启动
 
 ## 开发
 

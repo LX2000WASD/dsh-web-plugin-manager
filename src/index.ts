@@ -29,7 +29,7 @@
 
 import { execFile, execFileSync, spawn } from 'node:child_process'
 import { connect, createServer } from 'node:net'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -105,14 +105,77 @@ function readPatch(dir: string): string {
 }
 
 /**
- * Resolve a PATH command to its absolute file path. On Windows the npm CLI
- * shims are .cmd/.bat files (dsh, npm, ...): `execFile`/`spawn` cannot run
- * them by bare name (no PATHEXT lookup), so the full shim path is needed
- * (Node >= 20.12 then executes .cmd/.bat files natively). Other platforms
- * return the bare name — PATH resolution happens in the child.
+ * Resolve a command to its executable path, preferring an absolute path so
+ * the caller can also inject its directory into child PATH.
+ *
+ * Resolution order (POSIX):
+ *   1. the directory of the running node — nvm/volta/fnm layouts put npm,
+ *      npx, pnpm and dsh right next to `process.execPath`. This is also the
+ *      toolchain the profile's node_modules were installed with, so it is
+ *      preferred over a PATH hit: a PATH `npm`/node from a different
+ *      (system) version would explode with module/engine mismatches. Under
+ *      a normal nvm host this is the same directory PATH would find;
+ *   2. plain PATH lookup — covers tools not installed per-node (git, dsh
+ *      via a global manager like pnpm/volta);
+ *   3. any nvm-installed node version's bin directory ($NVM_DIR) — rescues
+ *      hosts started by absolute path (desktop launcher, service, nohup)
+ *      where nvm's PATH setup never ran in this process;
+ *   4. the bare name — let the child surface the error.
+ *
+ * The returned `dir` is the directory the command lives in when it was NOT
+ * found on PATH (null when PATH resolution succeeded) — prepend it to child
+ * PATH so the tool's own children (a dsh shim's `node`, the CLI's `pnpm`)
+ * resolve with the same toolchain.
+ *
+ * Windows keeps the `where` lookup: the npm CLI shims are .cmd/.bat files
+ * (dsh, npm, ...) that `execFile`/spawn cannot run by bare name (no PATHEXT
+ * lookup) — the full shim path is needed (Node >= 20.12 then executes
+ * .cmd/.bat files natively).
  */
-function resolveCommand(name: string): string {
-  if (process.platform !== 'win32') return name
+interface ResolvedCommand {
+  /** Absolute executable path (or the bare name when nothing resolved). */
+  readonly command: string
+  /** Directory to prepend to child PATH, or null when already on PATH. */
+  readonly dir: string | null
+}
+
+/** Absolute path of `name` on PATH (POSIX walk; no shell involved). */
+function pathLookup(name: string): string | undefined {
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (dir.length === 0) continue
+    const candidate = join(dir, name)
+    try {
+      if (statSync(candidate).isFile()) {
+        accessSync(candidate, constants.X_OK)
+        return candidate
+      }
+    } catch { /* not executable here: keep walking */ }
+  }
+  return undefined
+}
+
+/** Resolve a command to an absolute path (see above for the resolution order). */
+function resolveCommand(name: string): ResolvedCommand {
+  if (process.platform !== 'win32') {
+    const nextToNode = join(dirname(process.execPath), name)
+    if (existsSync(nextToNode)) {
+      return { command: nextToNode, dir: dirname(process.execPath) }
+    }
+    const onPath = pathLookup(name)
+    if (onPath !== undefined) return { command: onPath, dir: null }
+    // Any nvm-installed node version's bin dir (the host node may be a copy
+    // outside $NVM_DIR, e.g. launched via an absolute path).
+    const nvmRoot = process.env.NVM_DIR ?? join(homedir(), '.nvm')
+    try {
+      const versions = join(nvmRoot, 'versions', 'node')
+      for (const entry of readdirSync(versions, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const bin = join(versions, entry.name, 'bin')
+        if (existsSync(join(bin, name))) return { command: join(bin, name), dir: bin }
+      }
+    } catch { /* no nvm layout */ }
+    return { command: name, dir: null }
+  }
   try {
     const output = execFileSync('where', [name], {
       encoding: 'utf8',
@@ -120,9 +183,18 @@ function resolveCommand(name: string): string {
       windowsHide: true,
     })
     const hit = output.split(/\r?\n/).map(line => line.trim()).find(line => line.length > 0)
-    if (hit !== undefined) return hit
+    if (hit !== undefined) return { command: hit, dir: dirname(hit) }
   } catch { /* not on PATH: let the caller surface the error */ }
-  return name
+  return { command: name, dir: null }
+}
+
+/** Child env with an extra directory prepended to PATH (null dir → base env). */
+function commandEnv(dir: string | null, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (dir === null) return base ?? process.env
+  const env = { ...(base ?? process.env) }
+  const path = env.PATH ?? ''
+  env.PATH = dir + (path.length > 0 ? delimiter + path : '')
+  return env
 }
 
 /** Run `dsh plugin --profile <name> <verb> <args...>` and collect output. */
@@ -133,17 +205,28 @@ function runDshPlugin(
   cwd: string,
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
+    const tool = resolveCommand('dsh')
     execFile(
-      resolveCommand('dsh'),
+      tool.command,
       ['plugin', '--profile', profile, verb, ...args],
-      { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 },
+      { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: commandEnv(tool.dir) },
       (error, stdout, stderr) => {
         const output = [stdout, stderr].filter(Boolean).join('\n')
         if (error === null) {
           resolve({ ok: true, exitCode: 0, output })
         } else {
           const code = typeof error.code === 'number' ? error.code : null
-          resolve({ ok: code === 0, exitCode: code, output })
+          if (code === null && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+            resolve({
+              ok: false,
+              exitCode: null,
+              output: '[plugin-manager] could not start the dsh CLI (' + error.message + '). '
+                + 'Install it if missing (npm i -g dsh), or start this profile from a shell where node/npm/dsh are on PATH '
+                + '(nvm: run the profile from an nvm-active terminal, e.g. after `nvm use`).',
+            })
+          } else {
+            resolve({ ok: code === 0, exitCode: code, output })
+          }
         }
       },
     )
@@ -272,6 +355,18 @@ export class PluginManagerService extends Service {
   async startProfile(name: string): Promise<StartResult> {
     const dir = profileDir(name)
     if (!existsSync(dir)) return { ok: false, message: "profile not found: " + name }
+    // Refuse a double start: an already-running instance (possibly started
+    // outside this page, e.g. `dsh web` on its default port) must not be
+    // shadowed by a second instance — and stopping either would be ambiguous.
+    const running = scanRuns().get(name)
+    if (running !== undefined) {
+      return {
+        ok: false,
+        message: name + " is already running"
+          + (running.port !== null ? " on http://127.0.0.1:" + running.port : " (pid " + running.pid + ")")
+          + " — stop it first",
+      }
+    }
     const manifest = readManifest(dir)
     const dsh = (manifest['dsh'] ?? {}) as Record<string, unknown>
     const profileManifest = (dsh['profile'] ?? {}) as Record<string, unknown>
@@ -294,11 +389,13 @@ export class PluginManagerService extends Service {
         // No terminal emulator / shell available: background fallback (still
         // visible via the process scan; the profile list reports it as
         // running and the stop button manages it).
-        const child = spawn(resolveCommand('dsh'), ['--profile', name, '--port', String(port)], {
+        const tool = resolveCommand('dsh')
+        const child = spawn(tool.command, ['--profile', name, '--port', String(port)], {
           cwd: process.cwd(),
           detached: true,
           stdio: 'ignore',
           windowsHide: true,
+          env: commandEnv(tool.dir),
         })
         // Swallow async spawn errors (e.g. dsh missing) — reported below.
         child.on('error', (error) => { spawnError = error.message })
@@ -324,8 +421,8 @@ export class PluginManagerService extends Service {
         ok: false,
         port,
         message: spawnError !== null
-          ? "could not start " + name + ": " + spawnError
-          : "started but did not become ready within 10s: http://127.0.0.1:" + port,
+          ? "could not start " + name + ": " + spawnError + " — check that the dsh CLI is installed and the profile process runs in a shell where node/dsh are on PATH (nvm: start it from an nvm-active terminal)"
+          : "started but did not become ready within 10s: http://127.0.0.1:" + port + " — check the terminal window for errors",
       }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
@@ -889,10 +986,11 @@ export class PluginManagerService extends Service {
 /** Run a command with a timeout, resolving (never throwing) with the output. */
 function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
+    const tool = resolveCommand(cmd)
     execFile(
-      resolveCommand(cmd),
+      tool.command,
       [...args],
-      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
+      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: commandEnv(tool.dir) },
       (error, stdout, stderr) => {
         const output = [stdout, stderr].filter(Boolean).join('\n')
         if (error === null) resolve({ ok: true, output })
@@ -905,7 +1003,8 @@ function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number
 /** Whether a directory is a git repository (cheap probe). */
 function isGitRepo(path: string): boolean {
   try {
-    execFileSync(resolveCommand('git'), ['-C', path, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 5_000, windowsHide: true })
+    const tool = resolveCommand('git')
+    execFileSync(tool.command, ['-C', path, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 5_000, windowsHide: true, env: commandEnv(tool.dir) })
     return true
   } catch {
     return false
@@ -1129,7 +1228,8 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
       const args = ['clone']
       if (ref !== undefined) args.push('-b', ref)
       args.push('--depth', '1', repo, dest)
-      execFileSync(resolveCommand('git'), args, { stdio: 'pipe', timeout: 3 * 60 * 1000 })
+      const tool = resolveCommand('git')
+      execFileSync(tool.command, args, { stdio: 'pipe', timeout: 3 * 60 * 1000, env: commandEnv(tool.dir) })
     }
     const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
     if (existsSync(join(pkgDir, 'package.json'))) {
@@ -1169,11 +1269,13 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
 /** Whether a package name exists on the npm registry (short timeout). */
 function probeNpmPublished(packageName: string): string | undefined {
   try {
-    const output = execFileSync(resolveCommand('npm'), ['view', packageName, 'version'], {
+    const tool = resolveCommand('npm')
+    const output = execFileSync(tool.command, ['view', packageName, 'version'], {
       encoding: 'utf8',
       timeout: 10_000,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
+      env: commandEnv(tool.dir),
     })
     return output.trim().length > 0 ? packageName : undefined
   } catch {
@@ -1519,13 +1621,23 @@ function scanRuns(): Map<string, RunInfo> {
   const out = new Map<string, RunInfo>()
   for (const [name, matches] of byProfile) {
     const withPort = matches.filter(match => match.port !== null)
-    const node = matches.find(match => match.node)
+    // The primary is a real node process — prefer the one explicitly started
+    // with --port (the plugin's own spawns) over a port-less default instance
+    // (`dsh web`): stopping the wrong one would take down a profile the user
+    // may not have started from this page.
+    const node = matches.find(match => match.node && match.port !== null)
+      ?? matches.find(match => match.node)
     const primary = node ?? withPort[0] ?? matches[0]!
     const port = primary.port ?? (withPort[0]?.port ?? null)
     out.set(name, {
       port,
       pid: primary.pid,
-      launchers: matches.filter(match => match.pid !== primary.pid).map(match => match.pid),
+      // A launcher is only ever a shim/wrapper process (cmd/bash), never
+      // another real node instance — killing that would stop a second,
+      // independently running instance of the same profile.
+      launchers: matches
+        .filter(match => match.pid !== primary.pid && !match.node)
+        .map(match => match.pid),
     })
   }
   return out
@@ -1538,6 +1650,25 @@ interface TerminalOpen {
 }
 
 /**
+ * Prepend the tool directories the host relies on (the resolved dsh dir when
+ * it was found outside PATH, plus the running node's dir) to PATH inside a
+ * POSIX terminal command. Mirrors the Windows shim-dir injection: without
+ * it, a terminal's bash may not have nvm loaded and `dsh`/node fail with
+ * "command not found" — the instance never starts.
+ */
+function commandWithPath(command: string): string {
+  const dirs: string[] = []
+  const tool = resolveCommand('dsh')
+  if (tool.dir !== null) dirs.push(tool.dir)
+  const nodeDir = dirname(process.execPath)
+  if (nodeDir !== tool.dir) dirs.push(nodeDir)
+  const seen = new Set<string>()
+  const unique = dirs.filter(dir => (seen.has(dir) ? false : (seen.add(dir), true)))
+  if (unique.length === 0) return command
+  return 'export PATH=' + JSON.stringify(unique.join(delimiter) + delimiter + '$PATH') + '; ' + command
+}
+
+/**
  * Open a visible terminal window running `command`. The instance then lives
  * and dies with that terminal session — the window keeps the instance in
  * plain sight so the user never forgets a process is running. Linux probes
@@ -1546,8 +1677,9 @@ interface TerminalOpen {
  */
 async function openInTerminal(command: string): Promise<TerminalOpen> {
   if (process.platform === 'darwin') {
-    spawn('osascript', ['-e', 'tell application "Terminal" to do script "' + command.replace(/"/g, '\\"') + '"'], { stdio: 'ignore' }).unref()
-    return { opened: true, terminal: 'Terminal.app', command }
+    const final = commandWithPath(command)
+    spawn('osascript', ['-e', 'tell application "Terminal" to do script "' + final.replace(/"/g, '\\"') + '"'], { stdio: 'ignore' }).unref()
+    return { opened: true, terminal: 'Terminal.app', command: final }
   }
   if (process.platform === 'win32') {
     // A visible cmd window runs the command (`cmd /k` keeps it open).
@@ -1559,8 +1691,8 @@ async function openInTerminal(command: string): Promise<TerminalOpen> {
     // "'dsh' is not recognized" and the instance never starts).
     const dshShim = resolveCommand('dsh')
     const env = { ...process.env }
-    if (dshShim !== 'dsh' && dshShim !== 'dsh.cmd') {
-      env.PATH = dirname(dshShim) + (env.PATH !== undefined && env.PATH.length > 0 ? delimiter + env.PATH : '')
+    if (dshShim.command !== 'dsh' && dshShim.command !== 'dsh.cmd') {
+      env.PATH = dirname(dshShim.command) + (env.PATH !== undefined && env.PATH.length > 0 ? delimiter + env.PATH : '')
     }
     spawn('cmd', ['/c', 'start', '', 'cmd', '/k', command], { stdio: 'ignore', windowsHide: true, env }).unref()
     return { opened: true, terminal: 'cmd', command }
@@ -1572,12 +1704,13 @@ async function openInTerminal(command: string): Promise<TerminalOpen> {
     ...(envTerminal !== undefined && envTerminal.length > 0 ? [envTerminal.split(/\s+/)[0]!] : []),
     'x-terminal-emulator', 'gnome-terminal', 'konsole', 'xterm', 'kitty', 'alacritty', 'wezterm',
   ]
+  const final = commandWithPath(command)
   for (const bin of candidates) {
     if (!hasBinary(bin)) continue
-    const argv = terminalArgs(bin, command)
+    const argv = terminalArgs(bin, final)
     try {
       spawn(bin, argv, { stdio: 'ignore', windowsHide: true }).unref()
-      return { opened: true, terminal: bin, command }
+      return { opened: true, terminal: bin, command: final }
     } catch {
       /* try the next emulator */
     }
