@@ -8,7 +8,7 @@ import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'rea
 import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
+  AnalyzeResult, CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
@@ -23,6 +23,7 @@ export interface PluginManagerTabInjected {
   readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
   readonly checkUpdates: (profile: string) => Promise<UpdateCheckResult>
   readonly update: (profile: string, name: string) => Promise<CommandResult>
+  readonly analyze: (profile: string) => Promise<AnalyzeResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -122,6 +123,22 @@ const styles: Record<string, React.CSSProperties> = {
     border: 0, background: 'transparent', padding: 0, cursor: 'pointer',
     color: 'var(--dsw-alias-label-primary)', textAlign: 'left',
   },
+  analysisPanel: {
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
+    padding: '10px 14px', background: 'var(--dsw-alias-bg-layer-3)',
+  },
+  analysisList: {
+    display: 'flex', flexDirection: 'column', gap: '6px',
+    margin: '8px 0 0', padding: 0, listStyle: 'none',
+  },
+  analysisIssue: {
+    display: 'flex', alignItems: 'baseline', gap: '8px', fontSize: '12px', lineHeight: '18px',
+  },
+  analysisIssueKind: {
+    flex: 'none', fontFamily: 'var(--ds-font-family-code)', fontSize: '11px',
+    color: 'var(--dsw-alias-state-warn-primary)', whiteSpace: 'nowrap',
+  },
+  analysisIssueText: { minWidth: 0, color: 'var(--dsw-alias-label-primary)', overflowWrap: 'anywhere' },
 }
 
 /** Format an ISO timestamp for display (local time). */
@@ -134,7 +151,7 @@ function formatTime(iso: string): string {
 }
 
 /** Render the management tab. */
-export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, t }: PluginManagerTabProps): ReactNode {
+export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, t }: PluginManagerTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
   const [state, setState] = useState<ViewState>({ status: 'loading' })
@@ -143,9 +160,11 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const [output, setOutput] = useState<string>('')
   const [updates, setUpdates] = useState<Record<string, UpdateInfo>>({})
   const [checking, setChecking] = useState(false)
+  const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
 
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
-  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update })
+  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze })
 
   const load = (profile: string): void => {
     if (profile.length === 0) return
@@ -178,7 +197,19 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const onSelect = (name: string): void => {
     setSelected(name)
     setUpdates({})
+    setAnalysis(null)
     load(name)
+  }
+
+  const onAnalyze = async (): Promise<void> => {
+    if (selected.length === 0 || analyzing) return
+    setAnalyzing(true)
+    try {
+      const result = await injected.current.analyze(selected)
+      setAnalysis(result)
+    } finally {
+      setAnalyzing(false)
+    }
   }
 
   const onInstall = async (): Promise<void> => {
@@ -293,6 +324,9 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
           {t('refresh')}
         </Button>
         <span style={{ marginLeft: 'auto' }} />
+        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null || analyzing} onClick={() => void onAnalyze()}>
+          {analyzing ? t('analyzing') : t('healthCheck')}
+        </Button>
         <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null || checking} onClick={() => void onCheckUpdates()}>
           {checking ? t('checking') : t('checkUpdates')}
         </Button>
@@ -317,6 +351,34 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
               {busy === 'install' ? t('installing') : t('installButton')}
             </Button>
           </div>
+
+          {analysis !== null && (
+            <div style={styles.analysisPanel}>
+              <div style={styles.heading}>
+                <h3 style={styles.headingTitle}>{t('healthCheck')}</h3>
+                <span style={styles.headingCount}>
+                  {analysis.issues.length === 0 ? t('healthOk') : analysis.issues.length + ' ' + t('healthIssues')}
+                </span>
+              </div>
+              {analysis.issues.length === 0 ? (
+                <p style={styles.status}>{t('healthClean')}</p>
+              ) : (
+                <ul style={styles.analysisList}>
+                  {analysis.issues.map((issue, index) => (
+                    <li key={index} style={styles.analysisIssue}>
+                      <span style={styles.analysisIssueKind}>{issue.kind}</span>
+                      <span style={styles.analysisIssueText}>{issue.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {analysis.topoOrder.length > 1 && (
+                <div style={{ marginTop: '8px', fontSize: '11px', lineHeight: '17px', color: 'var(--dsw-alias-label-tertiary)' }}>
+                  {t('loadOrder')}: {analysis.topoOrder.join(' → ')}
+                </div>
+              )}
+            </div>
+          )}
 
           <div style={styles.heading}>
             <h3 style={styles.headingTitle}>{t('packages')}</h3>

@@ -126,6 +126,12 @@ export const zh = {
   updateMessage: '检测结果',
   updateResultTitle: '更新检查结果',
   updateRestartHint: '更新已应用，重启后完全生效',
+  healthCheck: '健康检查',
+  analyzing: '检查中…',
+  healthOk: '正常',
+  healthIssues: '个问题',
+  healthClean: '依赖、冲突与兼容性检查均通过。',
+  loadOrder: '建议加载顺序',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -255,4 +261,10 @@ export const en = {
   updateMessage: 'Note',
   updateResultTitle: 'Update check results',
   updateRestartHint: 'Update applied; fully effective after a restart',
+  healthCheck: 'Health check',
+  analyzing: 'Analyzing…',
+  healthOk: 'healthy',
+  healthIssues: 'issue(s)',
+  healthClean: 'Dependency, conflict and compatibility checks all pass.',
+  loadOrder: 'Suggested load order',
 } satisfies Record<PluginManagerLocaleKey, string>

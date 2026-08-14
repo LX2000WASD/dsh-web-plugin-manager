@@ -157,3 +157,58 @@ export interface UpdateCheckResult {
   readonly items: readonly UpdateInfo[]
   readonly message: string
 }
+
+/** One package participating in the dependency analysis. */
+export interface AnalyzePackage {
+  readonly name: string
+  /** Whether the package declares dsh.bundle (joins the layer stack). */
+  readonly isBundle: boolean
+  /** Installed version. */
+  readonly version?: string
+  /** Bare specifiers its entry imports (relative/node: excluded). */
+  readonly imports: readonly string[]
+  /** Services the entry source registers (best-effort scan). */
+  readonly services: readonly string[]
+  /** Services the entry injects (best-effort scan of inject declarations). */
+  readonly injects: readonly string[]
+  /** Row id that mounts this package, when known. */
+  readonly rowId?: string
+  /** Whether the package's row is disabled in the patch. */
+  readonly disabled: boolean
+}
+
+/** One dependency edge (from → provider). */
+export interface AnalyzeEdge {
+  readonly from: string
+  readonly to: string
+  /** The import specifier that created the edge. */
+  readonly specifier: string
+}
+
+/** One analysis finding. */
+export interface AnalyzeIssue {
+  readonly kind:
+    | 'missing-import'
+    | 'disabled-dependency'
+    | 'circular-dependency'
+    | 'duplicate-row-id'
+    | 'peer-mismatch'
+    | 'service-conflict'
+    | 'pending-dependency'
+    | 'load-failure'
+  readonly message: string
+  readonly from?: string
+  readonly to?: string
+  /** Cycle members for circular-dependency issues. */
+  readonly cycle?: readonly string[]
+}
+
+/** Full analysis result for one profile. */
+export interface AnalyzeResult {
+  readonly ok: boolean
+  readonly packages: readonly AnalyzePackage[]
+  readonly edges: readonly AnalyzeEdge[]
+  /** Topological order of the package dependency graph (load order hint). */
+  readonly topoOrder: readonly string[]
+  readonly issues: readonly AnalyzeIssue[]
+}

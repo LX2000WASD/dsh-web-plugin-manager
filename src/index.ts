@@ -47,6 +47,8 @@ import {
   hasManagedDisable, readInsertRows, readManagedIds, removeDisableBlock,
   removeInsertRow, writePatch,
 } from './patch.ts'
+import { analyzeProfile } from './analyze.ts'
+import type { AnalyzeIssue, AnalyzeResult } from './types.ts'
 import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerTools } from './tools.ts'
 
@@ -818,6 +820,63 @@ export class PluginManagerService extends Service {
         + '; restart the profile to load the new code.',
     }
   }
+
+  /**
+   * Dependency / conflict / compatibility analysis for one profile. The
+   * offline engine (src/analyze.ts) covers any profile; the running profile
+   * additionally feeds live observations: fiber states and errors, the
+   * active service table (ctx.reflect), and pending-inject diagnostics.
+   */
+  analyze(profile: string): AnalyzeResult {
+    const dir = profileDir(profile)
+    if (!existsSync(dir)) throw new Error(`profile not found: ${profile}`)
+    const manifest = readManifest(dir)
+    const dsh = (manifest['dsh'] ?? {}) as Record<string, unknown>
+    const profileManifest = (dsh['profile'] ?? {}) as Record<string, unknown>
+    const bundles = (Array.isArray(profileManifest['bundles']) ? profileManifest['bundles'] : []) as string[]
+    const patch = readPatch(dir)
+    const isRunning = profile === hostProfileName()
+    const liveRows = isRunning ? liveRowStates(this.ctx) : []
+    const disabledNames = new Set(liveRows.filter(row => !row.enabled).map(row => row.moduleName))
+    const extra: AnalyzeIssue[] = []
+    if (isRunning) {
+      // Failed fibers: surface the underlying error when the runtime keeps it.
+      for (const row of liveRows) {
+        if (row.phase !== 'failed' && row.phase !== 'unloading') continue
+        extra.push({
+          kind: 'load-failure',
+          from: row.moduleName,
+          message: row.moduleName + ' (' + row.entryId + ') failed to load'
+            + (row.error !== undefined ? ': ' + row.error : ''),
+        })
+      }
+      // Pending fibers: compare static inject declarations against the
+      // active service table (a missing provider leaves the entry pending).
+      const activeServices = new Set<string>()
+      const reflect = (this.ctx.get('reflect') as { store?: Iterable<{ name?: unknown; fiber?: { state?: unknown } }> } | undefined)
+      if (reflect !== undefined && reflect.store !== undefined) {
+        for (const impl of reflect.store) {
+          if (impl.fiber?.state === 2 && typeof impl.name === 'string') activeServices.add(impl.name)
+        }
+      }
+      const analysis = analyzeProfile(dir, bundles, patch, disabledNames, [])
+      for (const pkg of analysis.packages) {
+        if (pkg.injects.length === 0) continue
+        const row = liveRows.find(live => live.moduleName === pkg.name)
+        if (row === undefined || row.phase !== 'pending') continue
+        const missing = pkg.injects.filter(name => !activeServices.has(name) && name !== 'loader' && name !== 'webServer')
+        if (missing.length > 0) {
+          extra.push({
+            kind: 'pending-dependency',
+            from: pkg.name,
+            message: pkg.name + ' is pending: it injects ' + missing.join(', ')
+              + ' but no active service provides it (install or enable the provider, or check its own failure)',
+          })
+        }
+      }
+    }
+    return analyzeProfile(dir, bundles, patch, disabledNames, extra)
+  }
 }
 
 /** Run a command with a timeout, resolving (never throwing) with the output. */
@@ -1182,7 +1241,24 @@ async function installSpec(ctx: Context, profile: string, spec: string): Promise
   }
 
   const isBundle = exportsBundlePatch(profile, installed)
-  if (isBundle) return { ...result, installed: [installed] }
+  // Post-install analysis summary: dependency/conflict/compatibility issues
+  // between the new package and the profile (warnings — the install itself
+  // already passed the quality gate).
+  let analysisNote = ''
+  try {
+    const dir = profileDir(profile)
+    const bundles = readBundles(profile)
+    const analysis = analyzeProfile(dir, bundles, readPatch(dir), new Set(), [])
+    const related = analysis.issues.filter(issue =>
+      issue.from === installed || issue.to === installed || issue.cycle?.includes(installed))
+    if (related.length > 0) {
+      analysisNote = '\n[plugin-manager] analysis: ' + related.length + ' issue(s) for ' + installed + ':'
+        + related.map(issue => '\n  - ' + issue.message).join('')
+    }
+  } catch { /* analysis is advisory */ }
+  if (isBundle) {
+    return { ...result, installed: [installed], output: result.output + analysisNote }
+  }
 
   // Non-bundle plugin: write the managed insert row (live mount).
   const rowId = slugify(installed)
@@ -1194,6 +1270,20 @@ async function installSpec(ctx: Context, profile: string, spec: string): Promise
       ? await applyLiveOps(ctx, [{ kind: 'append', value: { insert: [{ id: rowId, name: installed }] } }])
       : { ok: false, message: 'profile not running' }
     if (next !== current) writePatch(patchPath(dir), next)
+    if (!live.ok && /ERR_MODULE_NOT_FOUND|Cannot find package|failed to import/i.test(live.message ?? '')) {
+      // The mount failed because the module cannot be imported. Leaving the
+      // insert row in the patch would fail the WHOLE profile at the next
+      // boot — roll the row back instead (the dependency stays installed).
+      const rolledBack = removeInsertRow(next, rowId)
+      if (rolledBack.removed) writePatch(patchPath(dir), rolledBack.content)
+      return {
+        ...result,
+        installed: [installed],
+        output: result.output
+          + "\n[plugin-manager] mount failed (" + (live.message ?? 'import error') + ")"
+          + "\n[plugin-manager] insert row " + rowId + " rolled back — the profile stays bootable. Check the plugin's dependencies.",
+      }
+    }
     return {
       ...result,
       installed: [installed],
@@ -1284,7 +1374,32 @@ function qualityIssues(profile: string, packageName: string): string[] {
     if (declared.has(spec) || LOADER_PROVIDED.has(spec)) continue
     issues.push("imports " + spec + " but does not declare it (would fail at boot)")
   }
+  // Declared is not installed: a dependency line that pnpm could not place
+  // (e.g. a link: source that is not present) fails exactly like an
+  // undeclared import at boot — and takes the whole profile down.
+  for (const spec of scanImports(entry)) {
+    if (!declared.has(spec) || LOADER_PROVIDED.has(spec)) continue
+    if (!bareSpecifierResolves(profileDir(profile), spec)) {
+      issues.push("declares " + spec + " but it is not installed in the profile (would fail at boot)")
+    }
+  }
   return issues
+}
+
+/** Whether a bare specifier resolves inside a profile's node_modules. */
+function bareSpecifierResolves(profileDirPath: string, spec: string): boolean {
+  const candidate = join(profileDirPath, 'node_modules', spec)
+  try {
+    if (existsSync(candidate)) return true
+    // Scoped subpath (pkg/sub) — the package itself is the provider.
+    if (spec.includes('/') && spec.startsWith('@')) {
+      const parts = spec.split('/')
+      return existsSync(join(profileDirPath, 'node_modules', parts[0]!, parts[1]!))
+    }
+    return false
+  } catch {
+    return false
+  }
 }
 /** One live dsh instance found by process scan. */
 interface RunInfo {
@@ -1740,6 +1855,43 @@ interface InstalledSets {
   readonly managedIds: ReadonlySet<string>
 }
 
+/** One live loader row's observable state (for runtime diagnostics). */
+interface LiveRowState {
+  readonly entryId: string
+  readonly moduleName: string
+  readonly enabled: boolean
+  readonly phase: RuntimeEntry['fiberPhase']
+  readonly error?: string
+}
+
+/** Read the live include-tree rows with their fiber states and errors. */
+function liveRowStates(ctx: Context): LiveRowState[] {
+  const loader = ctx.get('loader') as { entries(): Iterable<RowEntryLike> } | undefined
+  if (loader === undefined) return []
+  for (const entry of loader.entries()) {
+    if (entry.id !== 'include') continue
+    const out: LiveRowState[] = []
+    for (const row of entry.subtree?.entries() ?? []) {
+      const options = row.options
+      if (options === undefined || options.id === undefined || options.group) continue
+      let error: string | undefined
+      try {
+        const fiberError = (row.fiber as { _error?: { message?: unknown } } | undefined)?._error
+        if (fiberError?.message !== undefined && typeof fiberError.message === 'string') error = fiberError.message
+      } catch { /* error extraction is best-effort */ }
+      out.push({
+        entryId: options.id,
+        moduleName: options.name ?? '',
+        enabled: !row.disabled,
+        phase: phaseOf(row.fiber?.state),
+        ...(error !== undefined ? { error } : {}),
+      })
+    }
+    return out
+  }
+  return []
+}
+
 /**
  * Offline entry view for profiles that are not running: the bundle layer
  * stack and the managed insert rows, all configured-but-not-live. The live
@@ -2129,6 +2281,11 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.checkUpdates(profile) })
           return
         }
+        case 'analyze': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          sendJson(res, 200, { ok: true, value: service.analyze(profile) })
+          return
+        }
         case 'update': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
@@ -2147,7 +2304,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

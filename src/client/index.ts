@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
-  CommandResult, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
+  AnalyzeResult, CommandResult, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
   UpdateCheckResult,
 } from '../types.ts'
 import {
@@ -86,6 +86,7 @@ export function apply(ctx: ClientContext): void {
     copyPlugins: (from, to, names) => call<CommandResult>('copyPlugins', { from, to, names }),
     checkUpdates: (profile) => call<UpdateCheckResult>('checkUpdates', { profile }),
     update: (profile, name) => call<CommandResult>('update', { profile, name }),
+    analyze: (profile) => call<AnalyzeResult>('analyze', { profile }),
   })
 
   // Shadow the official read-only inventory: same slot id 'all', lower
