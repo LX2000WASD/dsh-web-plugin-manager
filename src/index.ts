@@ -47,7 +47,7 @@ import {
   hasManagedDisable, readInsertRows, readManagedIds, removeDisableBlock,
   removeInsertRow, writePatch,
 } from './patch.ts'
-import { analyzeProfile } from './analyze.ts'
+import { analyzeProfile, scanImports, scanPackageImports } from './analyze.ts'
 import type { AnalyzeIssue, AnalyzeResult } from './types.ts'
 import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerTools } from './tools.ts'
@@ -1313,8 +1313,11 @@ async function installSpec(ctx: Context, profile: string, spec: string): Promise
 
 /**
  * Specifiers the loader provides without the plugin declaring them: the
- * client platform table plus the host-side cordis/dsh basics the profile
+ * client platform table plus the host-side cordis basics the profile
  * bundles mount. Anything else a plugin imports must be in its manifest.
+ * The @deepseek-ai/dsh-client-* and @deepseek-ai/cordis-plugin-* families
+ * are platform packages (matched by prefix so the whitelist cannot drift
+ * from the web-app client table).
  */
 const LOADER_PROVIDED = new Set([
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
@@ -1322,27 +1325,18 @@ const LOADER_PROVIDED = new Set([
   '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include',
   '@deepseek-ai/cordis-plugin-group', '@deepseek-ai/cordis-plugin-hmr',
   '@deepseek-ai/cordis-plugin-timer',
-  '@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-web-react',
-  '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-ui-attachment',
-  '@deepseek-ai/dsh-client-schema-form',
+  '@deepseek-ai/dsh-client-web-react',
 ])
 
-/** Bare specifiers imported by a JS entry (relative/node: paths excluded). */
-function scanImports(filePath: string): string[] {
-  try {
-    const code = readFileSync(filePath, 'utf8')
-    const found = new Set<string>()
-    const pattern = /(?:from\s+|import\s*\(\s*|require\(\s*)['"]([^'"]+)['"]/g
-    for (const match of code.matchAll(pattern)) {
-      const spec = match[1]!
-      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
-      found.add(spec)
-    }
-    return [...found]
-  } catch {
-    return []
-  }
+/** Whether the loader/platform provides a specifier without declaration. */
+function isLoaderProvided(spec: string): boolean {
+  return LOADER_PROVIDED.has(spec)
+    || spec.startsWith('@deepseek-ai/dsh-client-')
+    || spec.startsWith('@deepseek-ai/cordis-plugin-')
 }
+
+// scanImports / scanPackageImports live in src/analyze.ts (shared with the
+// health-check engine so the gate and the analysis never drift).
 
 /** Resolve a package's entry file (exports["."].default, main, or index.js). */
 function packageEntry(pkgDir: string, manifest: Record<string, unknown>): string | null {
@@ -1382,36 +1376,72 @@ function qualityIssues(profile: string, packageName: string): string[] {
   const entry = packageEntry(pkgDir, manifest)
   if (entry === null) return ["no resolvable entry file (exports/main/index.js)"]
   const issues: string[] = []
-  for (const spec of scanImports(entry)) {
-    if (declared.has(spec) || LOADER_PROVIDED.has(spec)) continue
+  // Scan the WHOLE load chain (entry + every file reachable through relative
+  // imports): an undeclared import one hop down fails at boot exactly like
+  // one in the entry.
+  const imports = scanPackageImports(pkgDir, entry)
+  for (const spec of imports) {
+    if (declared.has(spec) || isLoaderProvided(spec)) continue
     issues.push("imports " + spec + " but does not declare it (would fail at boot)")
   }
   // Declared is not installed: a dependency line that pnpm could not place
   // (e.g. a link: source that is not present) fails exactly like an
   // undeclared import at boot — and takes the whole profile down.
-  for (const spec of scanImports(entry)) {
-    if (!declared.has(spec) || LOADER_PROVIDED.has(spec)) continue
+  for (const spec of imports) {
+    if (!declared.has(spec) || isLoaderProvided(spec)) continue
     if (!bareSpecifierResolves(profileDir(profile), spec)) {
       issues.push("declares " + spec + " but it is not installed in the profile (would fail at boot)")
+    }
+  }
+  // Bundle plugins also mount rows from their own cordis.patch.yml — every
+  // row name must resolve, or the whole profile fails at boot.
+  const dsh = manifest['dsh'] as Record<string, unknown> | undefined
+  const bundle = dsh?.bundle as Record<string, unknown> | undefined
+  const patchFile = typeof bundle?.patch === 'string' ? bundle.patch : undefined
+  if (patchFile !== undefined) {
+    const patchPath = join(pkgDir, patchFile)
+    const rows = readBundleRows(patchPath)
+    for (const rowName of rows) {
+      if (rowName.startsWith('cordis:') || rowName.startsWith('.')) continue
+      if (isLoaderProvided(rowName)) continue
+      if (!bareSpecifierResolves(profileDir(profile), rowName) && rowName !== packageName) {
+        issues.push("bundle patch mounts " + rowName + " but it is not installed in the profile (would fail at boot)")
+      }
     }
   }
   return issues
 }
 
+/** Row module names in a bundle's own cordis.patch.yml (best-effort parse). */
+function readBundleRows(patchFile: string): string[] {
+  try {
+    const content = readFileSync(patchFile, 'utf8')
+    const rows: string[] = []
+    const pattern = /^\s*name:\s*(.+)$/gm
+    for (const match of content.matchAll(pattern)) {
+      const name = match[1]!.trim().replace(/^['"]|['"]$/g, '')
+      if (name.length > 0) rows.push(name)
+    }
+    return rows
+  } catch {
+    return []
+  }
+}
+
 /** Whether a bare specifier resolves inside a profile's node_modules. */
 function bareSpecifierResolves(profileDirPath: string, spec: string): boolean {
-  const candidate = join(profileDirPath, 'node_modules', spec)
-  try {
-    if (existsSync(candidate)) return true
-    // Scoped subpath (pkg/sub) — the package itself is the provider.
-    if (spec.includes('/') && spec.startsWith('@')) {
-      const parts = spec.split('/')
-      return existsSync(join(profileDirPath, 'node_modules', parts[0]!, parts[1]!))
-    }
-    return false
-  } catch {
-    return false
+  const roots = [join(profileDirPath, 'node_modules'), join(profileDirPath, '..', 'node_modules')]
+  for (const root of roots) {
+    try {
+      if (existsSync(join(root, spec))) return true
+      // Scoped subpath (pkg/sub) — the package itself is the provider.
+      if (spec.includes('/') && spec.startsWith('@')) {
+        const parts = spec.split('/')
+        if (existsSync(join(root, parts[0]!, parts[1]!))) return true
+      }
+    } catch { /* keep probing */ }
   }
+  return false
 }
 /** One live dsh instance found by process scan. */
 interface RunInfo {

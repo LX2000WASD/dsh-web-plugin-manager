@@ -25,8 +25,8 @@
  * fiber errors) into the same report shape.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { dirname, extname, join, resolve } from 'node:path'
 import type { AnalyzeEdge, AnalyzeIssue, AnalyzePackage, AnalyzeResult } from './types.ts'
 
 /** Specifiers the loader provides without any plugin declaring them. */
@@ -36,18 +36,53 @@ const LOADER_PROVIDED = new Set([
   '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include',
   '@deepseek-ai/cordis-plugin-group', '@deepseek-ai/cordis-plugin-hmr',
   '@deepseek-ai/cordis-plugin-timer',
-  '@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-web-react',
-  '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-ui-attachment',
-  '@deepseek-ai/dsh-client-schema-form',
+  '@deepseek-ai/dsh-client-web-react',
 ])
 
-/** Bare specifiers imported by one JS file (relative/node: excluded). */
+/** Whether the loader/platform provides a specifier without declaration. */
+function isLoaderProvided(spec: string): boolean {
+  return LOADER_PROVIDED.has(spec)
+    || spec.startsWith('@deepseek-ai/dsh-client-')
+    || spec.startsWith('@deepseek-ai/cordis-plugin-')
+}
+
+/**
+ * Bare specifiers imported by one JS file (relative/node: excluded).
+ *
+ * Handles the forms that matter for runtime resolution:
+ *  - `import ... from 'x'` (including minified `from"x"` and `from 'x'`),
+ *  - dynamic `import('x')`, CommonJS `require('x')`,
+ *  - re-exports `export { x } from 'x'` (a runtime dependency too).
+ * Type-only imports (`import type ...`) are compile-time and skipped, as is
+ * anything inside comments.
+ */
 export function scanImports(filePath: string): string[] {
   try {
-    const code = readFileSync(filePath, 'utf8')
+    const code = stripComments(readFileSync(filePath, 'utf8'))
+    // Type-only imports/exports are erased at compile time — they must not
+    // count as runtime dependencies.
+    const typeOnly = new Set<string>()
+    const typePattern = /(?:import|export)\s+type\s+[^;'"]*?from\s*['"]([^'"]+)['"]/g
+    for (const match of code.matchAll(typePattern)) typeOnly.add(match[1]!)
     const found = new Set<string>()
-    const pattern = /(?:from\s+|import\s*\(\s*|require\(\s*)['"]([^'"]+)['"]/g
-    for (const match of code.matchAll(pattern)) {
+    // Statement forms must start after a line/statement boundary — a bare
+    // `from` (e.g. in body['from']) is never an import keyword.
+    const statement = /(?:^|[;\n])\s*(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]/g
+    const sideEffect = /(?:^|[;\n])\s*import\s*['"]([^'"]+)['"]/g
+    const dynamic = /(?:import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g
+    for (const match of code.matchAll(statement)) {
+      const spec = match[1]!
+      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
+      if (typeOnly.has(spec)) continue
+      found.add(spec)
+    }
+    for (const match of code.matchAll(sideEffect)) {
+      const spec = match[1]!
+      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
+      if (typeOnly.has(spec)) continue
+      found.add(spec)
+    }
+    for (const match of code.matchAll(dynamic)) {
       const spec = match[1]!
       if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
       found.add(spec)
@@ -56,6 +91,93 @@ export function scanImports(filePath: string): string[] {
   } catch {
     return []
   }
+}
+
+/** Strip line and block comments (string literals are untouched). */
+function stripComments(code: string): string {
+  // Block comments first (they may contain line-comment markers inside).
+  const withoutBlock = code.replace(/\/\*[\s\S]*?\*\//g, '')
+  // A line comment starts at // not preceded by : (http:// is not a comment).
+  return withoutBlock.replace(/(^|[^:])\/\/.*$/gm, '$1')
+}
+
+/** All relative specifiers referenced by one JS file (for entry traversal). */
+function relativeImports(filePath: string): string[] {
+  try {
+    const code = stripComments(readFileSync(filePath, 'utf8'))
+    const found = new Set<string>()
+    const statement = /(?:^|[;\n])\s*(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]/g
+    const sideEffect = /(?:^|[;\n])\s*import\s*['"]([^'"]+)['"]/g
+    const dynamic = /(?:import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g
+    for (const match of code.matchAll(statement)) {
+      const spec = match[1]!
+      if (spec.startsWith('.') && !spec.endsWith('.css') && !spec.endsWith('.json')) found.add(spec)
+    }
+    for (const match of code.matchAll(sideEffect)) {
+      const spec = match[1]!
+      if (spec.startsWith('.') && !spec.endsWith('.css') && !spec.endsWith('.json')) found.add(spec)
+    }
+    for (const match of code.matchAll(dynamic)) {
+      const spec = match[1]!
+      if (spec.startsWith('.') && !spec.endsWith('.css') && !spec.endsWith('.json')) found.add(spec)
+    }
+    return [...found]
+  } catch {
+    return []
+  }
+}
+
+/** Resolve one relative specifier to a file path (dir, .js, .mjs, .cjs, .ts…). */
+function resolveRelative(baseDir: string, spec: string): string | null {
+  const { extname, resolve } = requireNodePath()
+  const candidate = resolve(baseDir, spec)
+  for (const suffix of ['', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '/index.js', '/index.mjs', '/index.cjs', '/index.ts']) {
+    const target = candidate + suffix
+    try {
+      if (existsSync(target) && !statSync(target).isDirectory()) return target
+    } catch { /* keep probing */ }
+  }
+  if (extname(candidate).length > 0) return null
+  return null
+}
+
+let nodePath: { extname(p: string): string; resolve(...parts: string[]): string } | undefined
+function requireNodePath(): { extname(p: string): string; resolve(...parts: string[]): string } {
+  if (nodePath === undefined) {
+    nodePath = { extname: extname, resolve: resolve }
+  }
+  return nodePath
+}
+
+/**
+ * Scan every file reachable from a package entry through relative imports
+ * (BFS, bounded). The quality gate must see the whole load chain, not just
+ * the entry file: an undeclared import one hop down fails at boot exactly
+ * like one in the entry.
+ */
+export function scanPackageImports(
+  pkgDir: string,
+  entry: string | null,
+  maxFiles = 200,
+): string[] {
+  if (entry === null) return []
+  const seen = new Set<string>([entry])
+  const queue = [entry]
+  const bare = new Set<string>()
+  let scanned = 0
+  while (queue.length > 0 && scanned < maxFiles) {
+    const current = queue.shift()!
+    scanned += 1
+    for (const spec of scanImports(current)) bare.add(spec)
+    for (const rel of relativeImports(current)) {
+      const resolved = resolveRelative(dirname(current), rel)
+      if (resolved === null || seen.has(resolved)) continue
+      if (!resolved.startsWith(pkgDir)) continue // never leave the package
+      seen.add(resolved)
+      queue.push(resolved)
+    }
+  }
+  return [...bare]
 }
 
 /** Service names registered/provided in one JS file (best-effort scan). */
@@ -296,7 +418,7 @@ export function analyzeProfile(
     if (pkg.entryPath === null) continue
     const declared = declaredByPackage.get(pkg.name) ?? new Set<string>()
     for (const spec of pkg.imports) {
-      if (LOADER_PROVIDED.has(spec)) continue
+      if (isLoaderProvided(spec)) continue
       const provider = providerOf(spec, providers)
       if (provider === undefined) {
         const declaredPrefix = [...declared].some(name => spec === name || spec.startsWith(name + '/'))
