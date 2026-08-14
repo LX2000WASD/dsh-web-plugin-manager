@@ -8,7 +8,7 @@ import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'rea
 import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo,
+  CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
@@ -21,6 +21,8 @@ export interface PluginManagerTabInjected {
   readonly remove: (profile: string, name: string) => Promise<CommandResult>
   readonly removeInsert: (profile: string, rowId: string) => Promise<MutationResult>
   readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
+  readonly checkUpdates: (profile: string) => Promise<UpdateCheckResult>
+  readonly update: (profile: string, name: string) => Promise<CommandResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -132,16 +134,18 @@ function formatTime(iso: string): string {
 }
 
 /** Render the management tab. */
-export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, t }: PluginManagerTabProps): ReactNode {
+export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, t }: PluginManagerTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
   const [state, setState] = useState<ViewState>({ status: 'loading' })
   const [busy, setBusy] = useState<string | null>(null)
   const [spec, setSpec] = useState('')
   const [output, setOutput] = useState<string>('')
+  const [updates, setUpdates] = useState<Record<string, UpdateInfo>>({})
+  const [checking, setChecking] = useState(false)
 
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
-  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins })
+  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update })
 
   const load = (profile: string): void => {
     if (profile.length === 0) return
@@ -173,6 +177,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 
   const onSelect = (name: string): void => {
     setSelected(name)
+    setUpdates({})
     load(name)
   }
 
@@ -217,6 +222,38 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     }
   }
 
+  const onCheckUpdates = async (): Promise<void> => {
+    if (selected.length === 0 || checking) return
+    setChecking(true)
+    try {
+      const result = await injected.current.checkUpdates(selected)
+      const byName: Record<string, UpdateInfo> = {}
+      for (const item of result.items) byName[item.name] = item
+      setUpdates(byName)
+      const updatable = result.items.filter(item => item.hasUpdate)
+      setOutput('$ check updates --profile ' + selected + '\n'
+        + (updatable.length > 0
+          ? updatable.map(item => '  ' + item.name + ': ' + (item.currentVersion ?? '?') + ' → ' + (item.latestVersion ?? '?')).join('\n')
+          : '  all ' + result.items.length + ' packages up to date')
+        + '\n' + result.message)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const onUpdate = async (name: string): Promise<void> => {
+    if (selected.length === 0) return
+    setBusy('update:' + name)
+    try {
+      const result = await injected.current.update(selected, name)
+      setOutput('$ update ' + name + '\n' + result.output + '\n' + t('updateRestartHint'))
+      setUpdates(current => { const next = { ...current }; delete next[name]; return next })
+      load(selected)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const [expandedPkg, setExpandedPkg] = useState<string | null>(null)
   const [outputOpen, setOutputOpen] = useState(true)
 
@@ -233,6 +270,12 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   background: var(--dsw-alias-bg-layer-3);
 }
 .pm-card[data-open='true'] { border-color: var(--dsw-alias-border-l1); }
+.pm-card[data-updatable='true'] {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 55%, transparent);
+}
+.pm-card[data-updatable='true'][data-open='true'] {
+  border-color: var(--dsw-alias-state-success-secondary);
+}
 .pm-card-content:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: -2px;
@@ -248,6 +291,10 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
         />
         <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => load(selected)}>
           {t('refresh')}
+        </Button>
+        <span style={{ marginLeft: 'auto' }} />
+        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null || checking} onClick={() => void onCheckUpdates()}>
+          {checking ? t('checking') : t('checkUpdates')}
         </Button>
       </div>
 
@@ -279,8 +326,10 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
             <ul style={styles.cards}>
               {packages.map((pkg) => {
                 const open = expandedPkg === pkg.name
+                const info = updates[pkg.name]
+                const updatable = info !== undefined && info.hasUpdate
                 return (
-                  <li key={pkg.name} className="pm-card" data-open={open ? 'true' : undefined}>
+                  <li key={pkg.name} className="pm-card" data-open={open ? 'true' : undefined} data-updatable={updatable ? 'true' : undefined}>
                     <button
                       className="pm-card-content"
                       style={styles.cardContent}
@@ -290,6 +339,9 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                     >
                       <span style={styles.cardTitle} title={pkg.name}>{pkg.name}</span>
                       <span style={styles.cardTrailing}>
+                        {updatable && (
+                          <span style={{ ...styles.tag, ...styles.tagOn }}>{t('updateAvailable')}</span>
+                        )}
                         <span style={{ ...styles.tag, ...(pkg.isBundle ? styles.tagOn : {}) }}>
                           {pkg.isBundle ? t('bundleBadge') : t('dependencyBadge')}
                         </span>
@@ -314,8 +366,38 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                               ) : t('unknown')}
                             </dd>
                           </div>
+                          {info !== undefined && (
+                            <>
+                              {info.currentVersion !== undefined && (
+                                <div style={styles.detailsRow}>
+                                  <dt>{t('currentVersion')}</dt>
+                                  <dd>{info.currentVersion}</dd>
+                                </div>
+                              )}
+                              {info.latestVersion !== undefined && (
+                                <div style={styles.detailsRow}>
+                                  <dt>{t('latestVersion')}</dt>
+                                  <dd>{info.latestVersion}</dd>
+                                </div>
+                              )}
+                              {info.message !== undefined && (
+                                <div style={styles.detailsRow}>
+                                  <dt>{t('updateMessage')}</dt>
+                                  <dd>{info.message}</dd>
+                                </div>
+                              )}
+                            </>
+                          )}
                         </dl>
-                        <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'flex-end' }}>
+                        <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={busy !== null || !updatable}
+                            onClick={() => void onUpdate(pkg.name)}
+                          >
+                            {busy === 'update:' + pkg.name ? t('updating') : t('updateButton')}
+                          </Button>
                           <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRemove(pkg.name)}>
                             {t('removeButton')}
                           </Button>

@@ -267,11 +267,13 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
                       <span style={styles.tag}>{item.category}</span>
                     )}
                   </div>
-                  {item.description !== undefined && item.description.length > 0 && (
-                    <div style={{ minWidth: 0, overflow: 'hidden', padding: '0 14px 10px' }}>
-                      <span style={styles.cardDesc} title={item.description}>{item.description}</span>
-                    </div>
-                  )}
+                  <div style={{ minWidth: 0, overflow: 'hidden', padding: '0 14px 10px' }}>
+                    {/* A space (not empty) keeps the line height identical for
+                        cards without a description. */}
+                    <span style={styles.cardDesc} title={item.description ?? ''}>
+                      {item.description !== undefined && item.description.length > 0 ? item.description : ' '}
+                    </span>
+                  </div>
                   <div style={{ padding: '0 14px 10px' }}>
                     <span style={styles.meta}>
                       {t('updatedAt')} {shortDate(item.updatedAt)} · {t('createdAt')} {shortDate(item.createdAt)}

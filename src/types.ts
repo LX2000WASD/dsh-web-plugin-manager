@@ -134,3 +134,26 @@ export interface CommandResult {
   /** Real package names resolved from the profile manifest after install. */
   readonly installed?: readonly string[]
 }
+
+/** One package's update-check result. */
+export interface UpdateInfo {
+  /** Package name. */
+  readonly name: string
+  /** Whether a newer version is available. */
+  readonly hasUpdate: boolean
+  /** Installed version from the package manifest, when known. */
+  readonly currentVersion?: string
+  /** Latest available version (npm dist-tag latest / git remote ref). */
+  readonly latestVersion?: string
+  /** Install source kind: npm | git | local | unknown. */
+  readonly source: string
+  /** Human-readable note (why it cannot be checked, what was compared…). */
+  readonly message?: string
+}
+
+/** Batch update-check result. */
+export interface UpdateCheckResult {
+  readonly ok: boolean
+  readonly items: readonly UpdateInfo[]
+  readonly message: string
+}

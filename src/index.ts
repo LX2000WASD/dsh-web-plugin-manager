@@ -40,6 +40,7 @@ import z from '@deepseek-ai/schemastery'
 import type {
   CommandResult, InsertRow, ManagedPackage, MarketplaceItem, MarketplaceResult,
   MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry, StartResult,
+  UpdateCheckResult, UpdateInfo,
 } from './types.ts'
 import {
   addDisableBlock, addInsertRow, applyRowDisabled, applyRowEnabled,
@@ -687,6 +688,345 @@ export class PluginManagerService extends Service {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
   }
+
+  /**
+   * Check every installed package for a newer version (manual update check).
+   *
+   * Source kinds:
+   *  - npm packages (semver range / bare version in the manifest) are
+   *    compared against the npm registry dist-tag `latest`;
+   *  - git-cloned cache directories (dependencies value `link:<path>` where
+   *    the target is a git repository) are compared against their remote:
+   *    the cache is fetched (never pulled) and the local HEAD is compared
+   *    with the remote ref;
+   *  - anything else (local non-git directories, tarballs, unknown shapes)
+   *    reports `hasUpdate: false` with an explanatory message — a manual
+   *    reinstall is still possible via the update action.
+   */
+  async checkUpdates(profile: string): Promise<UpdateCheckResult> {
+    const dir = profileDir(profile)
+    if (!existsSync(dir)) return { ok: false, items: [], message: 'profile not found: ' + profile }
+    const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
+    const deps = manifest.dependencies ?? {}
+    const names = Object.keys(deps).filter(name => name !== OUR_PACKAGE_NAME)
+    // Bounded concurrency: npm view / git fetch are child processes.
+    const results: UpdateInfo[] = []
+    let cursor = 0
+    const workers = Array.from({ length: Math.min(4, names.length) }, async () => {
+      for (;;) {
+        const index = cursor
+        cursor += 1
+        if (index >= names.length) return
+        const name = names[index]!
+        results.push(await checkPackageUpdate(dir, name, deps[name]))
+      }
+    })
+    await Promise.all(workers)
+    const updatable = results.filter(item => item.hasUpdate).length
+    return {
+      ok: true,
+      items: results.sort((a, b) => a.name.localeCompare(b.name)),
+      message: updatable > 0
+        ? updatable + ' of ' + results.length + ' packages have updates'
+        : 'all ' + results.length + ' packages are up to date',
+    }
+  }
+
+  /**
+   * Update one installed package to the latest version.
+   *
+   *  - npm: reinstall through the official CLI with `@latest` (quality gate
+   *    and in-box bundle preservation included);
+   *  - git cache (link:path into plugin-manager-src): fetch + hard reset the
+   *    cache to its remote ref, then re-run the official add to refresh the
+   *    dependency record; the installed package links into the cache, so the
+   *    new content is picked up on the next start;
+   *  - git URL sources (`github:…` / git URLs): re-add the source spec so
+   *    pnpm re-resolves the remote;
+   *  - local non-git directories cannot be updated (no upstream to pull).
+   */
+  async update(profile: string, name: string): Promise<CommandResult> {
+    const dir = profileDir(profile)
+    if (!existsSync(dir)) return { ok: false, exitCode: 1, output: 'profile not found: ' + profile }
+    const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
+    const source = manifest.dependencies?.[name]
+    if (source === undefined) {
+      return { ok: false, exitCode: 1, output: name + ' is not a dependency of ' + profile }
+    }
+    const before = readBundles(profile)
+    const local = parseLocalSource(source)
+    if (local !== null && isGitRepo(local)) {
+      // Git-cache update: fetch + hard reset the cache to its remote ref.
+      const updated = await gitPullToRemote(local)
+      if (!updated.ok) {
+        return { ok: false, exitCode: 1, output: '[plugin-manager] git update failed: ' + updated.message }
+      }
+      const result = await runDshPlugin(profile, 'add', [local], process.cwd())
+      if (!result.ok) return result
+      restoreInBoxBundles(profile, before)
+      const issues = qualityIssues(profile, name)
+      if (issues.length > 0) {
+        await runDshPlugin(profile, 'remove', [name], process.cwd())
+        restoreInBoxBundles(profile, before)
+        return {
+          ok: false,
+          exitCode: 1,
+          output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
+            + issues.map(issue => '\n  - ' + issue).join('')
+            + '\n[plugin-manager] rolled back to the previous version.',
+        }
+      }
+      return {
+        ok: true,
+        exitCode: 0,
+        output: result.output + '\n[plugin-manager] ' + name + ' updated from the git cache ('
+          + updated.message + '); restart the profile to load the new code.',
+      }
+    }
+    if (local !== null) {
+      return {
+        ok: false,
+        exitCode: 1,
+        output: '[plugin-manager] ' + name + ' is installed from a local directory (' + local
+          + ') with no git upstream; update is not possible. Remove and reinstall it.',
+      }
+    }
+    // npm or git-URL source: re-add through the official CLI.
+    const spec = isGitSourceSpec(source) ? source : name + '@latest'
+    const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
+    if (!result.ok) return result
+    restoreInBoxBundles(profile, before)
+    const installed = resolveInstalledName(profile, name)
+    if (installed === null) return { ...result, installed: [name] }
+    const issues = qualityIssues(profile, installed)
+    if (issues.length > 0) {
+      await runDshPlugin(profile, 'remove', [installed], process.cwd())
+      restoreInBoxBundles(profile, before)
+      return {
+        ok: false,
+        exitCode: 1,
+        output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
+          + issues.map(issue => '\n  - ' + issue).join('')
+          + '\n[plugin-manager] rolled back to the previous version.',
+      }
+    }
+    return {
+      ok: true,
+      exitCode: 0,
+      output: result.output + '\n[plugin-manager] ' + name + ' updated'
+        + (isGitSourceSpec(source) ? ' from its git source' : ' to @latest')
+        + '; restart the profile to load the new code.',
+    }
+  }
+}
+
+/** Run a command with a timeout, resolving (never throwing) with the output. */
+function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      resolveCommand(cmd),
+      [...args],
+      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
+      (error, stdout, stderr) => {
+        const output = [stdout, stderr].filter(Boolean).join('\n')
+        if (error === null) resolve({ ok: true, output })
+        else resolve({ ok: false, output })
+      },
+    )
+  })
+}
+
+/** Whether a directory is a git repository (cheap probe). */
+function isGitRepo(path: string): boolean {
+  try {
+    execFileSync('git', ['-C', path, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 5_000, windowsHide: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Resolve a `link:`/`file:` dependency value to its target path, or null. */
+function parseLocalSource(source: string): string | null {
+  const match = /^(?:link|file):(.+)$/.exec(source.trim())
+  return match !== null ? match[1]!.trim() : null
+}
+
+/** Whether a dependency value is a git source spec (github:/git+/URL). */
+function isGitSourceSpec(source: string): boolean {
+  const spec = source.trim()
+  if (spec.startsWith('github:') || spec.startsWith('git+') || spec.startsWith('git@')) return true
+  return /^https?:\/\//.test(spec) && (/\.git(\/|$)/.test(spec) || /github\.com\//.test(spec))
+}
+
+/** Extract a cloneable URL from a git source spec (drops #ref fragments). */
+function gitUrlFromSpec(source: string): string {
+  const spec = source.trim().split('#')[0]!
+  if (spec.startsWith('github:')) return 'https://github.com/' + spec.slice(7).replace(/^\.git/, '')
+  if (spec.startsWith('git+')) return spec.slice(4)
+  return spec
+}
+
+/** Whether a spec looks like a git clone URL (used by update/checkUpdates). */
+function isGitCloneSpec(source: string): boolean {
+  const spec = source.trim()
+  return spec.startsWith('file:')
+    || spec.startsWith('git@')
+    || spec.startsWith('github:')
+    || spec.startsWith('git+')
+    || /^https?:\/\//.test(spec)
+}
+
+/** The installed git commit of a package manifest (gitHead), when recorded. */
+function installedGitHead(dir: string, name: string): string | undefined {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8'),
+    ) as { gitHead?: unknown }
+    return typeof manifest.gitHead === 'string' && manifest.gitHead.length > 0 ? manifest.gitHead : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Latest dist-tag version of an npm package, or undefined when unreachable. */
+async function npmLatestVersion(name: string): Promise<string | undefined> {
+  const result = await execFileTimeout('npm', ['view', name, 'version'], 15_000)
+  if (!result.ok) return undefined
+  const latest = result.output.trim().split(/\r?\n/).find(line => line.length > 0)
+  return latest
+}
+
+/** Remote HEAD commit of a git URL, or undefined when unreachable. */
+async function gitRemoteHead(url: string): Promise<string | undefined> {
+  const result = await execFileTimeout('git', ['ls-remote', url, 'HEAD'], 20_000)
+  if (!result.ok) return undefined
+  const first = result.output.trim().split(/\r?\n/)[0]
+  return first !== undefined ? first.split(/\s+/)[0] : undefined
+}
+
+/**
+ * Fetch a git cache directory (never merging) and compare the local HEAD
+ * with the remote ref (the branch upstream, falling back to FETCH_HEAD).
+ */
+async function gitRemoteState(dir: string): Promise<{
+  ok: boolean
+  hasUpdate: boolean
+  latest?: string
+  message: string
+}> {
+  const head = await execFileTimeout('git', ['-C', dir, 'rev-parse', 'HEAD'], 10_000)
+  if (!head.ok) return { ok: false, hasUpdate: false, message: 'not a git repository' }
+  const headHash = head.output.trim()
+  if (headHash.length === 0) return { ok: false, hasUpdate: false, message: 'no HEAD commit' }
+  const fetched = await execFileTimeout('git', ['-C', dir, 'fetch', '--quiet', '--prune'], 20_000)
+  if (!fetched.ok) {
+    return { ok: false, hasUpdate: false, message: 'git fetch failed: ' + fetched.output.trim().slice(0, 200) }
+  }
+  const upstream = await execFileTimeout('git', ['-C', dir, 'rev-parse', '@{u}'], 10_000)
+  let remoteHash = upstream.ok ? upstream.output.trim() : ''
+  if (remoteHash.length === 0) {
+    const fetchHead = await execFileTimeout('git', ['-C', dir, 'rev-parse', 'FETCH_HEAD'], 10_000)
+    if (fetchHead.ok) remoteHash = fetchHead.output.trim()
+  }
+  if (remoteHash.length === 0) return { ok: false, hasUpdate: false, message: 'no remote ref to compare' }
+  const hasUpdate = remoteHash !== headHash
+  return {
+    ok: true,
+    hasUpdate,
+    latest: remoteHash.slice(0, 12),
+    message: hasUpdate
+      ? 'remote moved (' + headHash.slice(0, 12) + ' → ' + remoteHash.slice(0, 12) + ')'
+      : 'up to date (' + headHash.slice(0, 12) + ')',
+  }
+}
+
+/** Fetch and hard-reset a git cache directory to its remote branch. */
+async function gitPullToRemote(dir: string): Promise<{ ok: boolean; message: string }> {
+  const branch = await execFileTimeout('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], 10_000)
+  const branchName = branch.ok ? branch.output.trim() : ''
+  if (branchName.length === 0 || branchName === 'HEAD') {
+    return { ok: false, message: 'detached HEAD — cannot fast-forward the cache' }
+  }
+  const fetched = await execFileTimeout('git', ['-C', dir, 'fetch', '--quiet', '--prune'], 20_000)
+  if (!fetched.ok) return { ok: false, message: fetched.output.trim().slice(0, 300) }
+  const reset = await execFileTimeout('git', ['-C', dir, 'reset', '--hard', 'origin/' + branchName], 20_000)
+  if (!reset.ok) return { ok: false, message: reset.output.trim().slice(0, 300) }
+  const head = await execFileTimeout('git', ['-C', dir, 'rev-parse', 'HEAD'], 10_000)
+  return { ok: true, message: 'cache reset to ' + (head.ok ? head.output.trim().slice(0, 12) : 'remote') }
+}
+
+/** Update-check for one installed package (see PluginManagerService.checkUpdates). */
+async function checkPackageUpdate(dir: string, name: string, source: string): Promise<UpdateInfo> {
+  const installed = readPackageInfo(dir, name).version
+  const local = parseLocalSource(source)
+  if (local !== null) {
+    if (!isGitRepo(local)) {
+      return {
+        name,
+        hasUpdate: false,
+        ...(installed !== undefined ? { currentVersion: installed } : {}),
+        source: 'local',
+        message: 'installed from a local directory — no upstream to compare',
+      }
+    }
+    const git = await gitRemoteState(local)
+    return {
+      name,
+      hasUpdate: git.ok && git.hasUpdate,
+      ...(installed !== undefined ? { currentVersion: installed } : {}),
+      ...(git.latest !== undefined ? { latestVersion: git.latest } : {}),
+      source: 'git',
+      message: git.message,
+    }
+  }
+  if (isGitSourceSpec(source)) {
+    const remote = await gitRemoteHead(gitUrlFromSpec(source))
+    const gitHead = installedGitHead(dir, name)
+    if (remote === undefined || gitHead === undefined) {
+      return {
+        name,
+        hasUpdate: false,
+        ...(installed !== undefined ? { currentVersion: installed } : {}),
+        source: 'git',
+        message: remote === undefined
+          ? 'remote unreachable — cannot check'
+          : 'no recorded install commit — cannot compare (reinstall to refresh)',
+      }
+    }
+    const hasUpdate = remote !== gitHead
+    return {
+      name,
+      hasUpdate,
+      ...(installed !== undefined ? { currentVersion: installed } : {}),
+      latestVersion: remote.slice(0, 12),
+      source: 'git',
+      message: hasUpdate
+        ? 'remote moved (' + gitHead.slice(0, 12) + ' → ' + remote.slice(0, 12) + ')'
+        : 'up to date (' + gitHead.slice(0, 12) + ')',
+    }
+  }
+  // npm source: compare against the registry dist-tag latest.
+  const latest = await npmLatestVersion(name)
+  if (latest === undefined) {
+    return {
+      name,
+      hasUpdate: false,
+      ...(installed !== undefined ? { currentVersion: installed } : {}),
+      source: 'npm',
+      message: 'registry lookup failed (offline?)',
+    }
+  }
+  return {
+    name,
+    hasUpdate: installed !== undefined && installed !== latest,
+    ...(installed !== undefined ? { currentVersion: installed } : {}),
+    latestVersion: latest,
+    source: 'npm',
+    message: installed !== undefined
+      ? 'installed ' + installed + ', latest ' + latest
+      : 'latest ' + latest,
+  }
 }
 
 /**
@@ -700,9 +1040,10 @@ export class PluginManagerService extends Service {
 function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string; packageName?: string } {
   const trimmed = spec.trim()
   const gitUrl = /^(?:git\+)?(https?:\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
+  const gitFile = /^file:(\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
   const gitSsh = /^([^\s@]+@[^\s:]+:[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
   const githubShort = /^github:([^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
-  const m = gitUrl ?? gitSsh ?? githubShort
+  const m = gitUrl ?? gitFile ?? gitSsh ?? githubShort
   if (m === null) return { spec: trimmed }
   let repo = m[1]!
   if (githubShort !== null && githubShort[1] !== undefined) repo = "https://github.com/" + githubShort[1]!.replace(/^\.git/, '')
@@ -715,7 +1056,7 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
   try {
     const cacheRoot = join(dshHome(), 'plugin-manager-src')
     mkdirSync(cacheRoot, { recursive: true })
-    const base = repo.replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/[^A-Za-z0-9._-]/g, '-')
+    const base = repo.replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/^\/+/, '').replace(/[^A-Za-z0-9._-]/g, '-')
     const dirName = base + (ref !== undefined ? '-' + ref.replace(/[^A-Za-z0-9._-]/g, '-') : '')
     const dest = join(cacheRoot, dirName)
     if (!existsSync(dest)) {
@@ -1783,6 +2124,17 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.removeInsert(profile, rowId) })
           return
         }
+        case 'checkUpdates': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          sendJson(res, 200, { ok: true, value: await service.checkUpdates(profile) })
+          return
+        }
+        case 'update': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          const name = typeof body['name'] === 'string' ? body['name'] : ''
+          sendJson(res, 200, { ok: true, value: await service.update(profile, name) })
+          return
+        }
         default:
           sendJson(res, 404, { ok: false, error: { code: 'unknown-op', message: op } })
       }
@@ -1795,7 +2147,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

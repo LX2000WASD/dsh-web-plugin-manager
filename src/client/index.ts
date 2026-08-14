@@ -12,6 +12,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
   CommandResult, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
+  UpdateCheckResult,
 } from '../types.ts'
 import {
   PluginCatalogTab, type PluginCatalogTabInjected,
@@ -83,6 +84,8 @@ export function apply(ctx: ClientContext): void {
     remove: (profile, name) => call<CommandResult>('remove', { profile, name }),
     removeInsert: (profile, rowId) => call<MutationResult>('removeInsert', { profile, rowId }),
     copyPlugins: (from, to, names) => call<CommandResult>('copyPlugins', { from, to, names }),
+    checkUpdates: (profile) => call<UpdateCheckResult>('checkUpdates', { profile }),
+    update: (profile, name) => call<CommandResult>('update', { profile, name }),
   })
 
   // Shadow the official read-only inventory: same slot id 'all', lower
