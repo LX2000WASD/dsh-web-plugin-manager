@@ -134,6 +134,7 @@ export function apply(ctx: ClientContext): void {
     marketplace: (refresh) => call<MarketplaceResult>('marketplace', { refresh }),
     install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
+    list: (profile) => call<PluginManagerSnapshot>('list', { profile }),
   })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({

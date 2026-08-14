@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, IconSearchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommandResult, MarketplaceItem, MarketplaceResult, ProfileInfo } from '../types.ts'
+import type { CommandResult, MarketplaceItem, MarketplaceResult, PluginManagerSnapshot, ProfileInfo } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
 
@@ -15,6 +15,7 @@ import { PmSelect } from './PmSelect.tsx'
 export interface PluginMarketplaceTabInjected {
   readonly marketplace: (refresh: boolean) => Promise<MarketplaceResult>
   readonly profiles: () => Promise<ProfileInfo[]>
+  readonly list: (profile: string) => Promise<PluginManagerSnapshot>
   readonly install: (profile: string, spec: string) => Promise<CommandResult>
 }
 
@@ -120,7 +121,7 @@ function shortDate(iso: string): string {
 }
 
 /** Render the marketplace page. */
-export function PluginMarketplaceTab({ marketplace, profiles, install, t }: PluginMarketplaceTabProps): ReactNode {
+export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }: PluginMarketplaceTabProps): ReactNode {
   const [state, setState] = useState<ViewState>({ status: 'loading' })
   const [busy, setBusy] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -129,8 +130,36 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
   const [output, setOutput] = useState('')
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [targetProfile, setTargetProfile] = useState('web')
+  // Package names + repository identifiers installed in the target profile.
+  const [installedNames, setInstalledNames] = useState<Set<string>>(new Set())
+  const [installedRepos, setInstalledRepos] = useState<Set<string>>(new Set())
 
-  const injected = useRef({ marketplace, profiles, install })
+  const injected = useRef({ marketplace, profiles, list, install })
+
+  /** Refresh which marketplace entries are already installed in the target. */
+  const refreshInstalled = (profile: string): void => {
+    void injected.current.list(profile).then((snapshot) => {
+      const names = new Set<string>()
+      const repos = new Set<string>()
+      for (const pkg of snapshot.packages) {
+        names.add(pkg.name)
+        if (pkg.repository !== undefined) {
+          const match = /(?:github\.com\/)?([^/]+\/[^/]+?)(?:\.git)?$/.exec(pkg.repository)
+          if (match !== null) repos.add(match[1]!.replace(/\.git$/, '').toLocaleLowerCase())
+        }
+        // Git-cache installs: the dependency value points at the clone dir
+        // ($DSH_HOME/plugin-manager-src/github.com-<owner>-<repo>), which
+        // carries the upstream identity even when the manifest has no
+        // repository field.
+        if (pkg.source !== undefined) {
+          const cache = /github\.com[-/]([^/\s]+)[-/]([^/\s]+)/.exec(pkg.source)
+          if (cache !== null) repos.add((cache[1]! + '/' + cache[2]!).toLocaleLowerCase())
+        }
+      }
+      setInstalledNames(names)
+      setInstalledRepos(repos)
+    }, () => { /* keep the previous state */ })
+  }
 
   const load = (refresh: boolean): void => {
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
@@ -145,7 +174,10 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
     void injected.current.profiles().then((items) => {
       setProfileList(items)
       const current = items.find(profile => profile.isCurrent === true)
-      if (current !== undefined) setTargetProfile(current.name)
+      if (current !== undefined) {
+        setTargetProfile(current.name)
+        refreshInstalled(current.name)
+      }
     }, () => { /* keep web default */ })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -155,6 +187,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
     try {
       const result = await injected.current.install(targetProfile, item.url)
       setOutput('$ install ' + item.name + '\n' + result.output)
+      refreshInstalled(targetProfile)
     } finally {
       setBusy(null)
     }
@@ -210,7 +243,10 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
           ariaLabel={t('installTarget')}
           value={targetProfile}
           options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
-          onChange={setTargetProfile}
+          onChange={(value) => {
+            setTargetProfile(value)
+            refreshInstalled(value)
+          }}
         />
       </div>
 
@@ -239,16 +275,24 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
           </label>
           {rows.length === 0 ? <p style={styles.status}>{t('noMarketItems')}</p> : (
             <ul style={styles.cards}>
-              {rows.map((item) => (
+              {rows.map((item) => {
+                const installed = item.packageName !== undefined && item.packageName.length > 0
+                  ? installedNames.has(item.packageName)
+                  : installedRepos.has(item.name.toLocaleLowerCase())
+                return (
                 <li key={item.name} style={styles.card}>
                   <div style={styles.cardRow}>
                     <a href={item.url} target="_blank" rel="noreferrer" style={{ ...styles.cardTitle, ...styles.link }} title={item.name}>
                       {item.displayName}
                     </a>
                     <span style={{ marginLeft: 'auto' }}>
-                      <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onInstall(item)}>
-                        {busy === item.name ? t('installing') : t('installButton')}
-                      </Button>
+                      {installed ? (
+                        <span style={{ ...styles.tag, ...styles.tagOn }}>{t('marketInstalled')}</span>
+                      ) : (
+                        <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onInstall(item)}>
+                          {busy === item.name ? t('installing') : t('installButton')}
+                        </Button>
+                      )}
                     </span>
                   </div>
                   <div style={styles.cardMetaRow}>
@@ -280,7 +324,8 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
                     </span>
                   </div>
                 </li>
-              ))}
+                )
+              })}
             </ul>
           )}
           {output.length > 0 && (

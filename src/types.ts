@@ -52,6 +52,8 @@ export interface ManagedPackage {
   readonly installedAt?: string
   /** Upstream repository URL from the package manifest, when declared. */
   readonly repository?: string
+  /** The dependency value that installed it (npm range, link:path, git spec). */
+  readonly source?: string
 }
 
 /** One insert row (non-bundle plugin mount) in the profile patch file. */

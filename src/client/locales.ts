@@ -132,6 +132,7 @@ export const zh = {
   healthIssues: '个问题',
   healthClean: '依赖、冲突与兼容性检查均通过。',
   loadOrder: '建议加载顺序',
+  marketInstalled: '已安装',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -267,4 +268,5 @@ export const en = {
   healthIssues: 'issue(s)',
   healthClean: 'Dependency, conflict and compatibility checks all pass.',
   loadOrder: 'Suggested load order',
+  marketInstalled: 'installed',
 } satisfies Record<PluginManagerLocaleKey, string>

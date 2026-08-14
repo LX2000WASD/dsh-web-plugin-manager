@@ -437,11 +437,13 @@ export class PluginManagerService extends Service {
     const patch = readPatch(dir)
     const packages: ManagedPackage[] = Object.keys(deps).map((name) => {
       const isBundle = bundles.includes(name)
+      const source = deps[name]
       return {
         name,
         isBundle,
         inLayerStack: isBundle,
         ...readPackageInfo(dir, name),
+        ...(typeof source === 'string' && source.length > 0 ? { source } : {}),
       }
     })
 
@@ -852,11 +854,16 @@ export class PluginManagerService extends Service {
       }
       // Pending fibers: compare static inject declarations against the
       // active service table (a missing provider leaves the entry pending).
+      // ctx.reflect is the public reflection property on every context
+      // (NOT a service — ctx.get('reflect') is undefined). The store is an
+      // internal object keyed by isolate symbols; it is read defensively.
       const activeServices = new Set<string>()
-      const reflect = (this.ctx.get('reflect') as { store?: Iterable<{ name?: unknown; fiber?: { state?: unknown } }> } | undefined)
-      if (reflect !== undefined && reflect.store !== undefined) {
-        for (const impl of reflect.store) {
-          if (impl.fiber?.state === 2 && typeof impl.name === 'string') activeServices.add(impl.name)
+      const reflect = (this.ctx as unknown as {
+        reflect?: { store?: Record<string, { name?: unknown; fiber?: { state?: unknown } }> }
+      }).reflect
+      if (reflect?.store !== undefined) {
+        for (const impl of Object.values(reflect.store)) {
+          if (impl?.fiber?.state === 2 && typeof impl.name === 'string') activeServices.add(impl.name)
         }
       }
       const analysis = analyzeProfile(dir, bundles, patch, disabledNames, [])
@@ -1257,7 +1264,12 @@ async function installSpec(ctx: Context, profile: string, spec: string): Promise
     }
   } catch { /* analysis is advisory */ }
   if (isBundle) {
-    return { ...result, installed: [installed], output: result.output + analysisNote }
+    return {
+      ...result,
+      installed: [installed],
+      output: result.output + analysisNote
+        + '\n[plugin-manager] bundle plugin added to the layer stack — restart the profile to load it (the catalog will show it then).',
+    }
   }
 
   // Non-bundle plugin: write the managed insert row (live mount).
@@ -1896,6 +1908,8 @@ function liveRowStates(ctx: Context): LiveRowState[] {
  * Offline entry view for profiles that are not running: the bundle layer
  * stack and the managed insert rows, all configured-but-not-live. The live
  * loader tree cannot be used for them (it belongs to the running profile).
+ * Official in-box bundles (base/web-app/headless) are NOT user-installed
+ * plugins — the catalog's "installed" filter must not show them.
  */
 function offlineEntries(bundles: readonly string[], insertRows: readonly InsertRow[]): RuntimeEntry[] {
   const out: RuntimeEntry[] = bundles.map((bundle) => ({
@@ -1903,7 +1917,7 @@ function offlineEntries(bundles: readonly string[], insertRows: readonly InsertR
     moduleName: bundle,
     enabled: true,
     fiberPhase: null,
-    installed: true,
+    installed: !(IN_BOX_BUNDLES as readonly string[]).includes(bundle),
     modified: false,
   }))
   for (const row of insertRows) {
