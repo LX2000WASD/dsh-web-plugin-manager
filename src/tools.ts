@@ -21,20 +21,20 @@ import type { CommandResult, MutationResult, PluginManagerSnapshot } from './typ
 /** Host operations the tools need (implemented by the manager service). */
 export interface PluginToolsHost {
   list(profile: string): PluginManagerSnapshot
-  setEnabled(profile: string, entryId: string, enabled: boolean): MutationResult
+  setEnabled(profile: string, entryId: string, enabled: boolean): Promise<MutationResult>
   install(profile: string, spec: string): Promise<CommandResult>
   remove(profile: string, name: string): Promise<CommandResult>
-  removeInsert(profile: string, rowId: string): MutationResult
+  removeInsert(profile: string, rowId: string): Promise<MutationResult>
 }
 
 /** Tool dependencies captured for one target profile. */
 export interface PluginToolsDeps {
   readonly profile: string
   readonly snapshot: () => PluginManagerSnapshot
-  readonly setEnabled: (entryId: string, enabled: boolean) => MutationResult
+  readonly setEnabled: (entryId: string, enabled: boolean) => Promise<MutationResult>
   readonly install: (spec: string) => Promise<CommandResult>
   readonly remove: (name: string) => Promise<CommandResult>
-  readonly removeInsert: (rowId: string) => MutationResult
+  readonly removeInsert: (rowId: string) => Promise<MutationResult>
 }
 
 /** One plugin row in the unified status listing. */
@@ -172,7 +172,7 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
           ok: true,
           installed,
           message: `plugin_install: ${names} installed into profile ${deps.profile}`
-            + (installed.length > 0 ? ' (bundle: restart web to load; non-bundle: mounted live via config HMR)' : ''),
+            + (installed.length > 0 ? ' (bundle: restart web to load; non-bundle: mounted live)' : ''),
         }
       },
     }),
@@ -180,7 +180,7 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
     defineTool({
       name: 'plugin_uninstall',
       description: 'Remove an installed DSH plugin from the target dsh profile. A managed insert row (non-bundle '
-        + 'plugin) is deleted from the profile cordis.patch.yml and unmounts live via config HMR. A bundle plugin is '
+        + 'plugin) is deleted from the profile cordis.patch.yml and unmounts live (no restart). A bundle plugin is '
         + 'removed from the profile dependencies and layer stack (takes effect on the next web restart). User-owned '
         + 'rows are never touched.',
       parameters: {
@@ -201,7 +201,7 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
         const id = args.id.trim()
         if (id === '') throw new Error('plugin_uninstall: id must be a non-empty plugin id')
         // Try the managed insert-row shape first (live removal).
-        const insert = deps.removeInsert(id)
+        const insert = await deps.removeInsert(id)
         if (insert.ok) return { ok: true, message: insert.message }
         // Then the bundle shape.
         const result = await deps.remove(id)
@@ -242,12 +242,12 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
           throw new Error(`plugin_toggle: "${entryId}" is not a runtime entry of profile ${deps.profile}`)
         }
         const nextEnabled = !entry.enabled
-        const result = deps.setEnabled(entry.entryId, nextEnabled)
+        const result = await deps.setEnabled(entry.entryId, nextEnabled)
         if (!result.ok) throw new Error(`plugin_toggle failed: ${result.message}`)
         return {
           entryId: entry.entryId,
           enabled: nextEnabled,
-          message: `plugin_toggle: ${entry.entryId} ${nextEnabled ? 'enabled' : 'disabled'} (live via config HMR)`,
+          message: `plugin_toggle: ${entry.entryId} ${nextEnabled ? 'enabled' : 'disabled'} (applied live)`,
         }
       },
     }),

@@ -17,7 +17,8 @@
  * Write side (V2):
  *  - enable/disable edits the profile's `cordis.patch.yml` through the
  *    managed-block mechanism (src/patch.ts) — reversible, reviewable, never
- *    rewrites user content; config HMR applies it live, no restart;
+ *    rewrites user content; the change is applied live through the loader
+ *    include (no restart; see src/live.ts for the platform-deadlock rationale);
  *  - install/remove shells out to the official `dsh plugin` CLI (pnpm +
  *    reconcile of `dsh.profile.bundles`); after install the real package name
  *    is resolved from the manifest, and a non-bundle plugin is additionally
@@ -45,6 +46,7 @@ import {
   hasManagedDisable, readInsertRows, readManagedIds, removeDisableBlock,
   removeInsertRow, writePatch,
 } from './patch.ts'
+import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerTools } from './tools.ts'
 
 export type * from './types.ts'
@@ -452,12 +454,18 @@ export class PluginManagerService extends Service {
     // Stable view: Loader entry ids are random per mount (Math.random
     // hex), so patch targeting must use the include-tree row id
     // (EntryOptions.id — stable across reloads; official semantics).
-    const entries = includeRows(this.ctx, {
-      packageNames: new Set(packages.map(pkg => pkg.name)),
-      insertNames: new Set(insertRows.map(row => row.name)),
-      insertIds: new Set(insertRows.map(row => row.id)),
-      managedIds,
-    })
+    // The live loader tree only covers the RUNNING profile: other profiles'
+    // snapshots synthesize their entries from the manifest and insert rows
+    // (offline state — nothing is live until that profile starts).
+    const isRunning = profile === hostProfileName()
+    const entries = isRunning
+      ? includeRows(this.ctx, {
+        packageNames: new Set(packages.map(pkg => pkg.name)),
+        insertNames: new Set(insertRows.map(row => row.name)),
+        insertIds: new Set(insertRows.map(row => row.id)),
+        managedIds,
+      })
+      : offlineEntries(bundles, insertRows)
 
     return {
       profile: {
@@ -476,7 +484,7 @@ export class PluginManagerService extends Service {
   }
 
   /** Enable or disable one plugin row via the managed patch block (live). */
-  setEnabled(profile: string, entryId: string, enabled: boolean): MutationResult {
+  async setEnabled(profile: string, entryId: string, enabled: boolean): Promise<MutationResult> {
     const dir = profileDir(profile)
     if (!existsSync(dir)) return { ok: false, message: `profile not found: ${profile}` }
     // entryId is the include-tree row id (stable). Random-mount ids (8-hex)
@@ -495,21 +503,53 @@ export class PluginManagerService extends Service {
       const rowEdit = enabled
         ? applyRowEnabled(withoutBlock, entryId)
         : applyRowDisabled(withoutBlock, entryId)
+      // 3. Compute the live stack mutation, then apply it through the loader
+      //    include BEFORE writing the file. Direct application avoids the
+      //    platform deadlock that a watcher-triggered refresh hits when the
+      //    change unloads a service the HMR service depends on (the timer
+      //    row); the watcher's later refresh of the same content is a no-op.
+      const ops: StackOp[] = []
+      let next = current
       if (rowEdit.changed) {
-        writePatch(patchPath(dir), rowEdit.content)
+        next = rowEdit.content
+        // User-written row edited in place: mirror the edit on the live
+        // stack (drop any stale managed block, then patch the row).
+        ops.push({ kind: 'remove-first', id: entryId, value: { id: entryId, disabled: true } })
+        ops.push({
+          kind: 'replace-last',
+          id: entryId,
+          mutate: (row) => {
+            const copy = { ...row }
+            if (enabled) {
+              delete copy.disabled
+              return Object.keys(copy).length > 1 ? copy : null
+            }
+            return { ...copy, disabled: true }
+          },
+        })
       } else if (enabled) {
         // No user row: enabling means the block removal above is the edit.
-        if (withoutBlock !== current) writePatch(patchPath(dir), withoutBlock)
+        if (withoutBlock !== current) next = withoutBlock
+        ops.push({ kind: 'remove-first', id: entryId, value: { id: entryId, disabled: true } })
       } else {
         // No user row: fall back to a managed block.
-        const next = addDisableBlock(withoutBlock, entryId)
-        if (next !== withoutBlock) writePatch(patchPath(dir), next)
+        const candidate = addDisableBlock(withoutBlock, entryId)
+        if (candidate !== withoutBlock) next = candidate
+        ops.push({ kind: 'append', value: { id: entryId, disabled: true } })
       }
+      // Live application only reaches the running profile's own tree;
+      // other profiles' rows are not mounted here (their patch file is
+      // written and applies on their next start).
+      const live = profile === hostProfileName()
+        ? await applyLiveOps(this.ctx, ops)
+        : { ok: false, message: 'profile not running' }
+      if (next !== current) writePatch(patchPath(dir), next)
+      const state = enabled ? 'enabled' : 'disabled'
       return {
         ok: true,
-        message: enabled
-          ? `enabled ${entryId} (live via config HMR)`
-          : `disabled ${entryId} (live via config HMR)`,
+        message: live.ok
+          ? `${state} ${entryId} (applied live)`
+          : `${state} ${entryId} (file updated; ${live.message ?? 'restart to apply'})`,
       }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
@@ -564,8 +604,8 @@ export class PluginManagerService extends Service {
     // the npm install (faster, no local link); fall back to the git clone.
     const npmName = prepared.packageName !== undefined ? probeNpmPublished(prepared.packageName) : undefined
     const result = npmName !== undefined
-      ? await installSpec(profile, npmName)
-      : await installSpec(profile, prepared.spec)
+      ? await installSpec(this.ctx, profile, npmName)
+      : await installSpec(this.ctx, profile, prepared.spec)
     const note = npmName !== undefined
       ? 'installed from npm (' + npmName + '; the repository also publishes it)'
       : prepared.note
@@ -592,7 +632,7 @@ export class PluginManagerService extends Service {
     let allOk = true
     for (const name of names) {
       const source = typeof deps[name] === 'string' && deps[name] !== '' ? deps[name] : name
-      const result = await installSpec(toProfile, source)
+      const result = await installSpec(this.ctx, toProfile, source)
       outputs.push("# " + name + " -> " + toProfile + ": " + (result.ok ? "ok" : "FAILED") + "\n" + result.output.trim())
       if (!result.ok) allOk = false
     }
@@ -611,13 +651,13 @@ export class PluginManagerService extends Service {
     const result = await runDshPlugin(profile, 'remove', [name], process.cwd())
     if (result.ok) {
       restoreInBoxBundles(profile, before)
-      cleanupInsertRows(profile, name)
+      cleanupInsertRows(this.ctx, profile, name)
     }
     return result
   }
 
   /** Remove one managed insert row (non-bundle plugin, live unmount). */
-  removeInsert(profile: string, rowId: string): MutationResult {
+  async removeInsert(profile: string, rowId: string): Promise<MutationResult> {
     const dir = profileDir(profile)
     if (!existsSync(dir)) return { ok: false, message: `profile not found: ${profile}` }
     try {
@@ -628,8 +668,21 @@ export class PluginManagerService extends Service {
       if (!row.managed) return { ok: false, message: `row ${rowId} is user-owned; remove it manually` }
       const { content, removed } = removeInsertRow(current, rowId)
       if (!removed) return { ok: false, message: `no managed insert row: ${rowId}` }
+      // Live-unmount through the loader include before persisting the
+      // file (running profile only; other profiles apply on next start).
+      const live = profile === hostProfileName()
+        ? await applyLiveOps(this.ctx, [{
+          kind: 'remove-first',
+          value: { insert: [{ id: rowId, name: row.name }] },
+        }])
+        : { ok: false, message: 'profile not running' }
       writePatch(patchPath(dir), content)
-      return { ok: true, message: `removed insert row ${rowId} (live via config HMR)` }
+      return {
+        ok: true,
+        message: live.ok
+          ? `removed insert row ${rowId} (applied live)`
+          : `removed insert row ${rowId} (file updated; ${live.message ?? 'restart to apply'})`,
+      }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
@@ -759,7 +812,7 @@ function discoverWorkspacePackages(root: string): string[] {
  * the main reason third-party plugins take the instance down at boot —
  * auto-rollback on failure).
  */
-async function installSpec(profile: string, spec: string): Promise<CommandResult> {
+async function installSpec(ctx: Context, profile: string, spec: string): Promise<CommandResult> {
   const before = readBundles(profile)
   const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
   if (!result.ok) return result
@@ -775,7 +828,7 @@ async function installSpec(profile: string, spec: string): Promise<CommandResult
     // Roll back: remove the dependency and any insert row written below.
     await runDshPlugin(profile, 'remove', [installed], process.cwd())
     restoreInBoxBundles(profile, before)
-    cleanupInsertRows(profile, installed)
+    cleanupInsertRows(ctx, profile, installed)
     return {
       ok: false,
       exitCode: 1,
@@ -796,12 +849,15 @@ async function installSpec(profile: string, spec: string): Promise<CommandResult
     const dir = profileDir(profile)
     const current = readPatch(dir)
     const next = addInsertRow(current, rowId, installed)
+    const live = next !== current && profile === hostProfileName()
+      ? await applyLiveOps(ctx, [{ kind: 'append', value: { insert: [{ id: rowId, name: installed }] } }])
+      : { ok: false, message: 'profile not running' }
     if (next !== current) writePatch(patchPath(dir), next)
     return {
       ...result,
       installed: [installed],
       output: result.output
-        + "\n[plugin-manager] quality check passed; mounted " + installed + " as insert row " + rowId + " (live via config HMR)",
+        + "\n[plugin-manager] quality check passed; mounted " + installed + " as insert row " + rowId + (live.ok ? " (applied live)" : " (file updated; " + (live.message ?? 'mounts on next restart') + ")"),
     }
   } catch (error: unknown) {
     return {
@@ -1344,6 +1400,33 @@ interface InstalledSets {
 }
 
 /**
+ * Offline entry view for profiles that are not running: the bundle layer
+ * stack and the managed insert rows, all configured-but-not-live. The live
+ * loader tree cannot be used for them (it belongs to the running profile).
+ */
+function offlineEntries(bundles: readonly string[], insertRows: readonly InsertRow[]): RuntimeEntry[] {
+  const out: RuntimeEntry[] = bundles.map((bundle) => ({
+    entryId: bundle,
+    moduleName: bundle,
+    enabled: true,
+    fiberPhase: null,
+    installed: true,
+    modified: false,
+  }))
+  for (const row of insertRows) {
+    out.push({
+      entryId: row.id,
+      moduleName: row.name,
+      enabled: true,
+      fiberPhase: null,
+      installed: true,
+      modified: row.managed,
+    })
+  }
+  return out
+}
+
+/**
  * Read the composed include-tree rows as the stable runtime view. Loader
  * entry ids are random per mount, so patch targeting must use the include
  * row id (EntryOptions.id — stable across reloads by official semantics).
@@ -1460,17 +1543,22 @@ function slugify(name: string): string {
  * (the package directory is gone) — the bug that took the instance down
  * during V2 testing.
  */
-function cleanupInsertRows(profile: string, packageName: string): void {
+function cleanupInsertRows(ctx: Context, profile: string, packageName: string): void {
   try {
     const dir = profileDir(profile)
     const current = readPatch(dir)
     const rows = readInsertRows(current)
+    const ops: StackOp[] = []
     let next = current
     for (const row of rows) {
       if (!row.managed || row.name !== packageName) continue
       const result = removeInsertRow(next, row.id)
-      if (result.removed) next = result.content
+      if (result.removed) {
+        next = result.content
+        ops.push({ kind: 'remove-first', value: { insert: [{ id: row.id, name: row.name }] } })
+      }
     }
+    if (ops.length > 0 && profile === hostProfileName()) void applyLiveOps(ctx, ops)
     if (next !== current) writePatch(patchPath(dir), next)
   } catch {
     /* patch cleanup is best-effort */
@@ -1494,23 +1582,31 @@ function isOfficialProfile(name: string): boolean {
   return (OFFICIAL_PROFILES as readonly string[]).includes(name)
 }
 
+/**
+ * The name of the profile hosting this running instance (from the launch
+ * argv), or null when it cannot be determined.
+ */
+function hostProfileName(): string | null {
+  try {
+    const argv = process.argv
+    const flagIndex = argv.indexOf('--profile')
+    if (flagIndex >= 0 && argv[flagIndex + 1] !== undefined) {
+      return argv[flagIndex + 1]!
+    }
+    // `dsh web` / `dsh headless` command mode (no --profile flag).
+    const candidate = argv.find(arg => !arg.startsWith('-') && !arg.endsWith('bin.js') && !arg.includes('node'))
+    return candidate ?? null
+  } catch {
+    return null
+  }
+}
+
 /** Whether a profile hosts the running plugin-manager (its dependency). */
 function isHostProfile(name: string): boolean {
   // The profile hosting this running instance — renaming or removing it would
   // break the live process. Other profiles that merely install the plugin
   // (e.g. via copyPlugins) remain manageable.
-  try {
-    const argv = process.argv
-    const flagIndex = argv.indexOf('--profile')
-    if (flagIndex >= 0 && argv[flagIndex + 1] !== undefined) {
-      return name === argv[flagIndex + 1]
-    }
-    // `dsh web` / `dsh headless` command mode (no --profile flag).
-    const candidate = argv.find(arg => !arg.startsWith('-') && !arg.endsWith('bin.js') && !arg.includes('node'))
-    return candidate !== undefined && name === candidate
-  } catch {
-    return false
-  }
+  return hostProfileName() === name
 }
 
 /** Official empty patch template for new profiles. */
@@ -1627,7 +1723,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const entryId = typeof body['entryId'] === 'string' ? body['entryId'] : ''
           const enabled = body['enabled'] === true
-          sendJson(res, 200, { ok: true, value: service.setEnabled(profile, entryId, enabled) })
+          sendJson(res, 200, { ok: true, value: await service.setEnabled(profile, entryId, enabled) })
           return
         }
         case 'install': {
@@ -1684,7 +1780,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'removeInsert': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const rowId = typeof body['rowId'] === 'string' ? body['rowId'] : ''
-          sendJson(res, 200, { ok: true, value: service.removeInsert(profile, rowId) })
+          sendJson(res, 200, { ok: true, value: await service.removeInsert(profile, rowId) })
           return
         }
         default:
@@ -1721,6 +1817,13 @@ export const inject = ['loader']
 
 export function apply(ctx: Context, config: PluginManagerConfig): void {
   const service = new PluginManagerService(ctx)
+  // Plugin-owned watcher for the running profile's patch file: manual edits
+  // keep applying live even after a toggle unloads the platform HMR service
+  // (its own patch watcher is an effect of HMR and does not come back).
+  const host = hostProfileName()
+  if (host !== null) {
+    ensurePatchWatcher(ctx, patchPath(profileDir(host)))
+  }
   // webServer is a sibling include-group row; ctx.inject waits for it like
   // the official agent-tool-presentation waits for codeRuntime.
   ctx.inject(['webServer'], (webCtx: Context) => {
