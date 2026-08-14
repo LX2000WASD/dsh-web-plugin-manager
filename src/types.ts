@@ -96,8 +96,14 @@ export interface MarketplaceItem {
   readonly createdAt: string
   /** Repository URL (the git install source). */
   readonly url: string
-  /** Catalog status (e.g. ✅ verified, 待测 pending). */
+  /** Catalog status (e.g. ✅ verified, 待测 pending, archived). */
   readonly status?: string
+  /** Published npm package name, when the catalog records one. */
+  readonly packageName?: string
+  /** Catalog category (e.g. 单插件 / 插件集 / 技能), when known. */
+  readonly category?: string
+  /** Catalog lifecycle state (active / archived / ...), when known. */
+  readonly lifecycle?: string
 }
 
 /** Marketplace listing result. */

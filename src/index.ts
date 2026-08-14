@@ -30,7 +30,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process'
 import { connect, createServer } from 'node:net'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -99,6 +99,27 @@ function readPatch(dir: string): string {
   return existsSync(path) ? readFileSync(path, 'utf8') : ''
 }
 
+/**
+ * Resolve a PATH command to its absolute file path. On Windows the npm CLI
+ * shims are .cmd/.bat files (dsh, npm, ...): `execFile`/`spawn` cannot run
+ * them by bare name (no PATHEXT lookup), so the full shim path is needed
+ * (Node >= 20.12 then executes .cmd/.bat files natively). Other platforms
+ * return the bare name — PATH resolution happens in the child.
+ */
+function resolveCommand(name: string): string {
+  if (process.platform !== 'win32') return name
+  try {
+    const output = execFileSync('where', [name], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    })
+    const hit = output.split(/\r?\n/).map(line => line.trim()).find(line => line.length > 0)
+    if (hit !== undefined) return hit
+  } catch { /* not on PATH: let the caller surface the error */ }
+  return name
+}
+
 /** Run `dsh plugin --profile <name> <verb> <args...>` and collect output. */
 function runDshPlugin(
   profile: string,
@@ -108,7 +129,7 @@ function runDshPlugin(
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     execFile(
-      'dsh',
+      resolveCommand('dsh'),
       ['plugin', '--profile', profile, verb, ...args],
       { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 },
       (error, stdout, stderr) => {
@@ -166,6 +187,15 @@ export class PluginManagerService extends Service {
       return { ok: false, message: "invalid profile name: " + JSON.stringify(name) }
     }
     if (isOfficialProfile(name)) return { ok: false, message: name + " is an official profile" }
+    // Windows device names (CON, NUL, AUX, COM1..9, LPT1..9) and names ending
+    // in a dot/space cannot be directories — reject them up front with a
+    // clear message instead of a raw EINVAL from the filesystem.
+    if (process.platform === 'win32') {
+      const base = name.replace(/\.+$/, '').toUpperCase()
+      if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(base) || /[\s.]$/.test(name)) {
+        return { ok: false, message: name + " is a reserved Windows name; pick another profile name" }
+      }
+    }
     const dir = profileDir(name)
     if (existsSync(dir)) return { ok: false, message: "profile already exists: " + name }
     const bundles = template === "headless"
@@ -188,7 +218,7 @@ export class PluginManagerService extends Service {
       // install into this profile via pnpm as usual.
       return { ok: true, message: "created " + template + " profile " + name }
     } catch (error: unknown) {
-      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+      return { ok: false, message: "failed to create profile " + name + " at " + dir + ": " + (error instanceof Error ? error.message : String(error)) }
     }
   }
 
@@ -244,17 +274,29 @@ export class PluginManagerService extends Service {
     if (!bundles.includes('@deepseek-ai/dsh-web-app')) {
       return { ok: false, message: name + " has no web surface (not a web environment)" }
     }
+    // Async spawn errors (e.g. the dsh command missing) surface here.
+    let spawnError: string | null = null
     try {
       const port = await findFreePort(3090)
+      // Terminal-window mode everywhere: a visible window keeps the instance
+      // in plain sight (the user can see it is alive; closing the window
+      // stops it). Windows shows the same visible cmd window — the flash of
+      // the intermediate `start` launcher is suppressed, and the dsh
+      // shim directory is injected into the window's PATH so its `dsh`
+      // command always resolves (see openInTerminal).
       const terminal = await openInTerminal('dsh --profile ' + name + ' --port ' + port)
       if (!terminal.opened) {
-        // No terminal emulator: background fallback (visible via ps; the
-        // profile scan still reports it as running).
-        const child = spawn('dsh', ['--profile', name, '--port', String(port)], {
+        // No terminal emulator / shell available: background fallback (still
+        // visible via the process scan; the profile list reports it as
+        // running and the stop button manages it).
+        const child = spawn(resolveCommand('dsh'), ['--profile', name, '--port', String(port)], {
           cwd: process.cwd(),
           detached: true,
           stdio: 'ignore',
+          windowsHide: true,
         })
+        // Swallow async spawn errors (e.g. dsh missing) — reported below.
+        child.on('error', (error) => { spawnError = error.message })
         child.unref()
       }
       // Wait for the web server to answer (up to ~10s).
@@ -268,106 +310,112 @@ export class PluginManagerService extends Service {
             url: "http://127.0.0.1:" + port,
             message: terminal.opened
               ? "opened " + name + " in " + terminal.terminal + " — closing that terminal stops the instance (" + terminal.command + ")"
-              : "started " + name + " in the background (no terminal emulator found) on http://127.0.0.1:" + port,
+              : "started " + name + " in the background on http://127.0.0.1:" + port + " (stop it from this page)",
           }
         }
         await new Promise(resolve => setTimeout(resolve, 500))
       }
-      return { ok: false, port, message: "started but did not become ready within 10s: http://127.0.0.1:" + port }
+      return {
+        ok: false,
+        port,
+        message: spawnError !== null
+          ? "could not start " + name + ": " + spawnError
+          : "started but did not become ready within 10s: http://127.0.0.1:" + port,
+      }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
   }
 
 
-  /** Fetch the marketplace listing (GitHub topic search, 24h cache). */
+  /**
+   * Fetch the marketplace listing (24h cache).
+   *
+   * The awesome-dsh-plugins source moved from a single PLUGINS.md table to a
+   * structured catalog (catalog/plugins/*.json + schema + policy). Both
+   * sources are fetched and merged (they complement each other), and the
+   * on-disk cache is the last resort — an empty list is only shown when
+   * every source is unusable.
+   */
   async marketplace(refresh: boolean): Promise<MarketplaceResult> {
     const cacheDir = join(dshHome(), 'plugin-manager-cache')
     const cachePath = join(cacheDir, 'marketplace.json')
     mkdirSync(cacheDir, { recursive: true })
+    const readCache = (): { fetchedAt?: string; items: MarketplaceItem[] } => {
+      try {
+        const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { version?: unknown; fetchedAt?: unknown; items?: unknown }
+        // Cache format changed (item shape / source layout): ignore old files.
+        if (cached.version !== MARKETPLACE_CACHE_VERSION) return { items: [] }
+        const fetchedAt = typeof cached.fetchedAt === 'string' ? cached.fetchedAt : ''
+        const items = Array.isArray(cached.items) ? cached.items as MarketplaceItem[] : []
+        return { fetchedAt, items }
+      } catch { /* no/ broken cache */ }
+      return { items: [] }
+    }
+    const writeCache = (items: MarketplaceItem[]): void => {
+      writeFileSync(cachePath, JSON.stringify({
+        version: MARKETPLACE_CACHE_VERSION,
+        fetchedAt: new Date().toISOString(),
+        items,
+      }, undefined, 2) + '\n')
+    }
     // Serve the cache unless it is missing, stale (>24h), or refresh is forced.
     if (!refresh) {
-      try {
-        const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { fetchedAt?: unknown; items?: unknown }
-        const fetchedAt = typeof cached.fetchedAt === 'string' ? Date.parse(cached.fetchedAt) : NaN
-        const items = Array.isArray(cached.items) ? cached.items as MarketplaceItem[] : []
-        if (!Number.isNaN(fetchedAt) && Date.now() - fetchedAt < 24 * 60 * 60 * 1000 && items.length > 0) {
-          return {
-            ok: true,
-            items,
-            cachedAt: typeof cached.fetchedAt === 'string' ? cached.fetchedAt : undefined,
-            fromCache: true,
-            message: 'served from cache',
-          }
+      const cached = readCache()
+      const fetchedAt = Date.parse(cached.fetchedAt ?? '')
+      if (!Number.isNaN(fetchedAt) && Date.now() - fetchedAt < MARKETPLACE_TTL && cached.items.length > 0) {
+        return {
+          ok: true,
+          items: cached.items,
+          cachedAt: cached.fetchedAt,
+          fromCache: true,
+          message: 'served from cache',
         }
-      } catch { /* no/ broken cache: refetch */ }
-    }
-    try {
-      // Primary source: the maintained awesome-dsh-plugins catalog — its
-      // referenced repositories are curated (checked against mainline).
-      // PLUGINS.md rows: | name | [org/repo](url) | description | status |
-      const mdResponse = await fetch(
-        'https://raw.githubusercontent.com/AdamPlatin123/awesome-dsh-plugins/main/PLUGINS.md',
-        { headers: { 'user-agent': 'dsh-web-plugin-manager' } },
-      )
-      if (!mdResponse.ok) throw new Error('catalog fetch HTTP ' + mdResponse.status)
-      const markdown = await mdResponse.text()
-      const rows: Array<{ fullName: string; description: string; status: string }> = []
-      for (const line of markdown.split('\n')) {
-        const match = /^\|\s*([^|]+?)\s*\|\s*\[([^|]+?)\]\(https?:\/\/github\.com\/([^/)]+\/[^/)]+)\)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|/.exec(line)
-        if (match === null) continue
-        const fullName = match[3]!.trim()
-        if (fullName.length === 0 || fullName.startsWith('deepseek-ai/')) continue
-        rows.push({
-          fullName,
-          description: match[4]!.trim(),
-          status: match[5]!.trim(),
-        })
       }
-      if (rows.length === 0) throw new Error('no rows parsed from the catalog')
-      // Enrich with GitHub repository metadata (stars/dates). Unauthenticated
-      // rate limit is 60/h; the list is small and cached for 24h.
-      const items: MarketplaceItem[] = []
-      for (const row of rows) {
-        let stars = 0
-        let updatedAt = ''
-        let createdAt = ''
-        try {
-          const repoResponse = await fetch('https://api.github.com/repos/' + row.fullName, {
-            headers: { 'user-agent': 'dsh-web-plugin-manager' },
-          })
-          if (repoResponse.ok) {
-            const repo = await repoResponse.json() as { stargazers_count?: unknown; updated_at?: unknown; created_at?: unknown }
-            stars = typeof repo.stargazers_count === 'number' ? repo.stargazers_count : 0
-            updatedAt = typeof repo.updated_at === 'string' ? repo.updated_at : ''
-            createdAt = typeof repo.created_at === 'string' ? repo.created_at : ''
-          }
-        } catch { /* rate-limited or offline: keep zeros */ }
-        items.push({
-          name: row.fullName,
-          displayName: row.fullName.split('/').pop() ?? row.fullName,
-          ...(row.description.length > 0 ? { description: row.description } : {}),
-          stars,
-          updatedAt,
-          createdAt,
-          url: 'https://github.com/' + row.fullName,
-          status: row.status,
-        })
-      }
-      const now = new Date().toISOString()
-      writeFileSync(cachePath, JSON.stringify({ fetchedAt: now, items }, undefined, 2) + '\n')
-      return { ok: true, items, fromCache: false, message: 'fetched ' + items.length + ' repositories' }
-    } catch (error: unknown) {
-      // Fall back to the cache when the network fails.
-      try {
-        const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { fetchedAt?: unknown; items?: unknown }
-        const items = Array.isArray(cached.items) ? cached.items as MarketplaceItem[] : []
-        if (items.length > 0) {
-          return { ok: true, items, cachedAt: typeof cached.fetchedAt === 'string' ? cached.fetchedAt : undefined, fromCache: true, message: 'network failed; served from cache: ' + (error instanceof Error ? error.message : String(error)) }
-        }
-      } catch { /* no cache either */ }
-      return { ok: false, items: [], fromCache: false, message: error instanceof Error ? error.message : String(error) }
     }
+    // Keep previous metadata (stars/dates) to reuse when the GitHub API is
+    // rate-limited during enrichment.
+    const prior = new Map<string, MarketplaceItem>(readCache().items.map(item => [item.name, item]))
+    let catalogError: string | null = null
+    let markdownError: string | null = null
+    // Fetch both sources independently: the structured catalog (new layout)
+    // and the curated PLUGINS.md table (legacy layout). Either one failing
+    // must not empty the list — they complement each other (the catalog
+    // carries auto-discovered repos + npm package names, PLUGINS.md carries
+    // curated descriptions and verified statuses).
+    const catalogItems = await fetchCatalogItems().catch((error: unknown) => {
+      catalogError = error instanceof Error ? error.message : String(error)
+      return []
+    })
+    const markdownItems = await fetchMarkdownItems().catch((error: unknown) => {
+      markdownError = error instanceof Error ? error.message : String(error)
+      return []
+    })
+    const merged = mergeMarketplace(catalogItems, markdownItems)
+    // Verified entries first: when the unauthenticated API quota runs out
+    // mid-enrichment, the most relevant entries keep their stars.
+    merged.sort((a, b) => Number(b.status?.includes('✅') ?? false) - Number(a.status?.includes('✅') ?? false))
+    const items = await enrichRepos(merged, prior)
+    if (items.length > 0) {
+      writeCache(items)
+      const note = [
+        catalogError === null ? 'catalog' : 'catalog unavailable (' + catalogError + ')',
+        markdownError === null ? 'PLUGINS.md' : 'PLUGINS.md unavailable (' + markdownError + ')',
+      ].join('; ')
+      return { ok: true, items, fromCache: false, message: 'fetched ' + items.length + ' plugins (' + note + ')' }
+    }
+    // Last resort: the on-disk cache (any age — better than an empty list).
+    const cached = readCache()
+    if (cached.items.length > 0) {
+      return {
+        ok: true,
+        items: cached.items,
+        cachedAt: cached.fetchedAt,
+        fromCache: true,
+        message: 'sources unavailable; served from cache: ' + (catalogError ?? markdownError ?? 'unknown'),
+      }
+    }
+    return { ok: false, items: [], fromCache: false, message: catalogError ?? markdownError ?? 'no sources' }
   }
 
   /** Snapshot one profile: live entries + installed packages + bundle status. */
@@ -474,7 +522,13 @@ export class PluginManagerService extends Service {
     if (run === undefined) return { ok: false, message: name + ' is not running' }
     if (isHostProfile(name)) return { ok: false, message: 'cannot stop the current instance (' + name + ')' }
     try {
+      // Kill the real instance first, then its launchers (the terminal-window
+      // cmd/bash that hosts it) — otherwise a stopped instance would leave a
+      // dead window behind and the user would think it is still running.
       process.kill(run.pid, 'SIGTERM')
+      for (const launcher of run.launchers) {
+        try { process.kill(launcher, 'SIGTERM') } catch { /* already gone */ }
+      }
       // Wait for the process to exit (up to ~5s).
       const deadline = Date.now() + 5_000
       for (;;) {
@@ -655,10 +709,11 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
 /** Whether a package name exists on the npm registry (short timeout). */
 function probeNpmPublished(packageName: string): string | undefined {
   try {
-    const output = execFileSync('npm', ['view', packageName, 'version'], {
+    const output = execFileSync(resolveCommand('npm'), ['view', packageName, 'version'], {
       encoding: 'utf8',
       timeout: 10_000,
       stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
     })
     return output.trim().length > 0 ? packageName : undefined
   } catch {
@@ -837,20 +892,48 @@ function qualityIssues(profile: string, packageName: string): string[] {
 /** One live dsh instance found by process scan. */
 interface RunInfo {
   readonly port: number | null
+  /** The real instance process (the node process running dsh). */
   readonly pid: number
+  /** Launcher processes hosting the instance (terminal cmd/bash windows). */
+  readonly launchers: readonly number[]
 }
 
 /**
- * Scan running dsh instances by their command line (dsh --profile <name>
- * [--port <n>]). Stateless: a live process is by definition running; no
- * registry file to go stale. Bash wrappers and the node child both match;
- * the entry carrying a --port wins for the same profile.
+ * Windows process table as "pid<TAB>command line" lines (powershell +
+ * CIM). The command line contains the full node/dsh paths and the
+ * --profile/--port flags, so the shared parser below works unchanged.
  */
-function scanRuns(): Map<string, RunInfo> {
-  const runs = new Map<string, RunInfo>()
+function windowsProcessLines(): string[] {
   try {
-    const output = execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' })
-    for (const line of output.split('\n')) {
+    const script = [
+      'Get-CimInstance Win32_Process',
+      "| Where-Object { $_.CommandLine -and $_.CommandLine -match 'dsh' }",
+      '| ForEach-Object { $_.ProcessId.ToString() + [char]9 + $_.CommandLine }',
+    ].join(' ')
+    const output = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    })
+    return output.split(/\r?\n/)
+  } catch {
+    return []
+  }
+}
+
+function scanRuns(): Map<string, RunInfo> {
+  // Collect every match per profile, then resolve the primary process: the
+  // real node process when present (a .cmd/.bat shim or bash wrapper is only
+  // its launcher — killing the wrapper alone would orphan the instance),
+  // preferring the entry carrying a --port, as before.
+  const byProfile = new Map<string, Array<{ port: number | null; pid: number; node: boolean }>>()
+  try {
+    const output = process.platform === 'win32'
+      ? windowsProcessLines()
+      : execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' }).split('\n')
+    for (const line of output) {
       let match = /^\s*(\d+)\s+(.*\bdsh\b.*--profile\s+(\S+))/.exec(line)
       let profile: string | undefined
       let pid: number | undefined
@@ -869,15 +952,29 @@ function scanRuns(): Map<string, RunInfo> {
       // Parse --port from the whole line (the --profile group ends at the name).
       const portMatch = /--port\s+(\d+)/.exec(line)
       const port = portMatch === null ? null : Number(portMatch[1]!)
-      const existing = runs.get(profile)
-      if (existing === undefined || (existing.port === null && port !== null)) {
-        runs.set(profile, { port, pid })
-      }
+      // A line naming node or a .js script is the real instance; a bare shim
+      // (dsh.cmd / bash wrapper) is only its launcher.
+      const node = /\bnode(?:\.exe)?\b|\b[\w-]+\.js\b/.test(line)
+      const list = byProfile.get(profile)
+      if (list === undefined) byProfile.set(profile, [{ port, pid, node }])
+      else list.push({ port, pid, node })
     }
   } catch {
-    /* ps unavailable: no runs reported */
+    /* ps/powershell unavailable: no runs reported */
   }
-  return runs
+  const out = new Map<string, RunInfo>()
+  for (const [name, matches] of byProfile) {
+    const withPort = matches.filter(match => match.port !== null)
+    const node = matches.find(match => match.node)
+    const primary = node ?? withPort[0] ?? matches[0]!
+    const port = primary.port ?? (withPort[0]?.port ?? null)
+    out.set(name, {
+      port,
+      pid: primary.pid,
+      launchers: matches.filter(match => match.pid !== primary.pid).map(match => match.pid),
+    })
+  }
+  return out
 }
 /** Result of trying to open a terminal window. */
 interface TerminalOpen {
@@ -887,10 +984,11 @@ interface TerminalOpen {
 }
 
 /**
- * Open a terminal window running `command` (cross-platform). The instance
- * then lives and dies with that terminal session. Linux probes common
- * emulators; macOS uses Terminal.app via osascript; Windows uses
- * `start cmd /k`. Returns opened=false when nothing is available.
+ * Open a visible terminal window running `command`. The instance then lives
+ * and dies with that terminal session — the window keeps the instance in
+ * plain sight so the user never forgets a process is running. Linux probes
+ * common emulators; macOS uses Terminal.app via osascript; Windows opens a
+ * cmd window. Returns opened=false when nothing is available.
  */
 async function openInTerminal(command: string): Promise<TerminalOpen> {
   if (process.platform === 'darwin') {
@@ -898,7 +996,19 @@ async function openInTerminal(command: string): Promise<TerminalOpen> {
     return { opened: true, terminal: 'Terminal.app', command }
   }
   if (process.platform === 'win32') {
-    spawn('cmd', ['/c', 'start', '', 'cmd', '/k', command], { stdio: 'ignore' }).unref()
+    // A visible cmd window runs the command (`cmd /k` keeps it open).
+    // Two compatibility fixes for the "a cmd window suddenly appears"
+    // reports: windowsHide suppresses the intermediate `start` launcher
+    // window (only the real window shows), and the dsh shim directory is
+    // prepended to PATH so `dsh` resolves inside the new window even when
+    // it is not on the user's PATH (otherwise the window opens with
+    // "'dsh' is not recognized" and the instance never starts).
+    const dshShim = resolveCommand('dsh')
+    const env = { ...process.env }
+    if (dshShim !== 'dsh' && dshShim !== 'dsh.cmd') {
+      env.PATH = dirname(dshShim) + (env.PATH !== undefined && env.PATH.length > 0 ? delimiter + env.PATH : '')
+    }
+    spawn('cmd', ['/c', 'start', '', 'cmd', '/k', command], { stdio: 'ignore', windowsHide: true, env }).unref()
     return { opened: true, terminal: 'cmd', command }
   }
   // The user's explicit choice, then the system default terminal selector
@@ -912,7 +1022,7 @@ async function openInTerminal(command: string): Promise<TerminalOpen> {
     if (!hasBinary(bin)) continue
     const argv = terminalArgs(bin, command)
     try {
-      spawn(bin, argv, { stdio: 'ignore' }).unref()
+      spawn(bin, argv, { stdio: 'ignore', windowsHide: true }).unref()
       return { opened: true, terminal: bin, command }
     } catch {
       /* try the next emulator */
@@ -921,10 +1031,10 @@ async function openInTerminal(command: string): Promise<TerminalOpen> {
   return { opened: false }
 }
 
-/** Whether a binary exists on PATH. */
+/** Whether a binary exists on PATH (where on Windows, which elsewhere). */
 function hasBinary(bin: string): boolean {
   try {
-    execFileSync('which', [bin], { stdio: 'ignore' })
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: 'ignore', windowsHide: true })
     return true
   } catch {
     return false
@@ -968,6 +1078,235 @@ function probePort(port: number): Promise<boolean> {
     socket.once('connect', () => done(true))
     socket.once('error', () => done(false))
   })
+}
+
+/** Marketplace snapshot TTL and cache format version. */
+const MARKETPLACE_TTL = 24 * 60 * 60 * 1000
+const MARKETPLACE_CACHE_VERSION = 2
+
+/** The maintained awesome-dsh-plugins catalog (structured source of truth). */
+const CATALOG_OWNER = 'AdamPlatin123'
+const CATALOG_REPO = 'awesome-dsh-plugins'
+const CATALOG_BRANCH = 'main'
+const CATALOG_RAW = `https://raw.githubusercontent.com/${CATALOG_OWNER}/${CATALOG_REPO}/${CATALOG_BRANCH}`
+const CATALOG_API = `https://api.github.com/repos/${CATALOG_OWNER}/${CATALOG_REPO}`
+const GITHUB_UA = { 'user-agent': 'dsh-web-plugin-manager' }
+
+/** One structured catalog entry (catalog/plugins/<github-id>.json). */
+interface CatalogEntry {
+  readonly id?: unknown
+  readonly repository?: { readonly full_name?: unknown; readonly url?: unknown }
+  readonly package?: { readonly name?: unknown; readonly entry?: unknown }
+  readonly curation?: { readonly state?: unknown; readonly category?: unknown; readonly description_zh?: unknown }
+  readonly lifecycle?: { readonly state?: unknown }
+}
+
+/** Derive the marketplace status label from a catalog entry. */
+function catalogStatus(entry: CatalogEntry): string {
+  const curation = typeof entry.curation?.state === 'string' ? entry.curation.state : ''
+  const lifecycle = typeof entry.lifecycle?.state === 'string' ? entry.lifecycle.state : ''
+  if (lifecycle === 'archived') return 'archived'
+  if (lifecycle === 'deleted') return 'deleted'
+  if (curation === 'listed') return '✅ listed'
+  if (curation === 'candidate') return '待测'
+  return curation.length > 0 ? curation : ''
+}
+
+/**
+ * Fetch the structured catalog: enumerate catalog/plugins/*.json via the
+ * GitHub contents API (one call), honour catalog/tombstones.json, and parse
+ * each entry against the published plugin.schema.json shape. Returns an
+ * empty array only when nothing usable could be read.
+ */
+async function fetchCatalogItems(): Promise<MarketplaceItem[]> {
+  const listingResponse = await fetch(CATALOG_API + '/contents/catalog/plugins?per_page=100', { headers: GITHUB_UA })
+  if (!listingResponse.ok) throw new Error('catalog listing HTTP ' + listingResponse.status)
+  const listing = await listingResponse.json() as Array<{ name?: unknown; download_url?: unknown }>
+  const files = listing.filter((entry): entry is { name: string; download_url: string } =>
+    typeof entry.name === 'string' && entry.name.endsWith('.json') && typeof entry.download_url === 'string')
+  if (files.length === 0) throw new Error('catalog listing is empty')
+
+  // Tombstoned ids are blocked from reappearing (policy.readd_policy).
+  const tombstoned = new Set<string>()
+  try {
+    const tombResponse = await fetch(CATALOG_RAW + '/catalog/tombstones.json', { headers: GITHUB_UA })
+    if (tombResponse.ok) {
+      const tomb = await tombResponse.json() as { entries?: unknown }
+      if (Array.isArray(tomb.entries)) {
+        for (const entry of tomb.entries) {
+          const id = typeof entry === 'string' ? entry : (entry as { id?: unknown }).id
+          if (typeof id === 'string') tombstoned.add(id)
+        }
+      }
+    }
+  } catch { /* tombstones are advisory */ }
+
+  const seen = new Map<string, MarketplaceItem>()
+  for (const file of files) {
+    try {
+      const response = await fetch(file.download_url, { headers: GITHUB_UA })
+      if (!response.ok) continue
+      const entry = await response.json() as CatalogEntry
+      const id = typeof entry.id === 'string' ? entry.id : ''
+      if (id.length > 0 && tombstoned.has(id)) continue
+      const curation = typeof entry.curation?.state === 'string' ? entry.curation.state : ''
+      if (curation === 'rejected' || curation === 'removed' || curation === 'blocked') continue
+      const lifecycle = typeof entry.lifecycle?.state === 'string' ? entry.lifecycle.state : ''
+      if (lifecycle === 'deleted') continue
+      const fullName = typeof entry.repository?.full_name === 'string' ? entry.repository.full_name : ''
+      const url = typeof entry.repository?.url === 'string' ? entry.repository.url : ''
+      if (fullName.length === 0 || url.length === 0) continue
+      if (fullName.startsWith('deepseek-ai/')) continue
+      const packageName = typeof entry.package?.name === 'string' ? entry.package.name : ''
+      const category = typeof entry.curation?.category === 'string' ? entry.curation.category : ''
+      const description = typeof entry.curation?.description_zh === 'string' ? entry.curation.description_zh : ''
+      const status = catalogStatus(entry)
+      const item: MarketplaceItem = {
+        name: fullName,
+        displayName: fullName.split('/').pop() ?? fullName,
+        ...(description.length > 0 ? { description } : {}),
+        stars: 0,
+        updatedAt: '',
+        createdAt: '',
+        url,
+        status,
+        ...(packageName.length > 0 ? { packageName } : {}),
+        ...(category.length > 0 ? { category } : {}),
+        ...(lifecycle.length > 0 ? { lifecycle } : {}),
+      }
+      // Deduplicate by repository; a verified listing wins over a candidate.
+      const existing = seen.get(fullName)
+      const verified = (value: MarketplaceItem | undefined): boolean => (value?.status ?? '').includes('✅')
+      if (existing === undefined || (verified(item) && !verified(existing))) {
+        seen.set(fullName, item)
+      }
+    } catch { /* skip one broken entry */ }
+  }
+  if (seen.size === 0) throw new Error('no usable entries parsed from the catalog')
+  return [...seen.values()]
+}
+
+/**
+ * Fallback source: parse the human-curated PLUGINS.md table
+ * (| name | [org/repo](url) | description | status |), tracking the current
+ * category section and deduplicating by repository (✅ wins over 待测).
+ */
+async function fetchMarkdownItems(): Promise<MarketplaceItem[]> {
+  const mdResponse = await fetch(CATALOG_RAW + '/PLUGINS.md', { headers: GITHUB_UA })
+  if (!mdResponse.ok) throw new Error('catalog fetch HTTP ' + mdResponse.status)
+  const markdown = await mdResponse.text()
+  const rows: Array<{ fullName: string; description: string; status: string; category: string }> = []
+  let category = ''
+  for (const line of markdown.split('\n')) {
+    const section = /^##\s+(.*)$/.exec(line)
+    if (section !== null) {
+      // Strip the leading category emoji (🔌 / 🧰 / 🎓 / …).
+      category = section[1]!.trim().replace(/^\S+\s*/, '')
+      continue
+    }
+    const match = /^\|\s*([^|]+?)\s*\|\s*\[([^|]+?)\]\(https?:\/\/github\.com\/([^/)]+\/[^/)]+)\)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|/.exec(line)
+    if (match === null) continue
+    const fullName = match[3]!.trim()
+    if (fullName.length === 0 || fullName.startsWith('deepseek-ai/')) continue
+    rows.push({
+      fullName,
+      description: match[4]!.trim(),
+      status: match[5]!.trim(),
+      category,
+    })
+  }
+  if (rows.length === 0) throw new Error('no rows parsed from PLUGINS.md')
+  const byName = new Map<string, { description: string; status: string; category: string }>()
+  const score = (status: string): number => status.includes('✅') ? 2 : status.includes('已测') ? 1 : 0
+  for (const row of rows) {
+    const existing = byName.get(row.fullName)
+    if (existing === undefined || score(row.status) > score(existing.status)) {
+      byName.set(row.fullName, row)
+    }
+  }
+  return [...byName.entries()].map(([fullName, row]) => ({
+    name: fullName,
+    displayName: fullName.split('/').pop() ?? fullName,
+    ...(row.description.length > 0 ? { description: row.description } : {}),
+    stars: 0,
+    updatedAt: '',
+    createdAt: '',
+    url: 'https://github.com/' + fullName,
+    status: row.status,
+    ...(row.category.length > 0 ? { category: row.category } : {}),
+  }))
+}
+
+/**
+ * Merge the two sources into one listing: catalog entries keep their
+ * structure (package name, lifecycle) and are enriched with the curated
+ * description / evidence status / category from PLUGINS.md when present;
+ * PLUGINS.md-only repositories are appended. Deduplication is by repository.
+ */
+function mergeMarketplace(catalog: readonly MarketplaceItem[], markdown: readonly MarketplaceItem[]): MarketplaceItem[] {
+  const mdBy = new Map(markdown.map(item => [item.name, item]))
+  const out: MarketplaceItem[] = []
+  const seen = new Set<string>()
+  for (const item of catalog) {
+    const md = mdBy.get(item.name)
+    out.push(md !== undefined ? {
+      ...item,
+      ...(item.description === undefined && md.description !== undefined ? { description: md.description } : {}),
+      // A verified evidence status wins over a plain auto-discovered candidate.
+      ...((item.status === undefined || item.status.length === 0 || item.status === '待测') && md.status !== undefined ? { status: md.status } : {}),
+      ...(item.category === undefined && md.category !== undefined ? { category: md.category } : {}),
+    } : item)
+    seen.add(item.name)
+  }
+  for (const item of markdown) {
+    if (!seen.has(item.name)) out.push(item)
+  }
+  return out
+}
+
+/**
+ * Enrich items with GitHub repository metadata (stars/dates). Unauthenticated
+ * API quota is 60/h: on 403/429 enrichment stops and the remaining items
+ * reuse metadata from the previous snapshot (zeros when unknown) — the list
+ * itself is never dropped because of a rate limit.
+ */
+async function enrichRepos(items: MarketplaceItem[], prior: Map<string, MarketplaceItem>): Promise<MarketplaceItem[]> {
+  let rateLimited = false
+  const out: MarketplaceItem[] = []
+  for (const item of items) {
+    if (rateLimited) {
+      const prev = prior.get(item.name)
+      out.push(prev !== undefined
+        ? { ...item, stars: prev.stars, updatedAt: prev.updatedAt, createdAt: prev.createdAt }
+        : item)
+      continue
+    }
+    try {
+      const response = await fetch('https://api.github.com/repos/' + item.name, { headers: GITHUB_UA })
+      if (response.status === 403 || response.status === 429) {
+        rateLimited = true
+        const prev = prior.get(item.name)
+        out.push(prev !== undefined
+          ? { ...item, stars: prev.stars, updatedAt: prev.updatedAt, createdAt: prev.createdAt }
+          : item)
+        continue
+      }
+      if (response.ok) {
+        const repo = await response.json() as { stargazers_count?: unknown; updated_at?: unknown; created_at?: unknown }
+        out.push({
+          ...item,
+          stars: typeof repo.stargazers_count === 'number' ? repo.stargazers_count : 0,
+          updatedAt: typeof repo.updated_at === 'string' ? repo.updated_at : '',
+          createdAt: typeof repo.created_at === 'string' ? repo.created_at : '',
+        })
+      } else {
+        out.push(item)
+      }
+    } catch {
+      out.push(item)
+    }
+  }
+  return out
 }
 
 /** A loader entry with the fields we read (structural, loader types stay optional). */

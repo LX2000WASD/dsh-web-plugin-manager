@@ -255,8 +255,16 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, t }: Plug
                     <span style={styles.tag}>★ {item.stars}</span>
                     {item.status !== undefined && item.status.length > 0 && (
                       <span style={{ ...styles.tag, ...(item.status.includes('✅') ? styles.tagOn : {}) }} title={item.status}>
-                        {item.status.includes('✅') ? t('statusVerified') : t('statusPending')}
+                        {item.status.includes('✅') ? t('statusVerified')
+                          : item.status.includes('archived') ? t('statusArchived')
+                            : t('statusPending')}
                       </span>
+                    )}
+                    {item.packageName !== undefined && item.packageName.length > 0 && (
+                      <span style={styles.tag} title={item.packageName}>npm {item.packageName}</span>
+                    )}
+                    {item.category !== undefined && item.category.length > 0 && (
+                      <span style={styles.tag}>{item.category}</span>
                     )}
                   </div>
                   {item.description !== undefined && item.description.length > 0 && (
