@@ -26,7 +26,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { AnalyzeEdge, AnalyzeIssue, AnalyzePackage, AnalyzeResult } from './types.ts'
 
 /** Specifiers the loader provides without any plugin declaring them. */
@@ -122,8 +122,14 @@ function compareVersions(a: string, b: string): number {
 /** Whether an installed version satisfies a semver range (simplified). */
 function satisfiesRange(installed: string, range: string): boolean {
   const spec = range.trim()
-  // Exact / caret / tilde / star comparisons on the first two components.
+  // Exact / caret / tilde / star / comparison-operator forms on the first
+  // two components; complex ranges (||, hyphen, x-ranges) fall back to a
+  // loose "at least the base" check instead of false negatives.
   if (spec === '*' || spec === '') return true
+  if (spec.startsWith('>=')) return compareVersions(installed, spec.slice(2)) >= 0
+  if (spec.startsWith('<=')) return compareVersions(installed, spec.slice(2)) <= 0
+  if (spec.startsWith('>')) return compareVersions(installed, spec.slice(1)) > 0
+  if (spec.startsWith('<')) return compareVersions(installed, spec.slice(1)) < 0
   const req = spec.replace(/^[~^=]/, '')
   if (compareVersions(installed, req) < 0) return false
   const major = Number.parseInt(req.split('.')[0] ?? '0', 10)
@@ -192,33 +198,44 @@ export function analyzeProfile(
     const manifest = readManifest(dir)
     const name = typeof manifest['name'] === 'string' ? manifest['name'] : ''
     if (name.length === 0) return
-    providers.set(name, name)
-    providerDirs.set(name, dir)
-    providerManifests.set(name, manifest)
-    const exportsField = manifest['exports'] as Record<string, unknown> | undefined
-    if (exportsField !== undefined && typeof exportsField === 'object') {
-      for (const key of Object.keys(exportsField)) {
-        if (key.startsWith('.')) providers.set(name + key.slice(1), name)
-      }
-    }
-  }
-  try {
-    for (const entry of readdirSafe(nodeModules)) {
-      if (entry.name.startsWith('.')) continue
-      const dir = join(nodeModules, entry.name)
-      // pnpm links installed packages as symlinks — a Dirent reports those
-      // as symbolic links, not directories.
-      if (entry.isDirectory() || entry.isSymbolicLink()) {
-        if (entry.name.startsWith('@')) {
-          for (const scoped of readdirSafe(dir)) {
-            if (scoped.isDirectory() || scoped.isSymbolicLink()) collectProvider(join(dir, scoped.name))
-          }
-        } else {
-          collectProvider(dir)
+    // The profile's own node_modules wins over the shared fallback.
+    if (!providerDirs.has(name)) {
+      providerDirs.set(name, dir)
+      providerManifests.set(name, manifest)
+      providers.set(name, name)
+      const exportsField = manifest['exports'] as Record<string, unknown> | undefined
+      if (exportsField !== undefined && typeof exportsField === 'object') {
+        for (const key of Object.keys(exportsField)) {
+          if (key.startsWith('.')) providers.set(name + key.slice(1), name)
         }
       }
     }
-  } catch { /* node_modules missing: analysis degrades to manifest-only */ }
+  }
+  // The shared profiles/node_modules fallback resolves the official core
+  // packages (@deepseek-ai/cordis, dsh-*) — peerDependencies on them must be
+  // checked against this table too.
+  const fallbackModules = join(dirname(profileDir), 'node_modules')
+  const scanRoot = (root: string): void => {
+    try {
+      for (const entry of readdirSafe(root)) {
+        if (entry.name.startsWith('.')) continue
+        const dir = join(root, entry.name)
+        // pnpm links installed packages as symlinks — a Dirent reports those
+        // as symbolic links, not directories.
+        if (entry.isDirectory() || entry.isSymbolicLink()) {
+          if (entry.name.startsWith('@')) {
+            for (const scoped of readdirSafe(dir)) {
+              if (scoped.isDirectory() || scoped.isSymbolicLink()) collectProvider(join(dir, scoped.name))
+            }
+          } else {
+            collectProvider(dir)
+          }
+        }
+      }
+    } catch { /* node_modules missing: analysis degrades to manifest-only */ }
+  }
+  scanRoot(nodeModules)
+  if (fallbackModules !== nodeModules) scanRoot(fallbackModules)
 
   // Build the analyzed package list from the profile's own dependencies.
   const packages: RawPackage[] = []
@@ -326,7 +343,9 @@ export function analyzeProfile(
     const pkgManifest = providerDir !== undefined ? providerManifests.get(pkg.name) ?? {} : readManifest(join(nodeModules, pkg.name))
     const peers = (pkgManifest['peerDependencies'] ?? {}) as Record<string, string>
     for (const [peer, range] of Object.entries(peers)) {
-      if (LOADER_PROVIDED.has(peer)) continue
+      // NOTE: the loader-provided whitelist does NOT apply here — the
+      // whitelist concerns import declarations, while a peerDependency is a
+      // VERSION constraint on a resolved package and must be checked.
       const peerDir = providerDirs.get(peer)
       const peerManifest = peerDir !== undefined ? providerManifests.get(peer) ?? {} : readManifest(join(nodeModules, peer))
       const peerVersion = typeof peerManifest['version'] === 'string' ? peerManifest['version'] : undefined

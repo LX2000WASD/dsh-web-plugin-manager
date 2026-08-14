@@ -905,7 +905,7 @@ function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number
 /** Whether a directory is a git repository (cheap probe). */
 function isGitRepo(path: string): boolean {
   try {
-    execFileSync('git', ['-C', path, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 5_000, windowsHide: true })
+    execFileSync(resolveCommand('git'), ['-C', path, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 5_000, windowsHide: true })
     return true
   } catch {
     return false
@@ -1129,7 +1129,7 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
       const args = ['clone']
       if (ref !== undefined) args.push('-b', ref)
       args.push('--depth', '1', repo, dest)
-      execFileSync('git', args, { stdio: 'pipe', timeout: 3 * 60 * 1000 })
+      execFileSync(resolveCommand('git'), args, { stdio: 'pipe', timeout: 3 * 60 * 1000 })
     }
     const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
     if (existsSync(join(pkgDir, 'package.json'))) {

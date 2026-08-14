@@ -31,6 +31,7 @@
  */
 
 import { readFileSync, watch } from 'node:fs'
+import { basename, dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 /** One mutation of the live patch stack. */
@@ -216,7 +217,7 @@ let patchWatcher: PatchWatcherState | undefined
  * HMR's lifecycle.
  */
 export function ensurePatchWatcher(ctx: Context, patchPath: string): void {
-  const dirPath = patchPath.slice(0, patchPath.lastIndexOf('/'))
+  const dirPath = dirname(patchPath)
   if (patchWatcher !== undefined) {
     if (patchWatcher.patchPath === patchPath && patchWatcher.ctx === ctx) return
     patchWatcher.watcher?.close()
@@ -253,7 +254,7 @@ export function ensurePatchWatcher(ctx: Context, patchPath: string): void {
     // Watch the directory (atomic tmp+rename writes replace the file, which
     // would detach a file-level watcher).
     state.watcher = watch(dirPath, (_event, filename) => {
-      if (typeof filename !== 'string' || filename !== patchPath.slice(patchPath.lastIndexOf('/') + 1)) return
+      if (typeof filename !== 'string' || filename !== basename(patchPath)) return
       if (state.scheduled) return
       state.scheduled = true
       state.timer = setTimeout(() => {
