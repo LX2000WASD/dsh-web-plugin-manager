@@ -90,7 +90,7 @@ export interface MutationResult {
   readonly message: string
 }
 
-/** One marketplace plugin entry (from the GitHub topic search). */
+/** One marketplace plugin entry (registry index + curated catalog merged). */
 export interface MarketplaceItem {
   /** Repository name (owner/repo). */
   readonly name: string
@@ -101,18 +101,26 @@ export interface MarketplaceItem {
   readonly stars: number
   /** Last push time. */
   readonly updatedAt: string
-  /** Creation time. */
+  /** Creation time (registry index does not carry it — may be empty). */
   readonly createdAt: string
   /** Repository URL (the git install source). */
   readonly url: string
   /** Catalog status (e.g. ✅ verified, 待测 pending, archived). */
   readonly status?: string
-  /** Published npm package name, when the catalog records one. */
+  /** Published npm package name (registry pkg_name or curated catalog). */
   readonly packageName?: string
-  /** Catalog category (e.g. 单插件 / 插件集 / 技能), when known. */
+  /** Category stamp (registry classifier or curated catalog). */
   readonly category?: string
   /** Catalog lifecycle state (active / archived / ...), when known. */
   readonly lifecycle?: string
+  /** Latest version from the registry index (repo package.json, CI-fetched). */
+  readonly latestVersion?: string
+  /** Whether the queried profile has this plugin installed (server-side). */
+  readonly installed: boolean
+  /** Installed version in the queried profile, when detected. */
+  readonly installedVersion?: string
+  /** Whether a newer version than the installed one is available. */
+  readonly updateAvailable: boolean
 }
 
 /** Marketplace listing result. */
@@ -123,6 +131,12 @@ export interface MarketplaceResult {
   readonly cachedAt?: string
   readonly fromCache: boolean
   readonly message: string
+  /** Data source of the listing: registry | catalog | cache | search. */
+  readonly source?: string
+  /** How many entries were hidden by the same-package deduplication. */
+  readonly dropped?: number
+  /** Total entries after deduplication. */
+  readonly total?: number
 }
 
 /** Result of launching a profile instance. */

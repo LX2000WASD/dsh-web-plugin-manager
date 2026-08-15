@@ -56,10 +56,13 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 
 ## 市场
 
-- 数据源：[awesome-dsh-plugins](https://github.com/AdamPlatin123/awesome-dsh-plugins) 结构化 catalog（catalog/plugins/*.json + tombstones）+ PLUGINS.md 双源合并，互补不互斥；GitHub API 补星数/更新时间；24h 缓存，空结果不写正缓存
-- 已安装条目按 npm 包名 / manifest repository / git 缓存源 owner-repo 三重匹配显示「已安装」徽标并禁用安装按钮
-- **网络健壮性**：每请求 15s 超时（AbortSignal.timeout）；支持 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`（undici ProxyAgent——Node 全局 fetch 会丢弃 dispatcher 选项，市场请求必须走 undici 自身 fetch）；失败原因负缓存 5 分钟（`marketplace-failure.json`，避免每次进页重跑全量 GitHub 往返）；双源全挂且无缓存时空列表直接显示失败原因
-- GitHub API 未认证限流 60/h：403/429 停止富化（星数降级用上次快照元数据），列表本身不受影响；raw 兜底源可达时列表保持非空
+- **静态索引为主**：[DSH-Plugins-Marketplace](https://github.com/bradeGithub/DSH-Plugins-Marketplace) 的 CI 索引 `registry.json.gz`（topic:dsh-plugin 全量 ~3100 仓库，含星数/更新时间/pkg_name/版本/分类，每 2 小时更新）——多源兜底链：`api.github.com contents`（有 `GH_TOKEN`/`GITHUB_TOKEN` 带认证）→ jsDelivr CDN（`generated_at` 新鲜度 6h 校验）→ `raw.githubusercontent` → 本地磁盘缓存（上次成功完整索引）→ GitHub 搜索 API（topic:dsh-plugin，残缺应急，不落盘）；索引条目自带星数，不再逐个打 GitHub API
+- **精选覆盖层**：[awesome-dsh-plugins](https://github.com/AdamPlatin123/awesome-dsh-plugins) 结构化 catalog（catalog/plugins/*.json + tombstones）+ PLUGINS.md 双源合并，叠加在索引之上（状态徽标/精选描述/包名/分类），精选独有条目追加；24h 缓存，空结果不写正缓存
+- **已安装判定在服务端**（每请求按目标 profile 计算，12 并发池标注）：① npm 包名（registry pkg_name / 仓库名）② manifest `repository` 双向匹配（同名不同仓库不误判）③ git 缓存源 owner-repo 身份 ④ `~/.dsh/skills|.agent-presets` 目录探测；返回 `installed` / `installedVersion` / `latestVersion`（索引版本字段）/ `updateAvailable`（仅严格更高才提示，回滚不误报）
+- **同名包冲突消解**：同一 pkg_name 只保留一条（已安装优先、否则星数高者），`dropped` 计数透传前端提示「N 个同名包已隐藏」
+- 卡片动作：未安装 → 安装；已装无新版 → 绿色「已安装 vX」；已装有新版 → 橙色「更新」（npm 包走受保护 update 链路重写 specifier + 质量门 + 回滚，git-only 源重装）；星数排序时已安装置顶
+- **网络健壮性**：每请求 15s 超时（AbortSignal.timeout）；支持 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`（undici ProxyAgent——Node 全局 fetch 会丢弃 dispatcher 选项，市场请求必须走 undici 自身 fetch）；失败原因负缓存 5 分钟（`marketplace-failure.json`，避免每次进页重跑全量 GitHub 往返）；索引全挂且无缓存时空列表直接显示失败原因
+- GitHub API 未认证限流 60/h：仅 catalog 独有条目的星数富化会打 API（量小）；403/429 停止富化（星数降级用上次快照元数据），列表本身不受影响；raw 兜底源可达时列表保持非空
 - 系统代理/规则模式加速器对 Node 进程无效（undici 不读系统代理）——市场为空且此类加速器用户，把代理地址写进环境变量，或改 TUN/全局模式
 
 ## agent 工具与安装守卫
@@ -91,5 +94,5 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - 安装来自 git 的 bundle 需要用户在终端放行 `pnpm allowBuilds`（命令输出会回显）
 - git 子包安装：多包仓库用 `#路径:<dir>` 约定指定子目录（`#ref` 是 git ref）
 - 质量门可能误伤：未声明运行时依赖的插件会被拦截回滚（保守策略）；若插件确实由 Loader/host 提供该模块，需在 manifest 声明或加入白名单
-- 市场条目来源于 awesome 目录，个别仓库可能已删除/私有（安装时报 `Repository not found`）
+- 市场条目来源于静态索引 + awesome 目录，个别仓库可能已删除/私有（安装时报 `Repository not found`）；索引项目本身是第三方维护（社区项目），其数据问题（打错 tag、非插件仓库）由精选覆盖层与安装质量门兜底
 - nvm 用户注意：子进程命令（dsh/npm/pnpm/git）解析按「运行中 node 目录 → PATH → $NVM_DIR」兜底，并把命中的工具目录注入子进程与终端窗口的 PATH——宿主进程不在 nvm 激活的 shell 中启动（桌面启动器/服务/nohup）也能工作；仅当 dsh 完全未安装时才需要从 nvm 激活的终端启动

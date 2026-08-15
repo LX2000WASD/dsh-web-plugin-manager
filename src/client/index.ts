@@ -132,10 +132,10 @@ export function apply(ctx: ClientContext): void {
 
   // Marketplace: a first-level settings entry (after the official Plugins).
   const marketplaceInjected = (): PluginMarketplaceTabInjected => ({
-    marketplace: (refresh) => call<MarketplaceResult>('marketplace', { refresh }),
+    marketplace: (refresh, profile) => call<MarketplaceResult>('marketplace', { refresh, profile }),
     install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
+    update: (profile, name) => call<CommandResult>('update', { profile, name }),
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
-    list: (profile) => call<PluginManagerSnapshot>('list', { profile }),
   })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({

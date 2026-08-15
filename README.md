@@ -67,7 +67,7 @@ dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
 | 更新 | 检查更新（npm dist-tag / git HEAD / 安装 commit），更新带质量门与回滚；**含管理器自身（自更新）**——管理页可直接点更新升级 dsh-web-plugin-manager，失败自动装回旧版本 |
 | 健康检查 | 依赖图/缺失/循环/重复行 id/同名注册冲突（服务/工具/section/路由）/peer 版本/官方包重复；运行中追加 pending 与失败诊断 |
 | 环境管理 | 启停、复制/转移插件、创建/重命名/删除 profile（官方 profile 只读） |
-| 市场 | awesome-dsh-plugins 双源合并、24h 缓存、已安装徽标、15s 超时、代理支持、失败负缓存 |
+| 市场 | 静态索引（topic:dsh-plugin 全量 ~3100 条，多源兜底 + gzip + 磁盘缓存）+ awesome 精选覆盖层；服务端已安装判定（包名/repository 双向/git 源/目录探测）；更新检测（索引版本对比，含橙标更新按钮）；同名包冲突消解；24h 缓存、15s 超时、代理支持、失败负缓存 |
 | agent 工具 | plugin_status/install/uninstall/toggle + 安装守卫（拦截裸命令并引导）+ 提示词注入 |
 
 功能与限制的详细说明见 [docs/feature-reference.md](docs/feature-reference.md)（随仓库与 npm 包发布）。
@@ -100,7 +100,7 @@ dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
 - 错误版本恢复指引（0.3.0/0.3.1/0.3.4 已在 npm 标记 deprecated，使用 0.3.5）：旧版本声明有缺陷（官方包普通依赖装重复拷贝 / 守卫绕过 / 未声明 js-yaml），安装旧版会在 profile 里留下问题。升级到 0.3.5 即可自动清理——`dsh plugin --profile <name> add dsh-web-plugin-manager@latest`（pnpm 剪除孤儿重复包）后重启实例；若实例已无法启动，先手动删除 `node_modules/@deepseek-ai/` 下的 dsh-tools/schemastery/cosmokit 再更新
 - 市场条目来源于 awesome 目录，个别仓库可能已删除/私有
 - 市场代理：host 读 `HTTP_PROXY`/`HTTPS_PROXY`；系统代理/规则模式加速器对 Node 进程无效（undici 不读系统代理）——把代理写进环境变量或改 TUN/全局模式
-- GitHub API 未认证限流 60/h：富化遇 403/429 即停止（降级用上次快照元数据），列表不受影响
+- 市场索引项目（DSH-Plugins-Marketplace）为第三方维护：索引数据问题（打错 tag/非插件仓库）由精选覆盖层与安装质量门兜底；GitHub API 未认证限流 60/h 仅影响 catalog 独有条目的星数富化（量小，403/429 即停止，列表不受影响）
 - nvm 用户注意：子进程命令按「运行中 node 目录 → PATH → $NVM_DIR」兜底并注入 PATH——宿主进程不在 nvm 激活的 shell 中启动也能工作；仅当 dsh 未安装时才需从 nvm 激活终端
 
 ## 开发

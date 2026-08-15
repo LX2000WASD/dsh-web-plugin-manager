@@ -140,6 +140,7 @@ export const zh = {
   healthClean: '依赖、冲突与兼容性检查均通过。',
   loadOrder: '建议加载顺序',
   marketInstalled: '已安装',
+  marketDropped: '{n} 个同名 npm 包已隐藏（同一包只能安装一个）',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -283,4 +284,5 @@ export const en = {
   healthClean: 'Dependency, conflict and compatibility checks all pass.',
   loadOrder: 'Suggested load order',
   marketInstalled: 'installed',
+  marketDropped: '{n} duplicate package(s) hidden (one npm package can only be installed once)',
 } satisfies Record<PluginManagerLocaleKey, string>

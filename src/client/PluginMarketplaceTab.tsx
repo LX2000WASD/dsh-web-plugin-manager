@@ -1,22 +1,23 @@
 /**
- * Plugin Marketplace tab (settings.section first-level entry): browse
- * GitHub topic:dsh repositories, sort/search, and install via the git
- * source path (clone + quality gate).
+ * Plugin Marketplace tab (settings.section first-level entry): browse the
+ * merged marketplace (static registry index + curated catalog), with
+ * server-side installed detection, update availability and install/update
+ * actions per card.
  */
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, IconSearchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommandResult, MarketplaceItem, MarketplaceResult, PluginManagerSnapshot, ProfileInfo } from '../types.ts'
+import type { CommandResult, MarketplaceItem, MarketplaceResult, ProfileInfo } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
 export interface PluginMarketplaceTabInjected {
-  readonly marketplace: (refresh: boolean) => Promise<MarketplaceResult>
+  readonly marketplace: (refresh: boolean, profile: string) => Promise<MarketplaceResult>
   readonly profiles: () => Promise<ProfileInfo[]>
-  readonly list: (profile: string) => Promise<PluginManagerSnapshot>
   readonly install: (profile: string, spec: string) => Promise<CommandResult>
+  readonly update: (profile: string, name: string) => Promise<CommandResult>
 }
 
 /** Full component props assembled by the Settings section renderer. */
@@ -98,6 +99,11 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-label-secondary)', fontSize: '11px', lineHeight: '16px',
     whiteSpace: 'nowrap',
   },
+  updateButton: {
+    background: 'color-mix(in srgb, var(--dsw-alias-state-warning-primary) 14%, transparent)',
+    color: 'var(--dsw-alias-state-warning-primary)',
+    borderColor: 'var(--dsw-alias-state-warning-primary)',
+  },
   status: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)', margin: 0 },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
@@ -121,7 +127,7 @@ function shortDate(iso: string): string {
 }
 
 /** Render the marketplace page. */
-export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }: PluginMarketplaceTabProps): ReactNode {
+export function PluginMarketplaceTab({ marketplace, profiles, install, update, t }: PluginMarketplaceTabProps): ReactNode {
   const [state, setState] = useState<ViewState>({ status: 'loading' })
   const [busy, setBusy] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -130,67 +136,59 @@ export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }
   const [output, setOutput] = useState('')
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [targetProfile, setTargetProfile] = useState('web')
-  // Package names + repository identifiers installed in the target profile.
-  const [installedNames, setInstalledNames] = useState<Set<string>>(new Set())
-  const [installedRepos, setInstalledRepos] = useState<Set<string>>(new Set())
 
-  const injected = useRef({ marketplace, profiles, list, install })
+  const injected = useRef({ marketplace, profiles, install, update })
 
-  /** Refresh which marketplace entries are already installed in the target. */
-  const refreshInstalled = (profile: string): void => {
-    void injected.current.list(profile).then((snapshot) => {
-      const names = new Set<string>()
-      const repos = new Set<string>()
-      for (const pkg of snapshot.packages) {
-        names.add(pkg.name)
-        if (pkg.repository !== undefined) {
-          const match = /(?:github\.com\/)?([^/]+\/[^/]+?)(?:\.git)?$/.exec(pkg.repository)
-          if (match !== null) repos.add(match[1]!.replace(/\.git$/, '').toLocaleLowerCase())
-        }
-        // Git-cache installs: the dependency value points at the clone dir
-        // ($DSH_HOME/plugin-manager-src/github.com-<owner>-<repo>), which
-        // carries the upstream identity even when the manifest has no
-        // repository field.
-        if (pkg.source !== undefined) {
-          const cache = /github\.com[-/]([^/\s]+)[-/]([^/\s]+)/.exec(pkg.source)
-          if (cache !== null) repos.add((cache[1]! + '/' + cache[2]!).toLocaleLowerCase())
-        }
-      }
-      setInstalledNames(names)
-      setInstalledRepos(repos)
-    }, () => { /* keep the previous state */ })
-  }
-
-  const load = (refresh: boolean): void => {
+  /** Fetch the listing; installed flags are computed server-side per profile. */
+  const fetchMarketplace = (refresh: boolean, profile: string): void => {
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
-    void injected.current.marketplace(refresh).then(
+    void injected.current.marketplace(refresh, profile).then(
       (result) => setState({ status: 'ready', result }),
       (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
     )
   }
 
   useEffect(() => {
-    load(false)
     void injected.current.profiles().then((items) => {
       setProfileList(items)
       const current = items.find(profile => profile.isCurrent === true)
-      if (current !== undefined) {
-        setTargetProfile(current.name)
-        refreshInstalled(current.name)
-      }
-    }, () => { /* keep web default */ })
+      const target = current !== undefined ? current.name : 'web'
+      setTargetProfile(target)
+      fetchMarketplace(false, target)
+    }, () => {
+      fetchMarketplace(false, 'web')
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const onInstall = async (item: MarketplaceItem): Promise<void> => {
+  const onTargetProfileChange = (value: string): void => {
+    setTargetProfile(value)
+    fetchMarketplace(false, value)
+  }
+
+  const runCommand = (item: MarketplaceItem, action: Promise<CommandResult>, label: string): void => {
     setBusy(item.name)
-    try {
-      const result = await injected.current.install(targetProfile, item.url)
-      setOutput('$ install ' + item.name + '\n' + result.output)
-      refreshInstalled(targetProfile)
-    } finally {
+    void action.then((result) => {
+      setOutput('$ ' + label + ' ' + item.displayName + '\n' + result.output)
+      // Re-fetch so installed/update flags reflect the change.
+      fetchMarketplace(false, targetProfile)
+    }).finally(() => {
       setBusy(null)
-    }
+    })
+  }
+
+  const onInstall = (item: MarketplaceItem): void => {
+    runCommand(item, injected.current.install(targetProfile, item.url), 'install')
+  }
+
+  /** Update path: npm-published plugins update through the managed update op
+   *  (rewrites the specifier to @latest with quality gate + rollback); git-only
+   *  sources re-run the install (re-clone + re-link). */
+  const onUpdate = (item: MarketplaceItem): void => {
+    const action = item.packageName !== undefined && item.packageName.length > 0
+      ? injected.current.update(targetProfile, item.packageName)
+      : injected.current.install(targetProfile, item.url)
+    runCommand(item, action, 'update')
   }
 
   const items = state.status === 'ready' ? state.result.items : []
@@ -207,7 +205,8 @@ export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }
     } else if (sort === 'created') {
       sorted.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     } else {
-      sorted.sort((a, b) => b.stars - a.stars)
+      // Stars: installed entries first, then star count (server flags).
+      sorted.sort((a, b) => (b.installed ? 1 : 0) - (a.installed ? 1 : 0) || b.stars - a.stars)
     }
     if (descending) sorted.reverse()
     return sorted
@@ -235,7 +234,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }
           {descending ? t('sortDesc') : t('sortAsc')}
         </Button>
         <span style={{ marginLeft: 'auto' }} />
-        <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => load(true)}>
+        <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => fetchMarketplace(true, targetProfile)}>
           {t('refresh')}
         </Button>
         <span style={styles.filterLabel}>{t('installTarget')}</span>
@@ -243,10 +242,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }
           ariaLabel={t('installTarget')}
           value={targetProfile}
           options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
-          onChange={(value) => {
-            setTargetProfile(value)
-            refreshInstalled(value)
-          }}
+          onChange={onTargetProfileChange}
         />
       </div>
 
@@ -260,8 +256,12 @@ export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }
             <span style={styles.headingCount}>{rows.length}</span>
             <span style={styles.filterLabel}>
               {state.result.fromCache ? t('marketCached') + (state.result.cachedAt !== undefined ? ' ' + shortDate(state.result.cachedAt) : '') : t('marketFresh')}
+              {state.result.source !== undefined ? ' · ' + state.result.source : ''}
             </span>
           </div>
+          {state.result.dropped !== undefined && state.result.dropped > 0 && (
+            <p style={styles.status}>{t('marketDropped', { n: state.result.dropped })}</p>
+          )}
           <label style={styles.search}>
             <IconSearchOutline16 aria-hidden="true" />
             <input
@@ -286,21 +286,26 @@ export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }
           )}
           {rows.length > 0 && (
             <ul style={styles.cards}>
-              {rows.map((item) => {
-                const installed = item.packageName !== undefined && item.packageName.length > 0
-                  ? installedNames.has(item.packageName)
-                  : installedRepos.has(item.name.toLocaleLowerCase())
-                return (
+              {rows.map((item) => (
                 <li key={item.name} style={styles.card}>
                   <div style={styles.cardRow}>
                     <a href={item.url} target="_blank" rel="noreferrer" style={{ ...styles.cardTitle, ...styles.link }} title={item.name}>
                       {item.displayName}
                     </a>
                     <span style={{ marginLeft: 'auto' }}>
-                      {installed ? (
-                        <span style={{ ...styles.tag, ...styles.tagOn }}>{t('marketInstalled')}</span>
+                      {item.installed ? (
+                        item.updateAvailable ? (
+                          <Button size="sm" variant="outline" style={styles.updateButton} disabled={busy !== null} onClick={() => onUpdate(item)}>
+                            {busy === item.name ? t('updating') : t('updateButton')}
+                          </Button>
+                        ) : (
+                          <span style={{ ...styles.tag, ...styles.tagOn }}>
+                            {t('marketInstalled')}
+                            {item.installedVersion !== undefined ? ' v' + item.installedVersion : ''}
+                          </span>
+                        )
                       ) : (
-                        <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onInstall(item)}>
+                        <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => onInstall(item)}>
                           {busy === item.name ? t('installing') : t('installButton')}
                         </Button>
                       )}
@@ -331,12 +336,12 @@ export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }
                   </div>
                   <div style={{ padding: '0 14px 10px' }}>
                     <span style={styles.meta}>
-                      {t('updatedAt')} {shortDate(item.updatedAt)} · {t('createdAt')} {shortDate(item.createdAt)}
+                      {t('updatedAt')} {shortDate(item.updatedAt)}
+                      {item.createdAt.length > 0 ? ' · ' + t('createdAt') + ' ' + shortDate(item.createdAt) : ''}
                     </span>
                   </div>
                 </li>
-                )
-              })}
+              ))}
             </ul>
           )}
           {output.length > 0 && (

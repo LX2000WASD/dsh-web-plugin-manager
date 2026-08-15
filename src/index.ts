@@ -52,6 +52,10 @@ import type { AnalyzeIssue, AnalyzeResult } from './types.ts'
 import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
 import { marketplaceFetch } from './net.ts'
+import {
+  fetchRegistryRepos, fetchSearchFallback, readRegistryCache, writeRegistryCache,
+  type RegistryRepo,
+} from './registry.ts'
 import { registerTools } from './tools.ts'
 
 export type * from './types.ts'
@@ -491,32 +495,43 @@ export class PluginManagerService extends Service {
   /**
    * Fetch the marketplace listing (24h cache).
    *
-   * The awesome-dsh-plugins source moved from a single PLUGINS.md table to a
-   * structured catalog (catalog/plugins/*.json + schema + policy). Both
-   * sources are fetched and merged (they complement each other), and the
-   * on-disk cache is the last resort — an empty list is only shown when
-   * every source is unusable.
+   * Sources, in order of value:
+   *   1. the static registry index (topic:dsh-plugin, ~3000 repos, CI-built,
+   *      zero API calls) — fetched through a multi-source fallback chain
+   *      (src/registry.ts) with a local disk cache;
+   *   2. the curated awesome-dsh-plugins catalog (status / packageName /
+   *      curated description) — overlaid onto registry entries, with its
+   *      own-only entries appended;
+   *   3. PLUGINS.md (legacy curated table) — merged into the catalog layer;
+   *   4. GitHub search API — only when every index source is unusable
+   *      (partial by design, never persisted).
+   *
+   * Installed flags are computed server-side per request for the queried
+   * profile (package-name / repository / git-cache / skills+presets probing),
+   * so "installed" is correct even for plugins installed before the manager.
    */
-  async marketplace(refresh: boolean): Promise<MarketplaceResult> {
+  async marketplace(profile: string, refresh: boolean): Promise<MarketplaceResult> {
     const cacheDir = join(dshHome(), 'plugin-manager-cache')
     const cachePath = join(cacheDir, 'marketplace.json')
     const failurePath = join(cacheDir, 'marketplace-failure.json')
     mkdirSync(cacheDir, { recursive: true })
-    const readCache = (): { fetchedAt?: string; items: MarketplaceItem[] } => {
+    const readCache = (): { fetchedAt?: string; items: MarketplaceItem[]; source?: string } => {
       try {
-        const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { version?: unknown; fetchedAt?: unknown; items?: unknown }
+        const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { version?: unknown; fetchedAt?: unknown; items?: unknown; source?: unknown }
         // Cache format changed (item shape / source layout): ignore old files.
         if (cached.version !== MARKETPLACE_CACHE_VERSION) return { items: [] }
         const fetchedAt = typeof cached.fetchedAt === 'string' ? cached.fetchedAt : ''
         const items = Array.isArray(cached.items) ? cached.items as MarketplaceItem[] : []
-        return { fetchedAt, items }
+        const source = typeof cached.source === 'string' ? cached.source : undefined
+        return { fetchedAt, items, source }
       } catch { /* no/ broken cache */ }
       return { items: [] }
     }
-    const writeCache = (items: MarketplaceItem[]): void => {
+    const writeCache = (items: MarketplaceItem[], source: string): void => {
       writeFileSync(cachePath, JSON.stringify({
         version: MARKETPLACE_CACHE_VERSION,
         fetchedAt: new Date().toISOString(),
+        source,
         items,
       }, undefined, 2) + '\n')
       // A successful fetch clears the recorded failure reason.
@@ -542,12 +557,16 @@ export class PluginManagerService extends Service {
       const cached = readCache()
       const fetchedAt = Date.parse(cached.fetchedAt ?? '')
       if (!Number.isNaN(fetchedAt) && Date.now() - fetchedAt < MARKETPLACE_TTL && cached.items.length > 0) {
+        const { items, dropped } = dedupeMarketplace(await flagMarketplaceItems(cached.items, profile))
         return {
           ok: true,
-          items: cached.items,
+          items,
           cachedAt: cached.fetchedAt,
           fromCache: true,
           message: 'served from cache',
+          ...(cached.source !== undefined ? { source: cached.source } : {}),
+          ...(dropped > 0 ? { dropped } : {}),
+          total: items.length,
         }
       }
       // Recent total failure: serve the recorded reason instead of re-running
@@ -565,16 +584,18 @@ export class PluginManagerService extends Service {
         }
       }
     }
-    // Keep previous metadata (stars/dates) to reuse when the GitHub API is
-    // rate-limited during enrichment.
+    // Keep previous metadata (stars/dates) for catalog-only entries when the
+    // GitHub API is rate-limited during enrichment.
     const prior = new Map<string, MarketplaceItem>(readCache().items.map(item => [item.name, item]))
     let catalogError: string | null = null
     let markdownError: string | null = null
-    // Fetch both sources independently: the structured catalog (new layout)
-    // and the curated PLUGINS.md table (legacy layout). Either one failing
-    // must not empty the list — they complement each other (the catalog
-    // carries auto-discovered repos + npm package names, PLUGINS.md carries
-    // curated descriptions and verified statuses).
+    // Fetch sources independently: the registry index, the structured
+    // catalog and the legacy PLUGINS.md complement each other — one failing
+    // must not empty the list.
+    const registryItems = await fetchRegistryRepos().catch((error: unknown) => {
+      console.warn('[plugin-manager] registry index unavailable: ' + (error instanceof Error ? error.message : String(error)))
+      return null
+    })
     const catalogItems = await fetchCatalogItems().catch((error: unknown) => {
       catalogError = error instanceof Error ? error.message : String(error)
       return []
@@ -583,28 +604,71 @@ export class PluginManagerService extends Service {
       markdownError = error instanceof Error ? error.message : String(error)
       return []
     })
-    const merged = mergeMarketplace(catalogItems, markdownItems)
-    // Verified entries first: when the unauthenticated API quota runs out
-    // mid-enrichment, the most relevant entries keep their stars.
-    merged.sort((a, b) => Number(b.status?.includes('✅') ?? false) - Number(a.status?.includes('✅') ?? false))
-    const items = await enrichRepos(merged, prior)
+    const curated = mergeMarketplace(catalogItems, markdownItems)
+    // Registry base: network index → disk cache → search fallback (partial,
+    // never persisted). The catalog-only path remains when all fail.
+    let base: RegistryRepo[] | null = registryItems
+    let source: string = 'registry'
+    if (base === null) {
+      base = readRegistryCache()
+      if (base !== null) source = 'cache'
+      else {
+        base = await fetchSearchFallback()
+        if (base !== null) source = 'search'
+      }
+    } else {
+      writeRegistryCache(base)
+    }
+    let items: MarketplaceItem[]
+    if (base !== null) {
+      items = mergeRegistryWithCurated(base, curated)
+    } else {
+      items = curated
+      source = 'catalog'
+    }
+    // Registry entries already carry stars/dates — only catalog-only entries
+    // (metadata unknown) need GitHub enrichment, so the rate limit is rarely
+    // reached even with a 3000-entry listing.
+    const unknowns = items.filter(item => item.stars === 0 && item.updatedAt.length === 0)
+    if (unknowns.length > 0) {
+      const extras = await enrichRepos(unknowns, prior)
+      const byName = new Map(extras.map(item => [item.name, item]))
+      items = items.map(item => byName.get(item.name) ?? item)
+    }
     if (items.length > 0) {
-      writeCache(items)
+      // Persist only complete listings (registry or catalog); the search
+      // fallback is partial and must not downgrade a good cache.
+      if (source !== 'search') writeCache(items, source)
       const note = [
+        'registry: ' + (registryItems !== null ? 'ok' : 'unavailable'),
         catalogError === null ? 'catalog' : 'catalog unavailable (' + catalogError + ')',
         markdownError === null ? 'PLUGINS.md' : 'PLUGINS.md unavailable (' + markdownError + ')',
       ].join('; ')
-      return { ok: true, items, fromCache: false, message: 'fetched ' + items.length + ' plugins (' + note + ')' }
+      const flagged = await flagMarketplaceItems(items, profile)
+      const { items: deduped, dropped } = dedupeMarketplace(flagged)
+      return {
+        ok: true,
+        items: deduped,
+        fromCache: false,
+        message: 'fetched ' + deduped.length + ' plugins (' + note + ')',
+        source,
+        ...(dropped > 0 ? { dropped } : {}),
+        total: deduped.length,
+      }
     }
     // Last resort: the on-disk cache (any age — better than an empty list).
     const cached = readCache()
     if (cached.items.length > 0) {
+      const { items: flagged, dropped } = dedupeMarketplace(await flagMarketplaceItems(cached.items, profile))
       return {
         ok: true,
-        items: cached.items,
+        items: flagged,
         cachedAt: cached.fetchedAt,
         fromCache: true,
         message: 'sources unavailable; served from cache: ' + (catalogError ?? markdownError ?? 'unknown'),
+        ...(cached.source !== undefined ? { source: cached.source } : {}),
+        ...(dropped > 0 ? { dropped } : {}),
+        total: flagged.length,
       }
     }
     // Total failure with nothing to serve: record the reason so the next
@@ -2138,7 +2202,7 @@ function probePort(port: number): Promise<boolean> {
 
 /** Marketplace snapshot TTL and cache format version. */
 const MARKETPLACE_TTL = 24 * 60 * 60 * 1000
-const MARKETPLACE_CACHE_VERSION = 2
+const MARKETPLACE_CACHE_VERSION = 3
 
 /**
  * Negative-cache TTL: after a total source failure the failure reason is
@@ -2234,6 +2298,8 @@ async function fetchCatalogItems(): Promise<MarketplaceItem[]> {
         createdAt: '',
         url,
         status,
+        installed: false,
+        updateAvailable: false,
         ...(packageName.length > 0 ? { packageName } : {}),
         ...(category.length > 0 ? { category } : {}),
         ...(lifecycle.length > 0 ? { lifecycle } : {}),
@@ -2297,6 +2363,8 @@ async function fetchMarkdownItems(): Promise<MarketplaceItem[]> {
     createdAt: '',
     url: 'https://github.com/' + fullName,
     status: row.status,
+    installed: false,
+    updateAvailable: false,
     ...(row.category.length > 0 ? { category: row.category } : {}),
   }))
 }
@@ -2371,6 +2439,277 @@ async function enrichRepos(items: MarketplaceItem[], prior: Map<string, Marketpl
     }
   }
   return out
+}
+
+/** Normalize a repository reference (URL or owner/repo) to lowercase owner/repo. */
+function normalizeRepoRef(value: string): string | null {
+  const s = value.trim()
+    .replace(/^git\+/i, '')
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/^git@github\.com:/i, '')
+    .replace(/\.git$/i, '')
+    .split('#')[0]
+    .replace(/\/+$/, '')
+  return s.length > 0 ? s.toLowerCase() : null
+}
+
+/** Identity of a git-cache clone dir (mirrors prepareInstallSource naming: github.com-owner-repo). */
+function gitCacheIdentity(source: string): string | null {
+  const match = /github\.com[-/]([^/\s]+)[-/]([^/\s]+)/.exec(source)
+  return match !== null ? `github.com-${match[1]!.toLowerCase()}-${match[2]!.toLowerCase()}` : null
+}
+
+/** Slug form used by skill/preset install dirs (~/.dsh/skills/<slug>). */
+function slugDirName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'plugin'
+}
+
+/** Lowercase directory-entry set of one directory (empty when missing). */
+function dirNameSet(dir: string): Set<string> {
+  try {
+    const out = new Set<string>()
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) out.add(entry.name.toLowerCase())
+    }
+    return out
+  } catch {
+    return new Set()
+  }
+}
+
+/**
+ * Lightweight semver comparison (v1.2.3-rc.1 < v1.2.3; rc.10 > rc.9;
+ * 1.0 / 1 count as 1.0.0). Returns -1/0/1; falls back to string comparison
+ * when a version does not parse.
+ */
+function compareVersions(a: string, b: string): number {
+  const parse = (v: string): { major: number; minor: number; patch: number; pre: string | null } | null => {
+    const s = v.trim().replace(/^v/i, '')
+    const m = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?$/.exec(s)
+    if (m === null) return null
+    return {
+      major: Number(m[1]),
+      minor: m[2] === undefined ? 0 : Number(m[2]),
+      patch: m[3] === undefined ? 0 : Number(m[3]),
+      pre: m[4] ?? null,
+    }
+  }
+  const pa = parse(a)
+  const pb = parse(b)
+  if (pa === null || pb === null) return a === b ? 0 : a < b ? -1 : 1
+  for (const key of ['major', 'minor', 'patch'] as const) {
+    if (pa[key] !== pb[key]) return pa[key] < pb[key] ? -1 : 1
+  }
+  // Prerelease ordering: no pre > any pre; numeric ids > alphanumeric ids.
+  if (pa.pre === pb.pre) return 0
+  if (pa.pre === null) return 1
+  if (pb.pre === null) return -1
+  const paParts = pa.pre.split('.')
+  const pbParts = pb.pre.split('.')
+  for (let i = 0; i < Math.max(paParts.length, pbParts.length); i++) {
+    const x = paParts[i] ?? ''
+    const y = pbParts[i] ?? ''
+    if (x === y) continue
+    const xn = /^\d+$/.test(x)
+    const yn = /^\d+$/.test(y)
+    if (xn && yn) return Number(x) < Number(y) ? -1 : 1
+    if (xn) return 1
+    if (yn) return -1
+    return x < y ? -1 : 1
+  }
+  return 0
+}
+
+/** One registry-index entry in the wire MarketplaceItem shape. */
+function registryToItem(repo: RegistryRepo): MarketplaceItem {
+  return {
+    name: repo.full_name,
+    displayName: repo.name,
+    ...(repo.description !== null && repo.description.length > 0 ? { description: repo.description } : {}),
+    stars: repo.stargazers_count,
+    updatedAt: repo.updated_at,
+    createdAt: '',
+    url: repo.html_url.length > 0 ? repo.html_url : 'https://github.com/' + repo.full_name,
+    ...(repo.pkg_name !== undefined ? { packageName: repo.pkg_name } : {}),
+    ...(repo.version !== undefined ? { latestVersion: repo.version } : {}),
+    ...(repo.category !== undefined ? { category: repo.category } : {}),
+    installed: false,
+    updateAvailable: false,
+  }
+}
+
+/**
+ * Merge the curated layer (catalog + PLUGINS.md) onto the registry base:
+ * curated status / description / category / packageName / lifecycle win on
+ * conflicts, and curated-only repositories are appended.
+ */
+function mergeRegistryWithCurated(registry: readonly RegistryRepo[], curated: readonly MarketplaceItem[]): MarketplaceItem[] {
+  const by = new Map(curated.map(item => [item.name, item]))
+  const out: MarketplaceItem[] = []
+  const seen = new Set<string>()
+  for (const repo of registry) {
+    const item = registryToItem(repo)
+    const curatedItem = by.get(repo.full_name)
+    if (curatedItem !== undefined) {
+      out.push({
+        ...item,
+        ...(curatedItem.description !== undefined && item.description === undefined ? { description: curatedItem.description } : {}),
+        // A verified evidence status wins over an unverified registry entry.
+        ...((item.status === undefined || item.status.length === 0 || item.status === '待测') && curatedItem.status !== undefined ? { status: curatedItem.status } : {}),
+        ...(item.category === undefined && curatedItem.category !== undefined ? { category: curatedItem.category } : {}),
+        ...(item.packageName === undefined && curatedItem.packageName !== undefined ? { packageName: curatedItem.packageName } : {}),
+        ...(curatedItem.lifecycle !== undefined ? { lifecycle: curatedItem.lifecycle } : {}),
+      })
+    } else {
+      out.push(item)
+    }
+    seen.add(repo.full_name)
+  }
+  for (const item of curated) {
+    if (!seen.has(item.name)) {
+      out.push(item)
+      seen.add(item.name)
+    }
+  }
+  return out
+}
+
+/** Server-side installed index for one profile (built once per listing). */
+interface InstalledIndex {
+  /** Lowercase npm package name → installed version. */
+  readonly packageVersions: ReadonlyMap<string, string>
+  /** Lowercase owner/repo from package manifests (bidirectional) → version. */
+  readonly repoVersions: ReadonlyMap<string, string>
+  /** git-cache identity (github.com-owner-repo) → version. */
+  readonly gitVersions: ReadonlyMap<string, string>
+  /** Directory names under ~/.dsh/skills (lowercase). */
+  readonly skills: ReadonlySet<string>
+  /** Directory names under ~/.dsh/.agent-presets (lowercase). */
+  readonly presets: ReadonlySet<string>
+}
+
+/** Build the installed index for one profile; null when the profile is unusable. */
+function buildInstalledIndex(profile: string): InstalledIndex | null {
+  if (profile.length === 0 || !isSafeProfileName(profile)) return null
+  const dir = profileDir(profile)
+  if (!existsSync(dir)) return null
+  const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
+  const deps = manifest.dependencies ?? {}
+  const packageVersions = new Map<string, string>()
+  const repoVersions = new Map<string, string>()
+  const gitVersions = new Map<string, string>()
+  for (const name of Object.keys(deps)) {
+    const info = readPackageInfo(dir, name)
+    const version = info.version ?? ''
+    packageVersions.set(name.toLowerCase(), version)
+    if (info.repository !== undefined) {
+      const ref = normalizeRepoRef(info.repository)
+      if (ref !== null) repoVersions.set(ref, version)
+    }
+    const source = deps[name]
+    if (source !== undefined) {
+      const identity = gitCacheIdentity(source)
+      if (identity !== null) gitVersions.set(identity, version)
+    }
+  }
+  return {
+    packageVersions,
+    repoVersions,
+    gitVersions,
+    skills: dirNameSet(join(dshHome(), 'skills')),
+    presets: dirNameSet(join(dshHome(), '.agent-presets')),
+  }
+}
+
+/**
+ * Detect whether one marketplace item is installed in the profile:
+ * 1. repository identity (bidirectional — package name may differ from repo);
+ * 2. package name (registry pkg_name or repo basename — the common npm==repo);
+ * 3. git-cache clone identity (link:<plugin-manager-src>/github.com-o-r);
+ * 4. skills / agent-presets directories (~/.dsh/skills|.agent-presets/<slug>).
+ * Update availability compares the installed version against the registry
+ * index version (CI-fetched from the repo's package.json) — strictly newer
+ * only, so repo rollbacks never report a false update.
+ */
+function flagItemInstalled(item: MarketplaceItem, index: InstalledIndex | null): MarketplaceItem {
+  if (index === null) return { ...item, installed: false, updateAvailable: false }
+  let installed = false
+  let version: string | undefined
+  const hit = (found: boolean, hitVersion?: string): void => {
+    if (!found) return
+    installed = true
+    if (version === undefined && hitVersion !== undefined && hitVersion.length > 0) version = hitVersion
+  }
+  // 1. repository identity
+  const repoRef = item.name.toLowerCase()
+  hit(index.repoVersions.has(repoRef), index.repoVersions.get(repoRef))
+  // 2. package name
+  const candidates = new Set<string>()
+  if (item.packageName !== undefined && item.packageName.length > 0) candidates.add(item.packageName.toLowerCase())
+  candidates.add(item.displayName.toLowerCase())
+  for (const candidate of candidates) {
+    hit(index.packageVersions.has(candidate), index.packageVersions.get(candidate))
+  }
+  // 3. git-cache clone identity
+  const gitId = `github.com-${item.name.toLowerCase().replace('/', '-')}`
+  hit(index.gitVersions.has(gitId), index.gitVersions.get(gitId))
+  // 4. skills / presets directories
+  const slug = slugDirName(item.displayName)
+  if (index.skills.has(slug) || index.presets.has(slug)) hit(true)
+  const updateAvailable = installed
+    && version !== undefined
+    && item.latestVersion !== undefined
+    && compareVersions(version, item.latestVersion) < 0
+  return {
+    ...item,
+    installed,
+    ...(version !== undefined ? { installedVersion: version } : {}),
+    updateAvailable,
+  }
+}
+
+/**
+ * Flag every item with a bounded worker pool (registry lists can reach
+ * thousands of entries; serial stat/read would stall the first paint).
+ */
+async function flagMarketplaceItems(items: readonly MarketplaceItem[], profile: string): Promise<MarketplaceItem[]> {
+  const index = buildInstalledIndex(profile)
+  const out = new Array<MarketplaceItem>(items.length)
+  const workers = Math.min(12, items.length)
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const idx = cursor++
+      out[idx] = flagItemInstalled(items[idx]!, index)
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, () => worker()))
+  return out
+}
+
+/**
+ * Same-package deduplication: the same npm package cannot be installed
+ * twice, so entries sharing a pkg_name collapse to one — the installed one
+ * wins (including manually installed low-star repos), otherwise the
+ * higher-star entry. The dropped count is surfaced to the client.
+ */
+function dedupeMarketplace(items: readonly MarketplaceItem[]): { items: MarketplaceItem[]; dropped: number } {
+  const rank = (item: MarketplaceItem): number => (item.installed ? 1e12 : 0) + item.stars
+  const byKey = new Map<string, MarketplaceItem>()
+  let dropped = 0
+  for (const item of items) {
+    const key = item.packageName !== undefined && item.packageName.length > 0
+      ? 'pkg:' + item.packageName.toLowerCase()
+      : 'repo:' + item.name.toLowerCase()
+    const prev = byKey.get(key)
+    if (prev === undefined) {
+      byKey.set(key, item)
+      continue
+    }
+    if (rank(item) > rank(prev)) byKey.set(key, item)
+    dropped++
+  }
+  return { items: [...byKey.values()], dropped }
 }
 
 /** A loader entry with the fields we read (structural, loader types stay optional). */
@@ -2841,8 +3180,9 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           return
         }
         case 'marketplace': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const refresh = body['refresh'] === true
-          sendJson(res, 200, { ok: true, value: await service.marketplace(refresh) })
+          sendJson(res, 200, { ok: true, value: await service.marketplace(profile, refresh) })
           return
         }
         case 'startProfile': {
