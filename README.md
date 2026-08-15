@@ -23,7 +23,9 @@ pnpm install && pnpm run build
 dsh plugin --profile <name> add .
 ```
 
-> ⚠️ 不带 `@latest` 的 `add` 是 pnpm 语义：**若 profile 里已声明过旧版本（如 `^0.1.2`），会保留旧 specifier 不升级**；`dsh plugin update` 也只在该范围内重解析。已装过旧版想升级到最新，用 `add dsh-web-plugin-manager@latest`（或先 remove 再 add）。
+> ⚠️ 不带 `@latest` 的 `add` 是 pnpm 语义：**若 profile 里已声明过旧版本（如 `^0.1.2`），会保留旧 specifier 不升级**；`dsh plugin update`（=`pnpm update`）也只在该范围内重解析——**跨版本升级请用 `add ...@latest` 或 `dshpm update`**。
+>
+> 若 `@latest` 仍解析到旧版（"already up to date" 或升级后还是旧号）：先查 `pnpm config get registry` 是否为镜像源（npmmirror 等 dist-tag 同步滞后，且 pnpm 有元数据缓存），用 `pnpm add dsh-web-plugin-manager@latest --registry=https://registry.npmjs.org` 绕过；**显式指定版本号（`@0.3.5`）永远可靠**。
 
 重启 profile 后，Web UI 的 **设置** 会出现 **插件管理** 标签页与 **市场** 一级菜单。
 
