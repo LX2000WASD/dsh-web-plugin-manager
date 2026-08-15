@@ -161,39 +161,56 @@ function collectRepos(raw: unknown): RegistryRepo[] | null {
   return out.length > 0 ? out : null
 }
 
-/** Fetch the index through every network source; null when all fail. */
-export async function fetchRegistryRepos(): Promise<RegistryRepo[] | null> {
-  for (const source of registrySources()) {
-    try {
-      const headers: Record<string, string> = { 'user-agent': 'dsh-web-plugin-manager' }
-      if (source.token) {
-        headers['accept'] = 'application/vnd.github.raw'
-        const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
-        if (token !== undefined && token.length > 0) headers['authorization'] = `Bearer ${token}`
-      }
-      const response = await marketplaceFetch(source.url, { headers, redirect: 'follow' })
-      if (!response.ok) continue
-      const buffer = Buffer.from(await response.arrayBuffer())
-      let text: string
-      if (source.gz) {
+/**
+ * Fetch the index through every network source. The result carries whether
+ * the winning source passed a freshness check: only freshness-verified
+ * sources (jsDelivr, generated_at within REGISTRY_MAX_AGE_MS) may persist to
+ * disk — the GitHub api/raw responses carry no generated_at and an old one
+ * must not overwrite a good cache (audit M14). null when all fail.
+ */
+export async function fetchRegistryRepos(): Promise<{ repos: RegistryRepo[]; cacheable: boolean } | null> {
+  // Overall budget: five serial sources × 15s can hang a refresh for ~75s
+  // (audit M15) — bail out to the disk cache after 60s.
+  let timer: NodeJS.Timeout | undefined
+  const deadline = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 60_000) })
+  try {
+    const chain = (async (): Promise<{ repos: RegistryRepo[]; cacheable: boolean } | null> => {
+      for (const source of registrySources()) {
         try {
-          text = gunzipSync(buffer).toString('utf8')
-        } catch {
-          continue
-        }
-      } else {
-        text = buffer.toString('utf8')
+          const headers: Record<string, string> = { 'user-agent': 'dsh-web-plugin-manager' }
+          if (source.token) {
+            headers['accept'] = 'application/vnd.github.raw'
+            const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN
+            if (token !== undefined && token.length > 0) headers['authorization'] = `Bearer ${token}`
+          }
+          const response = await marketplaceFetch(source.url, { headers, redirect: 'follow' })
+          if (!response.ok) continue
+          const buffer = Buffer.from(await response.arrayBuffer())
+          let text: string
+          if (source.gz) {
+            try {
+              text = gunzipSync(buffer).toString('utf8')
+            } catch {
+              continue
+            }
+          } else {
+            text = buffer.toString('utf8')
+          }
+          const data = JSON.parse(text) as { generated_at?: unknown; repos?: unknown }
+          if (source.checkFresh === true) {
+            const age = Date.now() - Date.parse(typeof data.generated_at === 'string' ? data.generated_at : '')
+            if (Number.isNaN(age) || age > REGISTRY_MAX_AGE_MS) continue
+          }
+          const repos = collectRepos(data)
+          if (repos !== null) return { repos, cacheable: source.checkFresh === true }
+        } catch { /* try the next source */ }
       }
-      const data = JSON.parse(text) as { generated_at?: unknown; repos?: unknown }
-      if (source.checkFresh === true) {
-        const age = Date.now() - Date.parse(typeof data.generated_at === 'string' ? data.generated_at : '')
-        if (Number.isNaN(age) || age > REGISTRY_MAX_AGE_MS) continue
-      }
-      const repos = collectRepos(data)
-      if (repos !== null) return repos
-    } catch { /* try the next source */ }
+      return null
+    })()
+    return await Promise.race([chain, deadline])
+  } finally {
+    clearTimeout(timer)
   }
-  return null
 }
 
 /** Search-API fallback (topic:dsh-plugin). Partial by design — never cached. */

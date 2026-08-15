@@ -55,6 +55,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Deep-clone rows with the baked `disabled: true` stripped from insert
+ * children. applyEntryPatches writes override fields into the passed patch
+ * objects, so a live-updated insert row differs from its file row — comparing
+ * without normalization would misclassify it as a non-profile row and
+ * permanently capture a ghost (audit M16).
+ */
+function normalizeForCompare(rows: unknown[]): unknown[] {
+  const clone = structuredClone(rows)
+  for (const row of clone) {
+    if (isRecord(row) && Array.isArray(row.insert)) {
+      for (const child of row.insert) {
+        if (isRecord(child) && child.disabled === true) delete child.disabled
+      }
+    }
+  }
+  return clone
+}
+
+/** Serialize every live stack application (applyLiveOps + watcher recompose). */
+let liveApplyTail: Promise<void> = Promise.resolve()
+function enqueueLive<T>(task: () => Promise<T>): Promise<T> {
+  const run = liveApplyTail.then(task, task)
+  liveApplyTail = run.then(() => undefined, () => undefined)
+  return run
+}
+
 /** The include entry of the live loader tree, or undefined when unavailable. */
 function includeEntry(ctx: Context): {
   entry: {
@@ -145,17 +172,21 @@ export async function applyLiveOps(
     }
   }
   const { patches: _ignored, ...rest } = config as { patches?: unknown } & Record<string, unknown>
-  const task = entry.update({ config: { ...rest, patches: stack } })
-  try {
-    await Promise.race([
-      task,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('live apply timed out')), timeoutMs)),
-    ])
-    return { ok: true }
-  } catch (error: unknown) {
-    console.error('[plugin-manager] live apply failed:', error instanceof Error ? error.stack ?? error.message : String(error))
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
-  }
+  // Serialize against the watcher's recompose: two concurrent update() calls
+  // race last-write-wins and one op is lost (audit M16).
+  return enqueueLive(async () => {
+    const task = entry.update({ config: { ...rest, patches: stack } })
+    try {
+      await Promise.race([
+        task,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('live apply timed out')), timeoutMs)),
+      ])
+      return { ok: true }
+    } catch (error: unknown) {
+      console.error('[plugin-manager] live apply failed:', error instanceof Error ? error.stack ?? error.message : String(error))
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  })
 }
 
 /**
@@ -245,8 +276,8 @@ export function ensurePatchWatcher(ctx: Context, patchPath: string): void {
       const found = includeEntry(ctx)
       const stack = found?.entry.options.config?.patches
       if (Array.isArray(rows) && Array.isArray(stack)) {
-        const needle = new Set((rows as unknown[]).map((row) => JSON.stringify(row)))
-        state.others = structuredClone((stack as unknown[]).filter((row) => !needle.has(JSON.stringify(row))))
+        const needle = new Set(normalizeForCompare(rows as unknown[]).map((row) => JSON.stringify(row)))
+        state.others = normalizeForCompare(stack as unknown[]).filter((row) => !needle.has(JSON.stringify(row)))
       }
     } catch { /* capture is best-effort; recompose retries with the current file */ }
   })()
@@ -296,11 +327,13 @@ async function recomposeFromFile(state: PatchWatcherState): Promise<void> {
     if (config === undefined) return
     const stack = config.patches
     if (!Array.isArray(stack)) return
-    // Lazy capture of the non-profile rows, against the current file.
-    if (state.others === undefined) {
-      const needle = new Set((rows as unknown[]).map((row) => JSON.stringify(row)))
-      state.others = (stack as unknown[]).filter((row) => !needle.has(JSON.stringify(row)))
-    }
+    // Recompute the non-profile rows on EVERY recompose (normalized against
+    // the file): a one-time capture taken after a live toggle had already
+    // baked `disabled` into the insert rows and permanently misclassified
+    // them as non-profile ghosts (audit M16). Normalization strips the baked
+    // field on both sides before the difference.
+    const needle = new Set(normalizeForCompare(rows as unknown[]).map((row) => JSON.stringify(row)))
+    state.others = normalizeForCompare(stack as unknown[]).filter((row) => !needle.has(JSON.stringify(row)))
     const { patches: _ignored, ...rest } = config as { patches?: unknown } & Record<string, unknown>
     // Deep clone both parts: applyEntryPatches writes override fields into
     // the passed row objects, which would permanently poison the captured
@@ -309,7 +342,9 @@ async function recomposeFromFile(state: PatchWatcherState): Promise<void> {
       ...structuredClone(state.others),
       ...structuredClone(rows as unknown[]),
     ]
-    await found.entry.update({ config: { ...rest, patches: next } })
+    await enqueueLive(async () => {
+      await found.entry.update({ config: { ...rest, patches: next } })
+    })
   } catch (error: unknown) {
     console.error('[plugin-manager] patch watch recompose failed:', error instanceof Error ? error.message : String(error))
   }

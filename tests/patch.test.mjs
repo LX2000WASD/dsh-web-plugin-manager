@@ -53,8 +53,30 @@ describe('managed disable blocks (issue #2 Bug B/C)', () => {
     assert.ok(!after.includes('dead-b'))
   })
 
-  it('removeDisableBlock on a clean patch is a no-op (normalizeDocument may trim leading blank lines)', () => {
+  it('removeDisableBlock on a clean patch is a no-op', () => {
     const patch = '- id: user-row\n  disabled: true\n'
     assert.equal(removeDisableBlock(patch, 'user-row'), patch)
+  })
+
+  it('normalizeDocument preserves blank lines inside user block scalars (audit M11)', () => {
+    const patch = [
+      '# dsh-plugin-manager:managed:start',
+      '- id: dead',
+      '  disabled: true',
+      '# dsh-plugin-manager:managed:end',
+      '',
+      '- id: user-row',
+      '  config:',
+      '    note: |',
+      '      line one',
+      '',
+      '      line two',
+      '',
+    ].join('\n')
+    const after = removeDisableBlock(patch, 'dead')
+    // The block scalar's inner blank line must survive the removal.
+    assert.ok(after.includes('line one\n\n      line two'))
+    assert.ok(after.includes('user-row'))
+    assert.ok(!after.includes('dead'))
   })
 })
