@@ -44,9 +44,9 @@ const PROFILE_DIR_MARKER = /profiles|\\.dsh|DSH_HOME/
 /** Denial reason shown to the model in the tool result. */
 const DENIAL_REASON =
   'Plugin installation/removal must go through the protected flow: call the plugin_install / plugin_uninstall / '
-  + 'plugin_toggle tools, or run the dshpm CLI (dshpm install <pkg> --profile <name>, dshpm remove <name>). '
-  + 'Raw dsh plugin add/remove and pnpm add/remove skip the quality gate (undeclared imports, official-package '
-  + 'duplicates) and can break the whole profile at runtime.'
+  + 'plugin_toggle tools, or run the dshpm CLI (dshpm install <pkg> --profile <name>, dshpm remove <name>, '
+  + 'dshpm update <name>). Raw dsh plugin add/remove and pnpm add/remove skip the quality gate (undeclared '
+  + 'imports, official-package duplicates) and can break the whole profile at runtime.'
 
 /** Command text of one bash/run_code execution, or null for other tools. */
 function commandText(exec: ToolExecution): string | null {
@@ -103,10 +103,11 @@ export function registerPluginGuard(
 export const PLUGIN_RULE_SECTION = {
   name: 'plugin-manager:install-rule',
   order: 300,
-  text: 'To install, remove, or toggle DSH plugins, use the plugin_install / plugin_uninstall / plugin_toggle '
-    + 'tools or the dshpm CLI (dshpm install <pkg> --profile <name>, dshpm remove <name>). '
-    + 'Never run raw dsh plugin add/remove or pnpm add/remove against a profile: the protected flow runs a quality '
-    + 'gate (undeclared imports, official-package duplicates) and rolls back broken installs.',
+  text: 'To install, remove, update, or toggle DSH plugins, use the plugin_install / plugin_uninstall / '
+    + 'plugin_toggle tools or the dshpm CLI (dshpm install <pkg> --profile <name>, dshpm remove <name>, '
+    + 'dshpm update <name>). Never run raw dsh plugin add/remove or pnpm add/remove against a profile: the '
+    + 'protected flow runs a quality gate (undeclared imports, official-package duplicates) and rolls back '
+    + 'broken installs.',
 }
 
 /** Register the prompt section on the systemPrompt service. Returns the section disposer. */

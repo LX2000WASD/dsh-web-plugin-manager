@@ -14,14 +14,16 @@
 ## 安装
 
 ```sh
-# 方式一（推荐）：从 npm 安装
-dsh plugin --profile <name> add dsh-web-plugin-manager
+# 方式一（推荐）：从 npm 安装（务必带 @latest）
+dsh plugin --profile <name> add dsh-web-plugin-manager@latest
 
 # 方式二：从源码构建
 cd /path/to/dsh-web-plugin-manager
 pnpm install && pnpm run build
 dsh plugin --profile <name> add .
 ```
+
+> ⚠️ 不带 `@latest` 的 `add` 是 pnpm 语义：**若 profile 里已声明过旧版本（如 `^0.1.2`），会保留旧 specifier 不升级**；`dsh plugin update` 也只在该范围内重解析。已装过旧版想升级到最新，用 `add dsh-web-plugin-manager@latest`（或先 remove 再 add）。
 
 重启 profile 后，Web UI 的 **设置** 会出现 **插件管理** 标签页与 **市场** 一级菜单。
 
@@ -32,6 +34,7 @@ dsh plugin --profile <name> add .
 ```sh
 dshpm install <source> --profile <name>   # npm 名 / github:user/repo / git URL / tarball / 本地路径
 dshpm remove <name>    --profile <name>   # insert 行 + 包依赖一并清理
+dshpm update <name>    --profile <name>   # 升级到 @latest（重写 specifier，质量门+回滚）
 dshpm mount <name>     --profile <name>   # 补挂载官方 CLI 手动安装的未挂载依赖
 dshpm list             --profile <name>   # bundle 层栈 / 已装包 / insert 行
 dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
@@ -63,7 +66,7 @@ dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
 - **稳定行视图**：Loader entry id 每次挂载随机，patch 定位必须用 include 树行 id（`EntryOptions.id`，官方语义稳定）
 - **Agent 工具**：`src/tools.ts` —— 依赖注入避免循环依赖；host 提供 tools 服务时注册
 - **安装守卫**：`src/guard.ts` —— `tools.guard` 拒绝裸 `dsh plugin`/pnpm 变更命令（只读 verb 放行），拒绝原因直接给模型指路 `plugin_*` 工具与 `dshpm`；`systemPrompt.section`（order 300）常驻提示同一条规则
-- **CLI**：`src/cli.ts` —— 复用 `installProtected`/`installWithSource`/`removeProtected`（ctx 可空：无宿主进程时跳过 live 应用，文件级操作与 Web UI 完全一致）；`dshpm list/analyze` 直接读 profile 文件
+- **CLI**：`src/cli.ts` —— 复用 `installProtected`/`installWithSource`/`removeProtected`/`updateProtected`（ctx 可空：无宿主进程时跳过 live 应用，文件级操作与 Web UI 完全一致）；`dshpm list/analyze` 直接读 profile 文件
 - **Client**：`src/client/` —— 注册 `settings.plugins.tab`（all 遮蔽官方只读列表 + manager）+ `settings.section`（marketplace）；同源 fetch 调 REST
 - **通信**：官方 webServer 路由 + 同源 fetch（不走 Typert Remote）
 
@@ -79,6 +82,7 @@ dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
 - 更新检测边界：本地目录安装（非 git）报告"不可检测"；git URL 源需 manifest 记录安装 commit（gitHead）
 - 健康检查为静态+尽力而为：同名注册冲突依赖源码正则扫描（动态拼接的名字检测不到）；语义冲突（两个插件做相反的事）无同名可查，不在检测范围
 - 手动安装的插件不会自动挂载：管理器显示「未挂载」并提供「挂载」/ `dshpm mount`，不擅自改变 profile 行为
+- 0.3.0 恢复指引（该版本已在 npm 标记 BROKEN）：0.3.0 把官方包声明为普通依赖、会在 profile 里装出重复拷贝。升级到 0.3.2 即可自动清理——`dsh plugin --profile <name> update dsh-web-plugin-manager`（pnpm 会剪除孤儿重复包）后重启实例；若实例已无法启动，先手动删除 `node_modules/@deepseek-ai/` 下的 dsh-tools/schemastery/cosmokit 再更新
 - 市场条目来源于 awesome 目录，个别仓库可能已删除/私有
 - 市场代理：host 读 `HTTP_PROXY`/`HTTPS_PROXY`；系统代理/规则模式加速器对 Node 进程无效（undici 不读系统代理）——把代理写进环境变量或改 TUN/全局模式
 - GitHub API 未认证限流 60/h：富化遇 403/429 即停止（降级用上次快照元数据），列表不受影响

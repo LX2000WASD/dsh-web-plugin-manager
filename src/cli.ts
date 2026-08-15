@@ -14,6 +14,7 @@
  * Usage:
  *   dshpm install <source> [--profile <name>]
  *   dshpm remove <name>    [--profile <name>]
+ *   dshpm update <name>    [--profile <name>]
  *   dshpm mount <name>     [--profile <name>]
  *   dshpm list             [--profile <name>]
  *   dshpm analyze          [--profile <name>]
@@ -27,7 +28,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { analyzeProfile } from './analyze.ts'
-import { installWithSource, removeProtected } from './index.ts'
+import { installWithSource, removeProtected, updateProtected } from './index.ts'
 import { addInsertRow, readInsertRows, readManagedIds, removeInsertRow, writePatch } from './patch.ts'
 
 /** Resolve the Harness home directory (DSH_HOME env, then ~/.dsh). */
@@ -90,6 +91,7 @@ function printHelp(): void {
 Usage:
   dshpm install <source> [--profile <name>]   Install a plugin (quality gate + rollback)
   dshpm remove <name>    [--profile <name>]   Remove a plugin or managed insert row
+  dshpm update <name>    [--profile <name>]   Update a plugin to @latest (quality gate + rollback)
   dshpm mount <name>     [--profile <name>]   Mount an installed-but-unmounted dependency as an insert row
   dshpm list             [--profile <name>]   List bundles, packages, and insert rows
   dshpm analyze          [--profile <name>]   Run the dependency/conflict health analysis
@@ -202,6 +204,12 @@ function cmdList(profile: string): number {
   return 0
 }
 
+async function cmdUpdate(profile: string, name: string): Promise<number> {
+  const result = await updateProtected(profile, name)
+  process.stdout.write(result.output + '\n')
+  return result.ok ? 0 : 1
+}
+
 function cmdMount(profile: string, packageName: string): number {
   const dir = profileDir(profile)
   if (!existsSync(dir)) {
@@ -291,6 +299,14 @@ async function main(): Promise<number> {
       return 1
     }
     return await cmdRemove(profile, name)
+  }
+  if (command === 'update') {
+    const name = positionals[1]
+    if (name === undefined) {
+      process.stdout.write('dshpm update: missing plugin name\n')
+      return 1
+    }
+    return await cmdUpdate(profile, name)
   }
   if (command === 'mount') {
     const name = positionals[1]

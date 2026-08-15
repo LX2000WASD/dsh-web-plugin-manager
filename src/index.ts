@@ -929,77 +929,7 @@ export class PluginManagerService extends Service {
    *  - local non-git directories cannot be updated (no upstream to pull).
    */
   async update(profile: string, name: string): Promise<CommandResult> {
-    const dir = profileDir(profile)
-    if (!existsSync(dir)) return { ok: false, exitCode: 1, output: 'profile not found: ' + profile }
-    const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
-    const source = manifest.dependencies?.[name]
-    if (source === undefined) {
-      return { ok: false, exitCode: 1, output: name + ' is not a dependency of ' + profile }
-    }
-    const before = readBundles(profile)
-    const local = parseLocalSource(source)
-    if (local !== null && isGitRepo(local)) {
-      // Git-cache update: fetch + hard reset the cache to its remote ref.
-      const updated = await gitPullToRemote(local)
-      if (!updated.ok) {
-        return { ok: false, exitCode: 1, output: '[plugin-manager] git update failed: ' + updated.message }
-      }
-      const result = await runDshPlugin(profile, 'add', [local], process.cwd())
-      if (!result.ok) return result
-      restoreInBoxBundles(profile, before)
-      const issues = qualityIssues(profile, name)
-      if (issues.length > 0) {
-        await runDshPlugin(profile, 'remove', [name], process.cwd())
-        restoreInBoxBundles(profile, before)
-        return {
-          ok: false,
-          exitCode: 1,
-          output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
-            + issues.map(issue => '\n  - ' + issue).join('')
-            + '\n[plugin-manager] rolled back to the previous version.',
-        }
-      }
-      return {
-        ok: true,
-        exitCode: 0,
-        output: result.output + '\n[plugin-manager] ' + name + ' updated from the git cache ('
-          + updated.message + '); restart the profile to load the new code.',
-      }
-    }
-    if (local !== null) {
-      return {
-        ok: false,
-        exitCode: 1,
-        output: '[plugin-manager] ' + name + ' is installed from a local directory (' + local
-          + ') with no git upstream; update is not possible. Remove and reinstall it.',
-      }
-    }
-    // npm or git-URL source: re-add through the official CLI.
-    const spec = isGitSourceSpec(source) ? source : name + '@latest'
-    const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
-    if (!result.ok) return result
-    restoreInBoxBundles(profile, before)
-    const installed = resolveInstalledName(profile, name)
-    if (installed === null) return { ...result, installed: [name] }
-    const issues = qualityIssues(profile, installed)
-    if (issues.length > 0) {
-      await runDshPlugin(profile, 'remove', [installed], process.cwd())
-      restoreInBoxBundles(profile, before)
-      return {
-        ok: false,
-        exitCode: 1,
-        output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
-          + issues.map(issue => '\n  - ' + issue).join('')
-          + '\n[plugin-manager] rolled back to the previous version.',
-      }
-    }
-    return {
-      ok: true,
-      exitCode: 0,
-      output: result.output + '\n[plugin-manager] ' + name + ' updated'
-        + (isGitSourceSpec(source) ? ' from its git source' : ' to @latest')
-        + '; restart the profile to load the new code.',
-    }
+    return updateProtected(profile, name)
   }
 
   /**
@@ -1562,6 +1492,86 @@ export async function removeProtected(ctx: Context | null, profile: string, name
     cleanupInsertRows(ctx, profile, name)
   }
   return result
+}
+
+/**
+ * Shared update path for one installed package (source-kind contract as on
+ * the service method): npm @latest reinstall / git-cache fetch+reset /
+ * git-URL re-resolve, each with the quality gate and rollback. ctx-free —
+ * usable from the dshpm CLI without a live host.
+ */
+export async function updateProtected(profile: string, name: string): Promise<CommandResult> {
+  const dir = profileDir(profile)
+  if (!existsSync(dir)) return { ok: false, exitCode: 1, output: 'profile not found: ' + profile }
+  const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
+  const source = manifest.dependencies?.[name]
+  if (source === undefined) {
+    return { ok: false, exitCode: 1, output: name + ' is not a dependency of ' + profile }
+  }
+  const before = readBundles(profile)
+  const local = parseLocalSource(source)
+  if (local !== null && isGitRepo(local)) {
+    // Git-cache update: fetch + hard reset the cache to its remote ref.
+    const updated = await gitPullToRemote(local)
+    if (!updated.ok) {
+      return { ok: false, exitCode: 1, output: '[plugin-manager] git update failed: ' + updated.message }
+    }
+    const result = await runDshPlugin(profile, 'add', [local], process.cwd())
+    if (!result.ok) return result
+    restoreInBoxBundles(profile, before)
+    const issues = qualityIssues(profile, name)
+    if (issues.length > 0) {
+      await runDshPlugin(profile, 'remove', [name], process.cwd())
+      restoreInBoxBundles(profile, before)
+      return {
+        ok: false,
+        exitCode: 1,
+        output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
+          + issues.map(issue => '\n  - ' + issue).join('')
+          + '\n[plugin-manager] rolled back to the previous version.',
+      }
+    }
+    return {
+      ok: true,
+      exitCode: 0,
+      output: result.output + '\n[plugin-manager] ' + name + ' updated from the git cache ('
+        + updated.message + '); restart the profile to load the new code.',
+    }
+  }
+  if (local !== null) {
+    return {
+      ok: false,
+      exitCode: 1,
+      output: '[plugin-manager] ' + name + ' is installed from a local directory (' + local
+        + ') with no git upstream; update is not possible. Remove and reinstall it.',
+    }
+  }
+  // npm or git-URL source: re-add through the official CLI.
+  const spec = isGitSourceSpec(source) ? source : name + '@latest'
+  const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
+  if (!result.ok) return result
+  restoreInBoxBundles(profile, before)
+  const installed = resolveInstalledName(profile, name)
+  if (installed === null) return { ...result, installed: [name] }
+  const issues = qualityIssues(profile, installed)
+  if (issues.length > 0) {
+    await runDshPlugin(profile, 'remove', [installed], process.cwd())
+    restoreInBoxBundles(profile, before)
+    return {
+      ok: false,
+      exitCode: 1,
+      output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
+        + issues.map(issue => '\n  - ' + issue).join('')
+        + '\n[plugin-manager] rolled back to the previous version.',
+    }
+  }
+  return {
+    ok: true,
+    exitCode: 0,
+    output: result.output + '\n[plugin-manager] ' + name + ' updated'
+      + (isGitSourceSpec(source) ? ' from its git source' : ' to @latest')
+      + '; restart the profile to load the new code.',
+  }
 }
 
 /**
