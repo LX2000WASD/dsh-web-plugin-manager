@@ -49,6 +49,14 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - 运行时诊断（宿主）：pending 注入根因（静态 inject 声明 vs 活跃服务表）、fiber 加载失败原因（`_error`）
 - **作用效果冲突（语义冲突）不在静态检测范围**：两个插件做相反的事（互相矛盾的 prompt 指导、竞争同一事件流）没有同名可查，只能靠运行时观察尽力而为
 
+### 分级自动修复（管理页健康检查区）
+
+- **A 级（安全默认，一键自动修 / 单条「修复」）**：`duplicate-row-id`（保留第一个删其余重复顶层行）、`disabled-dependency`（恢复启用被依赖条目）、`official-duplicate`（删除 profile node_modules 里的重复官方包拷贝 + 清理 manifest 声明）
+- **B 级（建议 + 行内确认，不弹窗）**：`service/tool/section/route-conflict`——建议"禁用后注册者"，按钮两态（执行建议 → 确认执行？）
+- **C 级（只输出）**：`missing-import` / `circular-dependency` / `peer-mismatch` / 运行时诊断
+- 交互：行内按钮 + 状态反馈（已修复 ✓），执行细节进命令输出区；`fixAll` 批量跑 A 级；修复后自动重新分析
+- 服务端：`fixIssue(profile, action, target)` / `fixAll(profile)`（mutation mutex 串行，A 级动作执行前不二次确认）
+
 ## 环境管理
 
 - 设置 → 插件 → 环境：启动/停止（终端或后台）、复制/转移插件（按记录源重装）、创建/重命名/删除 profile

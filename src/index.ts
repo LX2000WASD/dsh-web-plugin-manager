@@ -1148,6 +1148,86 @@ export class PluginManagerService extends Service {
   }
 
   /**
+   * Execute one machine-fixable health-check action. A-level actions (safe
+   * defaults) run directly; B-level (conflict disables) are sent here only
+   * after the user confirmed in the UI. Serialized by the mutation mutex;
+   * inner calls use the un-wrapped service methods to avoid queue nesting.
+   */
+  async fixIssue(profile: string, action: string, target: string): Promise<MutationResult> {
+    return enqueueMutation(() => this.fixIssueInner(profile, action, target))
+  }
+
+  private async fixIssueInner(profile: string, action: string, target: string): Promise<MutationResult> {
+    const dir = profileDir(profile)
+    if (!existsSync(dir)) return { ok: false, message: `profile not found: ${profile}` }
+    switch (action) {
+      case 'enable-entry':
+        return this.setEnabledInner(profile, target, true)
+      case 'disable-entry':
+        return this.setEnabledInner(profile, target, false)
+      case 'remove-duplicate-rows': {
+        const current = readPatch(dir)
+        const lines = current.split('\n')
+        let seen = false
+        const next = lines.filter(line => {
+          const match = /^-\s*id:\s*(\S+)/.exec(line)
+          if (match === null || match[1] !== target) return true
+          if (seen) return false
+          seen = true
+          return true
+        })
+        if (next.length === lines.length) {
+          return { ok: false, message: 'no duplicate rows found for id ' + target + ' (re-run the check)' }
+        }
+        writePatch(patchPath(dir), next.join('\n'))
+        return {
+          ok: true,
+          message: 'removed duplicate rows for id ' + target + ' (first kept; applied via the patch watcher, or on next start)',
+        }
+      }
+      case 'remove-official-copy': {
+        if (!target.startsWith('@deepseek-ai/')) {
+          return { ok: false, message: target + ' is not an official package; refusing to remove it' }
+        }
+        const pkgDir = join(dir, 'node_modules', target)
+        if (existsSync(pkgDir)) rmSync(pkgDir, { recursive: true, force: true })
+        const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
+        if (manifest.dependencies?.[target] !== undefined) {
+          delete manifest.dependencies[target]
+          writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, undefined, 2) + '\n')
+        }
+        return { ok: true, message: 'removed duplicate official copy ' + target + ' from the profile (host fallback now resolves it)' }
+      }
+      default:
+        return { ok: false, message: 'unknown fix action: ' + action }
+    }
+  }
+
+  /**
+   * Run every A-level (safe-default) fix from a fresh analysis. B-level
+   * suggestions are left for the per-issue confirm flow. Serialized by the
+   * mutation mutex.
+   */
+  async fixAll(profile: string): Promise<CommandResult> {
+    return enqueueMutation(async () => {
+      const dir = profileDir(profile)
+      if (!existsSync(dir)) return { ok: false, exitCode: 1, output: 'profile not found: ' + profile }
+      const analysis = analyzeProfile(dir, readBundles(profile), readPatch(dir), new Set(), [])
+      const auto = analysis.issues.filter(issue => issue.fix !== undefined && !issue.fix!.confirm)
+      if (auto.length === 0) return { ok: true, exitCode: 0, output: 'nothing to auto-fix' }
+      const outputs: string[] = []
+      let ok = true
+      for (const issue of auto) {
+        const fix = issue.fix!
+        const result = await this.fixIssueInner(profile, fix.action, fix.target)
+        outputs.push('[' + fix.label + '] ' + (result.ok ? 'fixed' : 'FAILED: ' + result.message))
+        if (!result.ok) ok = false
+      }
+      return { ok, exitCode: ok ? 0 : 1, output: outputs.join('\n') }
+    })
+  }
+
+  /**
    * Uninstall a marketplace-kind install through its record: skills/presets
    * delete their directories (path-containment guarded), cordis plugins
    * remove each recorded package through the protected path (dependency +
@@ -3808,6 +3888,18 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: service.analyze(profile) })
           return
         }
+        case 'fixIssue': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          const action = typeof body['action'] === 'string' ? body['action'] : ''
+          const target = typeof body['target'] === 'string' ? body['target'] : ''
+          sendJson(res, 200, { ok: true, value: await service.fixIssue(profile, action, target) })
+          return
+        }
+        case 'fixAll': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          sendJson(res, 200, { ok: true, value: await service.fixAll(profile) })
+          return
+        }
         case 'update': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
@@ -3826,7 +3918,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'backupExport', 'backupDiff', 'backupRestore', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'backupExport', 'backupDiff', 'backupRestore', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze', 'fixIssue', 'fixAll']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

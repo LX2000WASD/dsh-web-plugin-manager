@@ -493,6 +493,12 @@ export function analyzeProfile(
         + 'The loader resolves the official row to the profile copy; module identity splits between the two copies '
         + "and runtime contracts break (e.g. Cannot read properties of undefined (reading 'prepare')). "
         + 'Move the declaration to peerDependencies and remove the duplicate copy from the profile.',
+      fix: {
+        action: 'remove-official-copy',
+        target: name,
+        label: '从 profile 移除重复官方包拷贝 ' + name,
+        confirm: false,
+      },
     })
   }
   for (const pkg of packages) {
@@ -526,6 +532,12 @@ export function analyzeProfile(
         from: edge.from,
         to: edge.to,
         message: edge.from + ' depends on ' + edge.to + ' whose row is disabled — it may fail to activate',
+        fix: {
+          action: 'enable-entry',
+          target: edge.to,
+          label: '恢复启用 ' + edge.to,
+          confirm: false,
+        },
       })
     }
   }
@@ -536,6 +548,12 @@ export function analyzeProfile(
       issues.push({
         kind: 'duplicate-row-id',
         message: 'patch row id ' + id + ' appears ' + rows.length + ' times (the loader refuses duplicate ids)',
+        fix: {
+          action: 'remove-duplicate-rows',
+          target: id,
+          label: '保留第一个 ' + id + '，删除其余 ' + (rows.length - 1) + ' 个重复行',
+          confirm: false,
+        },
       })
     }
   }
@@ -578,6 +596,12 @@ export function analyzeProfile(
       issues.push({
         kind: 'service-conflict',
         message: 'service ' + service + ' is registered by ' + owners.join(' and ') + ' (later registrations shadow earlier ones)',
+        fix: {
+          action: 'disable-entry',
+          target: owners[1]!,
+          label: '禁用后注册者 ' + owners[1],
+          confirm: true,
+        },
       })
     }
   }
@@ -606,6 +630,12 @@ export function analyzeProfile(
           kind,
           message: label + ' ' + name + ' is registered by ' + packageOwners.join(' and ')
             + ' (the second registration fails loud at runtime)',
+          fix: {
+            action: 'disable-entry',
+            target: packageOwners[1]!,
+            label: '禁用后注册者 ' + packageOwners[1],
+            confirm: true,
+          },
         })
       }
     }

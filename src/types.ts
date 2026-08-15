@@ -294,6 +294,18 @@ export interface AnalyzeEdge {
   readonly specifier: string
 }
 
+/** One machine-executable fix action (analyze annotates, the service runs it). */
+export interface IssueFix {
+  /** Fix instruction id. */
+  readonly action: 'remove-duplicate-rows' | 'enable-entry' | 'remove-official-copy' | 'disable-entry'
+  /** Target: duplicate row id / entry id / package name. */
+  readonly target: string
+  /** Human-readable action description (shown when confirming). */
+  readonly label: string
+  /** false = safe default (run directly); true = needs user confirmation. */
+  readonly confirm: boolean
+}
+
 /** One analysis finding. */
 export interface AnalyzeIssue {
   readonly kind:
@@ -314,6 +326,8 @@ export interface AnalyzeIssue {
   readonly to?: string
   /** Cycle members for circular-dependency issues. */
   readonly cycle?: readonly string[]
+  /** Machine-executable fix, when this issue is mechanically fixable. */
+  readonly fix?: IssueFix
 }
 
 /** Full analysis result for one profile. */

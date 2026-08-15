@@ -8,7 +8,7 @@ import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'rea
 import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  AnalyzeResult, CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
+  AnalyzeIssue, AnalyzeResult, CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
@@ -24,6 +24,8 @@ export interface PluginManagerTabInjected {
   readonly checkUpdates: (profile: string) => Promise<UpdateCheckResult>
   readonly update: (profile: string, name: string) => Promise<CommandResult>
   readonly analyze: (profile: string) => Promise<AnalyzeResult>
+  readonly fixIssue: (profile: string, action: string, target: string) => Promise<MutationResult>
+  readonly fixAll: (profile: string) => Promise<CommandResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -151,7 +153,7 @@ function formatTime(iso: string): string {
 }
 
 /** Render the management tab. */
-export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, t }: PluginManagerTabProps): ReactNode {
+export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, fixIssue, fixAll, t }: PluginManagerTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
   const [state, setState] = useState<ViewState>({ status: 'loading' })
@@ -162,9 +164,14 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const [checking, setChecking] = useState(false)
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
+  // Health-check fix flow: which issue is fixing / awaiting B-level confirm /
+  // already fixed in this session (cleared by the next analyze).
+  const [fixing, setFixing] = useState<string | null>(null)
+  const [confirmKey, setConfirmKey] = useState<string | null>(null)
+  const [fixedKeys, setFixedKeys] = useState<Set<string>>(new Set())
 
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
-  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze })
+  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, fixIssue, fixAll })
 
   const load = (profile: string): void => {
     if (profile.length === 0) return
@@ -211,10 +218,62 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     try {
       const result = await injected.current.analyze(selected)
       setAnalysis(result)
+      setFixedKeys(new Set())
+      setConfirmKey(null)
     } finally {
       setAnalyzing(false)
     }
   }
+
+  /** A-level fixes run directly; B-level suggestions confirm inline first. */
+  const onFix = async (issue: AnalyzeIssue, key?: string): Promise<void> => {
+    if (issue.fix === undefined) return
+    if (issue.fix.confirm) {
+      const id = key ?? issue.fix.label
+      if (confirmKey !== id) {
+        setConfirmKey(id)
+        return
+      }
+      setConfirmKey(null)
+    }
+    const fixKey = key ?? 'auto-' + issue.kind
+    setFixing(fixKey)
+    try {
+      const result = await injected.current.fixIssue(selected, issue.fix.action, issue.fix.target)
+      setOutput('$ fix ' + issue.kind + ' (' + issue.fix.label + ')\n' + result.message)
+      if (result.ok) {
+        setFixedKeys(current => new Set(current).add(fixKey))
+        void onAnalyze()
+      }
+    } finally {
+      setFixing(null)
+    }
+  }
+
+  const onFixAll = async (): Promise<void> => {
+    setFixing('all')
+    try {
+      const result = await injected.current.fixAll(selected)
+      setOutput('$ fix all\n' + result.output)
+      void onAnalyze()
+    } finally {
+      setFixing(null)
+    }
+  }
+
+  /** Issues grouped by fixability: auto (A) / suggested (B) / manual (C). */
+  const autoFixable = useMemo(
+    () => (analysis?.issues ?? []).filter(issue => issue.fix !== undefined && !issue.fix.confirm),
+    [analysis],
+  )
+  const suggested = useMemo(
+    () => (analysis?.issues ?? []).filter(issue => issue.fix !== undefined && issue.fix.confirm),
+    [analysis],
+  )
+  const manual = useMemo(
+    () => (analysis?.issues ?? []).filter(issue => issue.fix === undefined),
+    [analysis],
+  )
 
   const onInstall = async (): Promise<void> => {
     const trimmed = spec.trim()
@@ -363,18 +422,73 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                 <span style={styles.headingCount}>
                   {analysis.issues.length === 0 ? t('healthOk') : analysis.issues.length + ' ' + t('healthIssues')}
                 </span>
+                {autoFixable.length > 0 && (
+                  <Button size="sm" variant="outline" disabled={busy !== null || fixing !== null} onClick={() => void onFixAll()}>
+                    {fixing === 'all' ? t('fixing') : t('fixAllButton') + '(' + autoFixable.length + ')'}
+                  </Button>
+                )}
               </div>
               {analysis.issues.length === 0 ? (
                 <p style={styles.status}>{t('healthClean')}</p>
               ) : (
-                <ul style={styles.analysisList}>
-                  {analysis.issues.map((issue, index) => (
-                    <li key={index} style={styles.analysisIssue}>
-                      <span style={styles.analysisIssueKind}>{issue.kind}</span>
-                      <span style={styles.analysisIssueText}>{issue.message}</span>
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  {autoFixable.length > 0 && (
+                    <p style={styles.status}>{t('fixAutoGroup')}</p>
+                  )}
+                  <ul style={styles.analysisList}>
+                    {autoFixable.map((issue, index) => (
+                      <li key={'auto-' + index} style={styles.analysisIssue}>
+                        <span style={styles.analysisIssueKind}>{issue.kind}</span>
+                        <span style={styles.analysisIssueText}>{issue.message}</span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null || fixing !== null}
+                          onClick={() => void onFix(issue)}
+                        >
+                          {fixedKeys.has('auto-' + index) ? t('fixDone') : fixing === 'auto-' + index ? t('fixing') : t('fixButton')}
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                  {suggested.length > 0 && (
+                    <p style={styles.status}>{t('fixSuggestedGroup')}</p>
+                  )}
+                  <ul style={styles.analysisList}>
+                    {suggested.map((issue, index) => {
+                      const key = 'sug-' + index
+                      const confirming = confirmKey === key
+                      return (
+                        <li key={key} style={styles.analysisIssue}>
+                          <span style={styles.analysisIssueKind}>{issue.kind}</span>
+                          <span style={styles.analysisIssueText}>{issue.message}</span>
+                          <Button
+                            size="sm"
+                            variant={confirming ? 'primary' : 'outline'}
+                            disabled={busy !== null || fixing !== null}
+                            onClick={() => void onFix(issue, key)}
+                          >
+                            {fixedKeys.has(key) ? t('fixDone')
+                              : fixing === key ? t('fixing')
+                                : confirming ? t('fixConfirm')
+                                  : t('fixSuggestButton')}
+                          </Button>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                  {manual.length > 0 && (
+                    <p style={styles.status}>{t('fixManualGroup')}</p>
+                  )}
+                  <ul style={styles.analysisList}>
+                    {manual.map((issue, index) => (
+                      <li key={'manual-' + index} style={styles.analysisIssue}>
+                        <span style={styles.analysisIssueKind}>{issue.kind}</span>
+                        <span style={styles.analysisIssueText}>{issue.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
               )}
               {analysis.topoOrder.length > 1 && (
                 <div style={{ marginTop: '8px', fontSize: '11px', lineHeight: '17px', color: 'var(--dsw-alias-label-tertiary)' }}>

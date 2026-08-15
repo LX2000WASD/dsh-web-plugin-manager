@@ -92,6 +92,8 @@ export function apply(ctx: ClientContext): void {
     checkUpdates: (profile) => call<UpdateCheckResult>('checkUpdates', { profile }),
     update: (profile, name) => call<CommandResult>('update', { profile, name }),
     analyze: (profile) => call<AnalyzeResult>('analyze', { profile }),
+    fixIssue: (profile, action, target) => call<MutationResult>('fixIssue', { profile, action, target }),
+    fixAll: (profile) => call<CommandResult>('fixAll', { profile }),
   })
 
   // Shadow the official read-only inventory: same slot id 'all', lower
