@@ -891,7 +891,11 @@ export class PluginManagerService extends Service {
     if (!existsSync(dir)) return { ok: false, items: [], message: 'profile not found: ' + profile }
     const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
     const deps = manifest.dependencies ?? {}
-    const names = Object.keys(deps).filter(name => name !== OUR_PACKAGE_NAME)
+    // Self-update included: updating the running manager is safe — the new
+    // files land on disk while the loaded module keeps running in memory,
+    // and the update path carries the quality gate (rollback re-installs the
+    // previous version, never uninstalls). A restart applies the new code.
+    const names = Object.keys(deps)
     // Bounded concurrency: npm view / git fetch are child processes.
     const results: UpdateInfo[] = []
     let cursor = 0
@@ -1548,6 +1552,10 @@ export async function updateProtected(profile: string, name: string): Promise<Co
   }
   // npm or git-URL source: re-add through the official CLI.
   const spec = isGitSourceSpec(source) ? source : name + '@latest'
+  // Previous version captured for the rollback: a failed self-update must
+  // restore the old code, never uninstall the package (the manager itself
+  // would otherwise disappear from the profile).
+  const previousVersion = readPackageInfo(dir, name).version
   const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
   if (!result.ok) return result
   restoreInBoxBundles(profile, before)
@@ -1555,14 +1563,20 @@ export async function updateProtected(profile: string, name: string): Promise<Co
   if (installed === null) return { ...result, installed: [name] }
   const issues = qualityIssues(profile, installed)
   if (issues.length > 0) {
-    await runDshPlugin(profile, 'remove', [installed], process.cwd())
+    let restored = false
+    if (previousVersion !== undefined) {
+      const reAdd = await runDshPlugin(profile, 'add', [name + '@' + previousVersion], process.cwd())
+      restored = reAdd.ok
+    }
+    if (!restored) await runDshPlugin(profile, 'remove', [installed], process.cwd())
     restoreInBoxBundles(profile, before)
     return {
       ok: false,
       exitCode: 1,
       output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
         + issues.map(issue => '\n  - ' + issue).join('')
-        + '\n[plugin-manager] rolled back to the previous version.',
+        + '\n[plugin-manager] rolled back to the previous version'
+        + (restored && previousVersion !== undefined ? ' (' + previousVersion + ')' : ' — reinstall the package manually'),
     }
   }
   return {
