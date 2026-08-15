@@ -40,7 +40,8 @@
     "typecheck": "tsc --noEmit",
     "prepare": "pnpm run build",
     "build:host": "tsc -p tsconfig.host.json",
-    "build:client": "tsc -p tsconfig.client.json && tsdown --config tsdown.client.config.ts"
+    "build:client": "tsc -p tsconfig.client.json && tsdown --config tsdown.client.config.ts",
+    "test": "pnpm run build:host && node --test 'tests/*.test.mjs'"
   },
   "dsh": {
     "bundle": {
