@@ -222,23 +222,33 @@ function resolveExec(tool: ResolvedCommand, args: readonly string[]): { command:
   // cmd /s strips only the first and last quote characters, so the batch
   // path alone is quoted and arguments are quoted ONLY when they need it
   // (spaces / cmd specials); bare tokens stay bare (cross-spawn pattern).
+  // A chcp 65001 prefix switches the spawned console to UTF-8 first: on CJK
+  // systems cmd writes error messages in the legacy code page (GBK), which
+  // Node would otherwise misread as UTF-8 mojibake.
   const comspec = process.env.ComSpec ?? process.env.comspec ?? 'cmd.exe'
   const quotedArgs = args.length > 0
     ? ' ' + args.map(a => /[\s&|<>^%()]/.test(a) ? '"' + String(a).replace(/"/g, '""') + '"' : String(a)).join(' ')
     : ''
   return {
     command: comspec,
-    args: ['/d', '/s', '/c', '"' + tool.command + '"' + quotedArgs],
+    args: ['/d', '/s', '/c', 'chcp 65001 >nul & "' + tool.command + '"' + quotedArgs],
     verbatim: true,
   }
 }
 
-/** Child env with an extra directory prepended to PATH (null dir → base env). */
+/** Child env with directories prepended to PATH (null dir → base env). */
 function commandEnv(dir: string | null, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (dir === null) return base ?? process.env
+  if (dir === null && process.platform !== 'win32') return base ?? process.env
   const env = { ...(base ?? process.env) }
+  const parts: string[] = []
+  // Win32: spawned .cmd shims resolve node through PATH, but the host
+  // process may run under a different environment than the user's shell
+  // (nvm-activated terminal): inject the host node's directory so shims
+  // always find node.
+  if (process.platform === 'win32') parts.push(dirname(process.execPath))
+  if (dir !== null) parts.push(dir)
   const path = env.PATH ?? ''
-  env.PATH = dir + (path.length > 0 ? delimiter + path : '')
+  env.PATH = [...parts, path].filter(p => p.length > 0).join(delimiter)
   return env
 }
 

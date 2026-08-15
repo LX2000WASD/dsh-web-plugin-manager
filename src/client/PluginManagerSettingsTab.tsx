@@ -277,8 +277,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     setBusy('update:' + name)
     try {
       const result = await injected.current.update(selected, name)
-      setOutput('$ update ' + name + '\n' + result.output + '\n' + t('updateRestartHint'))
-      setUpdates(current => { const next = { ...current }; delete next[name]; return next })
+      setOutput('$ update ' + name + '\n' + result.output + '\n' + (result.ok ? t('updateRestartHint') : t('updateFailedHint')))
+      setUpdates(current => { const next = { ...current }; if (result.ok) delete next[name]; return next })
       load(selected)
     } finally {
       setBusy(null)
