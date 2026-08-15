@@ -31,7 +31,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process'
 import { connect, createServer } from 'node:net'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, delimiter, dirname, join, sep } from 'node:path'
+import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -89,7 +89,9 @@ function dshHome(): string {
 
 /** The safe-profile-name rule (shared by profileDir and hostProfileName). */
 function isSafeProfileName(name: string): boolean {
-  return /^[A-Za-z0-9._-]+$/.test(name) && name.length <= 120
+  // `.` / `..` would escape the profiles root (join(profiles,'..') = dshHome):
+  // removeProfile('..') used to delete the whole Harness home.
+  return /^[A-Za-z0-9._-]+$/.test(name) && name !== '.' && name !== '..' && name.length <= 120
 }
 
 /** Resolve one profile's directory, rejecting traversal. */
@@ -97,7 +99,13 @@ function profileDir(name: string): string {
   if (!isSafeProfileName(name)) {
     throw new Error("unsafe profile name: " + JSON.stringify(name))
   }
-  return join(dshHome(), 'profiles', name)
+  const dir = join(dshHome(), 'profiles', name)
+  // Defense in depth: the resolved path must stay under the profiles root
+  // (a name like `..` would otherwise resolve to the Harness home itself).
+  if (!resolve(dir).startsWith(resolve(join(dshHome(), 'profiles')) + sep)) {
+    throw new Error("unsafe profile name: " + JSON.stringify(name))
+  }
+  return dir
 }
 
 /** The profile's package.json manifest, parsed defensively. */
@@ -240,9 +248,15 @@ function resolveExec(tool: ResolvedCommand, args: readonly string[]): { command:
   // A chcp 65001 prefix switches the spawned console to UTF-8 first: on CJK
   // systems cmd writes error messages in the legacy code page (GBK), which
   // Node would otherwise misread as UTF-8 mojibake.
+  //
+  // cmd re-parses the command line even INSIDE quotes: `& | < > ^` are
+  // operators and `%` starts variable expansion, so a hostile spec (install
+  // source, package name) could inject extra commands (audit M18). Escape
+  // them (`^` caret prefix; `%` doubled) on every argument before quoting.
+  const escape = (a: string): string => a.replace(/%/g, '%%').replace(/([&|<>^])/g, '^$1')
   const comspec = process.env.ComSpec ?? process.env.comspec ?? 'cmd.exe'
   const quotedArgs = args.length > 0
-    ? ' ' + args.map(a => /[\s&|<>^%()]/.test(a) ? '"' + String(a).replace(/"/g, '""') + '"' : String(a)).join(' ')
+    ? ' ' + args.map(a => /[\s&|<>^%()]/.test(a) ? '"' + escape(String(a)).replace(/"/g, '""') + '"' : escape(String(a))).join(' ')
     : ''
   return {
     command: comspec,
@@ -410,6 +424,7 @@ export class PluginManagerService extends Service {
 
   /** Delete a custom profile directory (never the hosting profile). */
   removeProfile(name: string): MutationResult {
+    if (!isSafeProfileName(name)) return { ok: false, message: "invalid profile name: " + JSON.stringify(name) }
     if (isOfficialProfile(name)) return { ok: false, message: "official profiles (web/headless) are not managed here" }
     const dir = profileDir(name)
     if (!existsSync(dir)) return { ok: false, message: "profile not found: " + name }
@@ -533,7 +548,27 @@ export class PluginManagerService extends Service {
    * profile (package-name / repository / git-cache / skills+presets probing),
    * so "installed" is correct even for plugins installed before the manager.
    */
+  /**
+   * Marketplace listing. Concurrent refreshes are serialized: the source
+   * walk + cache write is last-write-wins, and parallel walks would let an
+   * older response overwrite a newer one (audit M13).
+   */
   async marketplace(profile: string, refresh: boolean): Promise<MarketplaceResult> {
+    if (refresh) {
+      const previous = marketplaceRefreshTail
+      let release: () => void = () => { /* noop */ }
+      marketplaceRefreshTail = new Promise<void>(resolve => { release = resolve })
+      await previous
+      try {
+        return await this.marketplaceInner(profile, true)
+      } finally {
+        release()
+      }
+    }
+    return this.marketplaceInner(profile, false)
+  }
+
+  private async marketplaceInner(profile: string, refresh: boolean): Promise<MarketplaceResult> {
     const cacheDir = join(dshHome(), 'plugin-manager-cache')
     const cachePath = join(cacheDir, 'marketplace.json')
     const failurePath = join(cacheDir, 'marketplace-failure.json')
@@ -561,12 +596,17 @@ export class PluginManagerService extends Service {
     }
     const writeCache = (items: MarketplaceItem[], source: string): void => {
       marketplaceMemoryCache = { at: Date.now(), items, source }
-      writeFileSync(cachePath, JSON.stringify({
+      // Atomic write (tmp + rename): two concurrent refreshes must not
+      // interleave into a truncated file (audit M13).
+      const tmpPath = cachePath + '.tmp'
+      writeFileSync(tmpPath, JSON.stringify({
         version: MARKETPLACE_CACHE_VERSION,
         fetchedAt: new Date().toISOString(),
         source,
         items,
       }, undefined, 2) + '\n')
+      renameSync(tmpPath, cachePath)
+      try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
       // A successful fetch clears the recorded failure reason.
       rmSync(failurePath, { force: true })
     }
@@ -632,10 +672,12 @@ export class PluginManagerService extends Service {
     // Fetch sources independently: the registry index, the structured
     // catalog and the legacy PLUGINS.md complement each other — one failing
     // must not empty the list.
-    const registryItems = await fetchRegistryRepos().catch((error: unknown) => {
+    const registryFetch = await fetchRegistryRepos().catch((error: unknown) => {
       console.warn('[plugin-manager] registry index unavailable: ' + (error instanceof Error ? error.message : String(error)))
       return null
     })
+    const registryItems = registryFetch !== null ? registryFetch.repos : null
+    const registryCacheable = registryFetch !== null && registryFetch.cacheable
     const catalogItems = await fetchCatalogItems().catch((error: unknown) => {
       catalogError = error instanceof Error ? error.message : String(error)
       return []
@@ -662,7 +704,9 @@ export class PluginManagerService extends Service {
         base = await fetchSearchFallback()
         if (base !== null) source = 'search'
       }
-    } else {
+    } else if (registryCacheable) {
+      // Only freshness-verified sources persist (audit M14): an unverified
+      // api/raw response must not overwrite a good disk cache.
       writeRegistryCache(base)
     }
     let items: MarketplaceItem[]
@@ -994,24 +1038,29 @@ export class PluginManagerService extends Service {
   async copyPlugins(fromProfile: string, toProfile: string, names: readonly string[]): Promise<CommandResult> {
     if (!existsSync(profileDir(fromProfile))) return { ok: false, exitCode: 1, output: "source profile not found: " + fromProfile }
     if (!existsSync(profileDir(toProfile))) return { ok: false, exitCode: 1, output: "target profile not found: " + toProfile }
-    const manifest = readManifest(profileDir(fromProfile)) as { dependencies?: Record<string, string> }
-    const deps = manifest.dependencies ?? {}
-    const outputs: string[] = []
-    let allOk = true
-    for (const name of names) {
-      const source = typeof deps[name] === 'string' && deps[name] !== '' ? deps[name] : name
-      const result = await installProtected(this.ctx, toProfile, source)
-      outputs.push("# " + name + " -> " + toProfile + ": " + (result.ok ? "ok" : "FAILED") + "\n" + result.output.trim())
-      if (!result.ok) allOk = false
-    }
-    return {
-      ok: allOk,
-      exitCode: allOk ? 0 : 1,
-      output: outputs.join("\n\n"),
-      installed: [...names],
-    }
+    // The whole transfer runs as ONE mutation: installProtected is not
+    // enqueued itself, and a per-package loop outside the mutex would race
+    // with concurrent install/remove/update on the target profile — both
+    // pnpm manifest snapshots and patch rows would be lost (audit C3).
+    return enqueueMutation(async () => {
+      const manifest = readManifest(profileDir(fromProfile)) as { dependencies?: Record<string, string> }
+      const deps = manifest.dependencies ?? {}
+      const outputs: string[] = []
+      let allOk = true
+      for (const name of names) {
+        const source = typeof deps[name] === 'string' && deps[name] !== '' ? deps[name] : name
+        const result = await installProtected(this.ctx, toProfile, source)
+        outputs.push("# " + name + " -> " + toProfile + ": " + (result.ok ? "ok" : "FAILED") + "\n" + result.output.trim())
+        if (!result.ok) allOk = false
+      }
+      return {
+        ok: allOk,
+        exitCode: allOk ? 0 : 1,
+        output: outputs.join("\n\n"),
+        installed: [...names],
+      }
+    })
   }
-
 
   /** Remove an installed package via dsh plugin (preserving in-box bundles). */
   async remove(profile: string, name: string): Promise<CommandResult> {
@@ -1185,18 +1234,35 @@ export class PluginManagerService extends Service {
       case 'remove-duplicate-rows': {
         const current = readPatch(dir)
         const lines = current.split('\n')
-        let seen = false
-        const next = lines.filter(line => {
+        // The first matching row is kept; every later `- id: <target>` row is
+        // dropped TOGETHER with its indented children — a line-only filter
+        // left the duplicate's child rows attached to the kept row, producing
+        // duplicate YAML keys / misplaced `disabled` (audit M10).
+        let firstIdx = -1
+        for (let i = 0; i < lines.length; i += 1) {
+          const match = /^-\s*id:\s*(\S+)/.exec(lines[i]!)
+          if (match !== null && match[1] === target) { firstIdx = i; break }
+        }
+        if (firstIdx === -1) {
+          return { ok: false, message: 'no rows found for id ' + target + ' (re-run the check)' }
+        }
+        const out: string[] = []
+        let dropping = false
+        for (let i = 0; i < lines.length; i += 1) {
+          const line = lines[i]!
+          if (i === firstIdx) { out.push(line); dropping = false; continue }
           const match = /^-\s*id:\s*(\S+)/.exec(line)
-          if (match === null || match[1] !== target) return true
-          if (seen) return false
-          seen = true
-          return true
-        })
-        if (next.length === lines.length) {
+          if (match !== null && match[1] === target) { dropping = true; continue }
+          if (dropping) {
+            if (/^\s/.test(line)) continue // duplicate row's indented children
+            dropping = false
+          }
+          out.push(line)
+        }
+        if (out.length === lines.length) {
           return { ok: false, message: 'no duplicate rows found for id ' + target + ' (re-run the check)' }
         }
-        writePatch(patchPath(dir), next.join('\n'))
+        writePatch(patchPath(dir), out.join('\n'))
         return {
           ok: true,
           message: 'removed duplicate rows for id ' + target + ' (first kept; applied via the patch watcher, or on next start)',
@@ -1206,7 +1272,15 @@ export class PluginManagerService extends Service {
         if (!target.startsWith('@deepseek-ai/')) {
           return { ok: false, message: target + ' is not an official package; refusing to remove it' }
         }
+        // Only a plain scoped package name may be targeted: `..`/`/` in the
+        // target would escape node_modules through join() (audit M1).
+        if (!/^@deepseek-ai\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(target)) {
+          return { ok: false, message: target + ' is not a valid package name; refusing to remove it' }
+        }
         const pkgDir = join(dir, 'node_modules', target)
+        if (!resolve(pkgDir).startsWith(resolve(join(dir, 'node_modules')) + sep)) {
+          return { ok: false, message: target + ' escapes node_modules; refusing to remove it' }
+        }
         if (existsSync(pkgDir)) rmSync(pkgDir, { recursive: true, force: true })
         const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
         if (manifest.dependencies?.[target] !== undefined) {
@@ -1270,17 +1344,31 @@ export class PluginManagerService extends Service {
         ? record.names
         : record.name !== null ? [record.name] : []
       let removed = 0
-      for (const name of names) {
-        const target = join(root, name)
-        if (isUnderRoot(target, root) && existsSync(target)) {
-          rmSync(target, { recursive: true, force: true })
-          log.push('removed ' + target)
-          removed++
+      try {
+        for (const name of names) {
+          const target = join(root, name)
+          if (isUnderRoot(target, root) && existsSync(target)) {
+            rmSync(target, { recursive: true, force: true })
+            log.push('removed ' + target)
+            removed++
+          }
         }
-      }
-      if (removed === 0 && record.location !== null && record.location !== root && isUnderRoot(record.location, root) && existsSync(record.location)) {
-        rmSync(record.location, { recursive: true, force: true })
-        log.push('removed ' + record.location)
+        if (removed === 0 && record.location !== null && record.location !== root && isUnderRoot(record.location, root) && existsSync(record.location)) {
+          rmSync(record.location, { recursive: true, force: true })
+          log.push('removed ' + record.location)
+        }
+      } catch (error: unknown) {
+        // A locked/busy directory (Windows) must NOT lose the install
+        // record — the state would claim uninstalled while files remain
+        // (audit M6). Keep the record and report the failure.
+        return {
+          ok: false,
+          exitCode: 1,
+          output: 'uninstall failed for ' + key + ' (' + record.type + '): '
+            + (error instanceof Error ? error.message : String(error))
+            + (log.length > 0 ? '\n' + log.join('\n') : '')
+            + '\n[plugin-manager] the install record was kept — re-run after releasing the directory.',
+        }
       }
       await removeKindRecord(key)
       return {
@@ -1309,6 +1397,16 @@ export class PluginManagerService extends Service {
         const result = await removeProtected(this.ctx, profile, name)
         outputs.push(result.output)
         if (!result.ok) ok = false
+      }
+      if (!ok) {
+        // A failed package removal must keep the record — the package is
+        // still installed (audit M6).
+        return {
+          ok: false,
+          exitCode: 1,
+          output: outputs.join('\n\n')
+            + '\n[plugin-manager] uninstall incomplete — the install record was kept; re-run after fixing the failures.',
+        }
       }
       await removeKindRecord(key)
       return { ok, exitCode: ok ? 0 : 1, output: outputs.join('\n\n') }
@@ -1596,15 +1694,50 @@ async function gitRemoteState(dir: string): Promise<{
   if (!head.ok) return { ok: false, hasUpdate: false, message: 'not a git repository' }
   const headHash = head.output.trim()
   if (headHash.length === 0) return { ok: false, hasUpdate: false, message: 'no HEAD commit' }
-  const fetched = await execFileTimeout('git', ['-C', dir, 'fetch', '--quiet', '--prune'], 20_000)
-  if (!fetched.ok) {
-    return { ok: false, hasUpdate: false, message: 'git fetch failed: ' + fetched.output.trim().slice(0, 200) }
+  // A CHECK must not mutate a user's own git workspace (audit M12: the old
+  // code ran `git fetch --prune` on any local repo — it deleted remote
+  // tracking refs and wrote into the working tree). Only the manager's own
+  // clone cache (<dshHome>/plugin-manager-src) is fetched; everything else
+  // is compared read-only via ls-remote.
+  const cacheRoot = join(dshHome(), 'plugin-manager-src')
+  const isManagedCache = resolve(dir).startsWith(resolve(cacheRoot) + sep)
+  if (isManagedCache) {
+    const fetched = await execFileTimeout('git', ['-C', dir, 'fetch', '--quiet', '--prune'], 20_000)
+    if (!fetched.ok) {
+      return { ok: false, hasUpdate: false, message: 'git fetch failed: ' + fetched.output.trim().slice(0, 200) }
+    }
+    const upstream = await execFileTimeout('git', ['-C', dir, 'rev-parse', '@{u}'], 10_000)
+    let remoteHash = upstream.ok ? upstream.output.trim() : ''
+    if (remoteHash.length === 0) {
+      const fetchHead = await execFileTimeout('git', ['-C', dir, 'rev-parse', 'FETCH_HEAD'], 10_000)
+      if (fetchHead.ok) remoteHash = fetchHead.output.trim()
+    }
+    if (remoteHash.length === 0) return { ok: false, hasUpdate: false, message: 'no remote ref to compare' }
+    const hasUpdate = remoteHash !== headHash
+    return {
+      ok: true,
+      hasUpdate,
+      latest: remoteHash.slice(0, 12),
+      message: hasUpdate
+        ? 'remote moved (' + headHash.slice(0, 12) + ' → ' + remoteHash.slice(0, 12) + ')'
+        : 'up to date (' + headHash.slice(0, 12) + ')',
+    }
   }
-  const upstream = await execFileTimeout('git', ['-C', dir, 'rev-parse', '@{u}'], 10_000)
-  let remoteHash = upstream.ok ? upstream.output.trim() : ''
-  if (remoteHash.length === 0) {
-    const fetchHead = await execFileTimeout('git', ['-C', dir, 'rev-parse', 'FETCH_HEAD'], 10_000)
-    if (fetchHead.ok) remoteHash = fetchHead.output.trim()
+  const branch = await execFileTimeout('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], 10_000)
+  const branchName = branch.ok ? branch.output.trim() : ''
+  if (branchName.length === 0 || branchName === 'HEAD') {
+    return { ok: false, hasUpdate: false, message: 'detached HEAD — cannot compare' }
+  }
+  const remote = await execFileTimeout('git', ['-C', dir, 'ls-remote', '--heads', 'origin'], 20_000)
+  if (!remote.ok) {
+    // Offline / unreachable: this is NOT "no update" — say so explicitly so
+    // the caller can distinguish a failed check from a fresh one (audit M12).
+    return { ok: false, hasUpdate: false, message: 'cannot reach the remote (' + remote.output.trim().slice(0, 120) + ')' }
+  }
+  let remoteHash = ''
+  for (const line of remote.output.split(/\r?\n/)) {
+    const match = /^([0-9a-f]{40,})\trefs\/heads\/(.+)$/.exec(line.trim())
+    if (match !== null && match[2] === branchName) { remoteHash = match[1]!; break }
   }
   if (remoteHash.length === 0) return { ok: false, hasUpdate: false, message: 'no remote ref to compare' }
   const hasUpdate = remoteHash !== headHash
@@ -1746,6 +1879,11 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
       execFileSync(exec.command, exec.args, { stdio: 'pipe', timeout: 3 * 60 * 1000, env: commandEnv(tool.dir), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) })
     }
     const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
+    // The #路径: subdirectory must stay inside the clone cache — `../../`
+    // would turn the whole local filesystem into an install source (audit M20).
+    if (subdir !== undefined && !resolve(pkgDir).startsWith(resolve(dest) + sep)) {
+      return { error: 'subdirectory escapes the clone cache: ' + JSON.stringify(subdir) }
+    }
     if (existsSync(join(pkgDir, 'package.json'))) {
       try {
         const manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as { name?: unknown }
@@ -1820,7 +1958,13 @@ async function npmRegistryManifest(packageName: string): Promise<NpmLatestManife
     const trimmed = config.trim()
     if (trimmed.length > 0) registry = trimmed.endsWith('/') ? trimmed : trimmed + '/'
   } catch { /* registry defaults to npmjs.org */ }
-  const url = registry + encodeURIComponent(packageName) + '/latest'
+  // Scoped packages keep their slash: encodeURIComponent would turn the `/`
+  // into %2F, which some private registries/proxies 404 (audit M4) — encode
+  // each segment instead.
+  const encodedName = packageName.startsWith('@')
+    ? packageName.split('/').map(part => encodeURIComponent(part)).join('/')
+    : encodeURIComponent(packageName)
+  const url = registry + encodedName + '/latest'
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const response = await marketplaceFetch(url, {
@@ -2396,6 +2540,12 @@ async function updateProtectedInner(profile: string, name: string): Promise<Comm
   const local = parseLocalSource(source)
   if (local !== null && isGitRepo(local)) {
     // Git-cache update: fetch + hard reset the cache to its remote ref.
+    // The previous HEAD is remembered so a failed quality gate can restore
+    // the cache (gitPullToRemote already discarded the old worktree — the
+    // audit found the old rollback merely removed the package while the
+    // cache stayed on the broken new code and the message claimed a
+    // rollback that never happened).
+    const oldHead = await execFileTimeout('git', ['-C', local, 'rev-parse', 'HEAD'], 10_000)
     const updated = await gitPullToRemote(local)
     if (!updated.ok) {
       return { ok: false, exitCode: 1, output: '[plugin-manager] git update failed: ' + updated.message }
@@ -2405,14 +2555,28 @@ async function updateProtectedInner(profile: string, name: string): Promise<Comm
     restoreInBoxBundles(profile, before)
     const issues = qualityIssues(profile, name)
     if (issues.length > 0) {
+      // Restore the cache to the previous commit, then re-install the old
+      // code so the plugin stays usable (the old version passed the gate
+      // when it was installed).
+      let restoreNote = ''
+      if (oldHead.ok && oldHead.output.trim().length > 0) {
+        const restored = await execFileTimeout('git', ['-C', local, 'reset', '--hard', oldHead.output.trim()], 20_000)
+        if (restored.ok) restoreNote = '\n[plugin-manager] cache restored to the previous commit '
+          + oldHead.output.trim().slice(0, 12)
+        else restoreNote = '\n[plugin-manager] WARNING: could not restore the cache (' + restored.output.trim().slice(0, 120) + ')'
+      }
       await runDshPlugin(profile, 'remove', [name], process.cwd())
+      const reinstall = await runDshPlugin(profile, 'add', [local], process.cwd())
       restoreInBoxBundles(profile, before)
       return {
         ok: false,
         exitCode: 1,
         output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
           + issues.map(issue => '\n  - ' + issue).join('')
-          + '\n[plugin-manager] rolled back to the previous version.',
+          + restoreNote
+          + (reinstall.ok
+            ? '\n[plugin-manager] the previous version was re-installed from the restored cache.'
+            : '\n[plugin-manager] WARNING: re-installing the previous version failed: ' + reinstall.output.trim().slice(0, 200)),
       }
     }
     return {
@@ -2495,17 +2659,35 @@ function isLoaderProvided(spec: string): boolean {
 // scanImports / scanPackageImports live in src/analyze.ts (shared with the
 // health-check engine so the gate and the analysis never drift).
 
-/** Resolve a package's entry file (exports["."].default, main, or index.js). */
+/** Collect every string target of an exports node (recursed). */
+function collectExportTargets(node: unknown, targets: string[]): void {
+  if (typeof node === 'string') {
+    if (node.length > 0) targets.push(node)
+    return
+  }
+  if (node === null || typeof node !== 'object') return
+  for (const value of Object.values(node)) collectExportTargets(value, targets)
+}
+
+/**
+ * Resolve a package's entry file. Handles every common exports shape:
+ * `"exports": "./dist/main.js"`, `"exports": {".": "./dist/main.js"}`,
+ * `{".": {"default": ...}}` and nested conditions — a line-only default
+ * lookup misjudged valid string-exports packages as "no entry" and rolled
+ * back legal installs (audit M3).
+ */
 function packageEntry(pkgDir: string, manifest: Record<string, unknown>): string | null {
-  const exportsField = manifest['exports'] as Record<string, unknown> | undefined
-  const dot = exportsField !== undefined ? exportsField['.'] as Record<string, unknown> | undefined : undefined
-  const candidates: unknown[] = [
-    dot !== undefined && typeof dot === 'object' ? (dot as Record<string, unknown>)['default'] : undefined,
-    manifest['main'],
-    manifest['module'],
-  ]
+  const candidates: string[] = []
+  const exportsField = manifest['exports']
+  if (typeof exportsField === 'string') {
+    candidates.push(exportsField)
+  } else if (exportsField !== null && typeof exportsField === 'object') {
+    const dot = (exportsField as Record<string, unknown>)['.']
+    if (dot !== undefined) collectExportTargets(dot, candidates)
+  }
+  if (typeof manifest['main'] === 'string') candidates.push(manifest['main'])
+  if (typeof manifest['module'] === 'string') candidates.push(manifest['module'])
   for (const candidate of candidates) {
-    if (typeof candidate !== 'string') continue
     const resolved = join(pkgDir, candidate)
     if (existsSync(resolved)) return resolved
   }
@@ -2869,6 +3051,8 @@ const MARKETPLACE_CACHE_VERSION = 3
  * on every fresh fetch (writeCache).
  */
 let marketplaceMemoryCache: { at: number; items: MarketplaceItem[]; source?: string } | null = null
+/** Serialization tail for concurrent marketplace refreshes (audit M13). */
+let marketplaceRefreshTail: Promise<void> = Promise.resolve()
 
 /**
  * Negative-cache TTL: after a total source failure the failure reason is
@@ -3579,6 +3763,11 @@ function readPackageInfo(dir: string, name: string): {
       if (typeof url === 'string') repository = url
     }
     if (repository === undefined && typeof manifest.homepage === 'string') repository = manifest.homepage
+    // The value lands in an <a href>: only http(s) (and git+https for
+    // repository fields) may pass — anything else (javascript:, data:) is
+    // dropped to keep a hostile manifest from scripting the settings page
+    // (audit M17).
+    if (repository !== undefined && !/^(https?:\/\/|git\+https?:\/\/)/i.test(repository)) repository = undefined
     // Install time: the node_modules link mtime (written when pnpm added it).
     let installedAt: string | undefined
     try {
@@ -3832,6 +4021,66 @@ function readJsonBody(req: NodeJS.ReadableStream & { destroy?(): void }): Promis
 }
 
 /** Write a JSON response. */
+/** Loopback host literals always trusted (the DSH web UI binds here). */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
+
+/** Extra trusted Host values via env (comma-separated hostnames / IPs). */
+function extraTrustedHosts(): Set<string> {
+  const raw = process.env.DSH_PLUGIN_MANAGER_TRUSTED_HOSTS ?? ''
+  return new Set(raw.split(',').map(s => s.trim().toLowerCase()).filter(s => s.length > 0))
+}
+
+/** Hostname part of an authority value (handles IPv6 literals). */
+function hostnameOf(authority: string): string {
+  const s = authority.trim().toLowerCase()
+  if (s.startsWith('[')) {
+    const end = s.indexOf(']')
+    return end >= 0 ? s.slice(0, end + 1) : s
+  }
+  const colon = s.lastIndexOf(':')
+  return colon >= 0 ? s.slice(0, colon) : s
+}
+
+/** Port part of an authority value ('' when absent). */
+function portOf(authority: string): string {
+  const s = authority.trim()
+  if (s.startsWith('[')) {
+    const end = s.indexOf(']')
+    return end >= 0 && s.length > end + 1 && s[end + 1] === ':' ? s.slice(end + 2) : ''
+  }
+  const colon = s.lastIndexOf(':')
+  return colon >= 0 ? s.slice(colon + 1) : ''
+}
+
+/**
+ * CSRF / DNS-rebinding fence for the REST surface.
+ *  - Host must be loopback or an explicitly trusted host (an attacker domain
+ *    resolving to 127.0.0.1 is refused — the check runs on the Host header,
+ *    which the browser cannot fake cross-origin);
+ *  - a cross-site fetch is refused (Sec-Fetch-Site);
+ *  - when an Origin header is present, its host:port must equal the request's
+ *    Host (a foreign page must not drive mutations); non-browser callers
+ *    (curl, the CLI, same-process tools) carry no Origin and pass.
+ */
+function isTrustedRequest(req: { headers?: Record<string, string | string[] | undefined> }): boolean {
+  const rawHost = String(req.headers?.['host'] ?? '')
+  if (rawHost.length === 0) return false
+  const host = hostnameOf(rawHost)
+  if (!LOOPBACK_HOSTS.has(host) && !extraTrustedHosts().has(host)) return false
+  const secFetch = String(req.headers?.['sec-fetch-site'] ?? '').toLowerCase()
+  if (secFetch === 'cross-site') return false
+  const origin = String(req.headers?.['origin'] ?? '')
+  if (origin.length === 0) return true
+  try {
+    const url = new URL(origin)
+    const originPort = url.port === '' ? (url.protocol === 'https:' ? '443' : '80') : url.port
+    const reqPort = portOf(rawHost) === '' ? '80' : portOf(rawHost)
+    return url.hostname.toLowerCase() === host && originPort === reqPort
+  } catch {
+    return false
+  }
+}
+
 function sendJson(res: { writeHead(status: number, headers: Record<string, string>): void; end(body?: string): void }, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(JSON.stringify(value))
@@ -3844,6 +4093,25 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
 
   const handler = (op: string) => async (req: NodeJS.ReadableStream & { url?: string }, res: { writeHead(status: number, headers: Record<string, string>): void; end(body?: string): void }): Promise<void> => {
     try {
+      // Trust fence (CSRF / DNS-rebinding), mirroring the official /api
+      // trust model: POST + application/json only, and the Host must be
+      // loopback (or an explicitly trusted host). A cross-site page cannot
+      // read responses but can drive mutations — same threat as the official
+      // api-request-trust.ts fence.
+      const method = (req as { method?: string }).method ?? ''
+      if (method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'POST only' } })
+        return
+      }
+      const contentType = String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['content-type'] ?? '').toLowerCase()
+      if (!contentType.includes('application/json')) {
+        sendJson(res, 415, { ok: false, error: { code: 'unsupported-media-type', message: 'application/json required' } })
+        return
+      }
+      if (!isTrustedRequest(req as { headers?: Record<string, string | string[] | undefined> })) {
+        sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'untrusted request' } })
+        return
+      }
       const body = (await readJsonBody(req)) as Record<string, unknown>
       switch (op) {
         case 'listProfiles': {
