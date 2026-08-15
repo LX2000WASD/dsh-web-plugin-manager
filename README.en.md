@@ -1,5 +1,7 @@
 # dsh-web-plugin-manager
 
+[中文](./README.md) | [English](./README.en.md)
+
 [![npm version](https://img.shields.io/npm/v/dsh-web-plugin-manager)](https://www.npmjs.com/package/dsh-web-plugin-manager)
 [![License](https://img.shields.io/npm/l/dsh-web-plugin-manager)](LICENSE)
 
@@ -69,7 +71,7 @@ When a git-source plugin needs install-time environment variables, the CLI print
 | Marketplace | Static index (topic:dsh-plugin, ~3100 entries, multi-source fallback + gzip + disk cache with freshness gating) + curated awesome overlay + dsh.so independent verification/security badges (L1-L5 + risk level); server-side installed detection (package/repository both directions, git sources, directory probes); update detection (index version comparison); same-name deduplication; 24 h cache, timeout budget, proxy support, negative caching |
 | Agent tools | plugin_status/search/install/uninstall/toggle + install guard (blocks raw commands and points at the protected surface) + injected prompt section; plugin_search free-text marketplace search (name/topics/description weighting) |
 
-Detailed feature and limitation documentation: [docs/feature-reference.md](docs/feature-reference.md) (shipped with the repo and the npm package). Chinese introduction: [README.md](README.md).
+Detailed feature and limitation documentation: [docs/feature-reference.md](docs/feature-reference.md) (shipped with the repo and the npm package).
 
 ## Architecture
 
