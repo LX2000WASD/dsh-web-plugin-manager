@@ -12,7 +12,7 @@
  * skips the quality gate and can break the whole profile at runtime.
  *
  * Usage:
- *   dshpm install <source> [--profile <name>]
+ *   dshpm install <source> [--profile <name>] [--env KEY=value ...]
  *   dshpm remove <name>    [--profile <name>]
  *   dshpm update <name>    [--profile <name>]
  *   dshpm mount <name>     [--profile <name>]
@@ -22,6 +22,8 @@
  *   dshpm version | --version
  *
  * --home <path> overrides the Harness home (default: $DSH_HOME or ~/.dsh).
+ * --env KEY=value supplies an install-time environment variable (repeatable;
+ * git-source installs pause and ask for the repository's variables otherwise).
  */
 
 import { existsSync, readFileSync, rmSync } from 'node:fs'
@@ -111,30 +113,52 @@ protected flow the Web UI and the plugin_* agent tools use.
 }
 
 /** Parse --profile/--home flags out of argv; returns [positionals, options]. */
-function parseArgs(argv: readonly string[]): { positionals: string[]; profile: string; home: string | null } {
+function parseArgs(argv: readonly string[]): { positionals: string[]; profile: string; home: string | null; envs: Record<string, string> } {
   const positionals: string[] = []
   let profile = 'web'
   let home: string | null = null
+  const envs: Record<string, string> = {}
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
     if (arg === '--profile' && i + 1 < argv.length) {
       profile = argv[++i]!
     } else if (arg === '--home' && i + 1 < argv.length) {
       home = argv[++i]!
+    } else if (arg === '--env' && i + 1 < argv.length) {
+      const pair = argv[++i]!
+      const eq = pair.indexOf('=')
+      if (eq > 0) envs[pair.slice(0, eq)] = pair.slice(eq + 1)
+      else process.stderr.write('dshpm: ignoring --env ' + pair + ' (expected KEY=value)\n')
     } else if (arg.startsWith('--profile=')) {
       profile = arg.slice('--profile='.length)
     } else if (arg.startsWith('--home=')) {
       home = arg.slice('--home='.length)
+    } else if (arg.startsWith('--env=')) {
+      const pair = arg.slice('--env='.length)
+      const eq = pair.indexOf('=')
+      if (eq > 0) envs[pair.slice(0, eq)] = pair.slice(eq + 1)
+      else process.stderr.write('dshpm: ignoring --env ' + pair + ' (expected KEY=value)\n')
     } else {
       positionals.push(arg)
     }
   }
-  return { positionals, profile, home }
+  return { positionals, profile, home, envs }
 }
 
-async function cmdInstall(profile: string, source: string): Promise<number> {
-  const result = await installWithSource(null, profile, source)
+async function cmdInstall(profile: string, source: string, envs: Record<string, string>): Promise<number> {
+  const result = await installWithSource(null, profile, source, envs)
   process.stdout.write(result.output + '\n')
+  if (result.awaiting !== undefined) {
+    // Non-interactive: list the paused variables and how to supply them.
+    process.stdout.write(
+      '[dshpm] install paused: this repository requests the following environment variable(s): '
+      + result.awaiting.questions.map(q => q.id).join(', ')
+      + '\n[dshpm] re-run with --env KEY=value for each variable (omit a variable to skip it), e.g.:\n'
+      + '  dshpm install ' + source + ' ' + result.awaiting.questions.map(q => '--env ' + q.id + '=<value>').join(' ')
+      + '\n',
+    )
+    return 1
+  }
   return result.ok ? 0 : 1
 }
 
@@ -324,7 +348,7 @@ function cmdAnalyze(profile: string): number {
 }
 
 async function main(): Promise<number> {
-  const { positionals, profile, home } = parseArgs(process.argv.slice(2))
+  const { positionals, profile, home, envs } = parseArgs(process.argv.slice(2))
   if (home !== null) process.env.DSH_HOME = home
   const command = positionals[0]
   if (command === undefined || command === 'help' || command === '--help' || command === '-h') {
@@ -348,7 +372,7 @@ async function main(): Promise<number> {
       process.stdout.write('dshpm install: missing source (npm name, github:user/repo, git URL, tarball, or local path)\n')
       return 1
     }
-    return await cmdInstall(profile, source)
+    return await cmdInstall(profile, source, envs)
   }
   if (command === 'remove') {
     const name = positionals[1]
