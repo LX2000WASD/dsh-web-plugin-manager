@@ -53,7 +53,7 @@ import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
 import {
   addBlockedRepo, detectRepoType, installPreset, installSkill, isUnderRoot, loadBlockedRepos,
-  loadKindRecords, normalizeRepoRef, presetsDirPath, removeBlockedRepo, removeKindRecord,
+  loadKindRecords, normalizeRepoRef, presetsDirPath, pruneGhostRecords, removeBlockedRepo, removeKindRecord,
   saveKindRecord, skillsDirPath, slugDirName, type KindRecord,
 } from './kinds.ts'
 import { marketplaceFetch } from './net.ts'
@@ -981,10 +981,12 @@ export class PluginManagerService extends Service {
   }
 
   /**
-   * Kind-install overview for the Manage tab: install records plus the
-   * on-disk skill / preset directories (including non-record installs).
+   * Kind-install overview for the Skills & Presets page: install records
+   * (ghost records pruned) plus the on-disk skill / preset directories
+   * (including non-record installs).
    */
   async listKinds(): Promise<KindListView> {
+    await pruneGhostRecords()
     const records = await loadKindRecords()
     return {
       records: [...records.entries()].map(([repo, record]) => ({ repo, ...record })),
@@ -1039,6 +1041,13 @@ export class PluginManagerService extends Service {
       }
     }
     if (record.type === 'cordis-plugin') {
+      if (profile.length === 0) {
+        return {
+          ok: false,
+          exitCode: 1,
+          output: 'cordis plugin uninstall needs a target profile — use the Manage tab or dshpm uninstall-kind --profile <name>',
+        }
+      }
       const names = record.names !== null && record.names.length > 0
         ? record.names
         : record.name !== null ? [record.name] : []
@@ -2857,6 +2866,7 @@ function flagItemInstalled(item: MarketplaceItem, index: InstalledIndex | null, 
  * thousands of entries; serial stat/read would stall the first paint).
  */
 async function flagMarketplaceItems(items: readonly MarketplaceItem[], profile: string): Promise<MarketplaceItem[]> {
+  await pruneGhostRecords()
   const index = buildInstalledIndex(profile)
   const records = await loadKindRecords()
   const out = new Array<MarketplaceItem>(items.length)

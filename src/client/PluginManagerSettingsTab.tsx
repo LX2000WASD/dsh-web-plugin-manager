@@ -8,7 +8,7 @@ import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'rea
 import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  AnalyzeResult, CommandResult, KindListView, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
+  AnalyzeResult, CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
@@ -24,8 +24,6 @@ export interface PluginManagerTabInjected {
   readonly checkUpdates: (profile: string) => Promise<UpdateCheckResult>
   readonly update: (profile: string, name: string) => Promise<CommandResult>
   readonly analyze: (profile: string) => Promise<AnalyzeResult>
-  readonly listKinds: () => Promise<KindListView>
-  readonly uninstallKind: (profile: string, repo: string) => Promise<CommandResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -153,7 +151,7 @@ function formatTime(iso: string): string {
 }
 
 /** Render the management tab. */
-export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, listKinds, uninstallKind, t }: PluginManagerTabProps): ReactNode {
+export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, t }: PluginManagerTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
   const [state, setState] = useState<ViewState>({ status: 'loading' })
@@ -164,15 +162,9 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const [checking, setChecking] = useState(false)
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
-  const [kinds, setKinds] = useState<KindListView | null>(null)
-
-  /** Load the skills/presets overview (profile-independent). */
-  const reloadKinds = (): void => {
-    void injected.current.listKinds().then(setKinds, () => { /* keep previous */ })
-  }
 
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
-  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, listKinds, uninstallKind })
+  const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze })
 
   const load = (profile: string): void => {
     if (profile.length === 0) return
@@ -199,7 +191,6 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     }, (error: unknown) => {
       setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
     })
-    reloadKinds()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -296,38 +287,6 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 
   const [expandedPkg, setExpandedPkg] = useState<string | null>(null)
   const [outputOpen, setOutputOpen] = useState(true)
-
-  /** Delete a kind install (skill/preset directories + record; cordis via its packages). */
-  const onKindRemove = async (repo: string): Promise<void> => {
-    if (!window.confirm(t('confirmUninstall'))) return
-    setBusy('kind:' + repo)
-    try {
-      const result = await injected.current.uninstallKind(selected, repo)
-      setOutput('$ uninstall ' + repo + '\n' + result.output)
-      reloadKinds()
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  /** Re-pull a github-sourced kind install (re-clone + copy over). */
-  const onKindReinstall = async (repo: string): Promise<void> => {
-    if (selected.length === 0) return
-    setBusy('kind:' + repo)
-    try {
-      const result = await injected.current.install(selected, 'https://github.com/' + repo)
-      setOutput('$ install ' + repo + '\n' + result.output)
-      reloadKinds()
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  /** Whether a record key looks like a github owner/repo (reinstallable). */
-  const isGithubKey = (repo: string): boolean => /^[a-z0-9._-]+\/[a-z0-9._-]+$/i.test(repo) && !repo.includes('\\')
-
-  const kindLabel = (type: string): string =>
-    type === 'skill' ? t('typeSkill') : type === 'agent-preset' ? t('typePreset') : type === 'cordis-plugin' ? t('typePlugin') : type
 
   const snapshot = state.status === 'ready' ? state.snapshot : undefined
   const packages = useMemo(() => snapshot?.packages ?? [], [snapshot])
@@ -538,49 +497,6 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                 </li>
               ))}
             </ul>
-          )}
-
-          <div style={styles.heading}>
-            <h3 style={styles.headingTitle}>{t('kindsTitle')}</h3>
-            <span style={styles.headingCount}>{(kinds?.records.length ?? 0)}</span>
-          </div>
-          <p style={styles.status}>{t('kindsHint')}</p>
-          {kinds === null || (kinds.records.length === 0 && kinds.skills.length === 0 && kinds.presets.length === 0) ? (
-            <p style={styles.status}>{t('kindsNone')}</p>
-          ) : (
-            <>
-              {kinds.records.map(record => (
-                <div key={record.repo} style={styles.card}>
-                  <div style={styles.cardRow}>
-                    <span style={styles.cardTitle} title={record.repo}>{record.repo}</span>
-                    <span style={styles.tag}>{kindLabel(record.type)}</span>
-                    {record.names !== null && record.names.length > 0 && (
-                      <span style={styles.cardSub} title={record.names.join(', ')}>{record.names.join(', ')}</span>
-                    )}
-                    <span style={{ marginLeft: 'auto' }}>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy !== null}
-                        onClick={() => void onKindReinstall(record.repo)}
-                        title={record.repo}
-                      >
-                        {busy === 'kind:' + record.repo ? t('installing') : t('reinstallButton')}
-                      </Button>
-                      <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onKindRemove(record.repo)}>
-                        {t('uninstallButton')}
-                      </Button>
-                    </span>
-                  </div>
-                </div>
-              ))}
-              {kinds.skills.length > 0 && (
-                <p style={styles.status}>{t('skillsDirLabel')}: {kinds.skills.join(', ')}</p>
-              )}
-              {kinds.presets.length > 0 && (
-                <p style={styles.status}>{t('presetsDirLabel')}: {kinds.presets.join(', ')}</p>
-              )}
-            </>
           )}
 
           {output.length > 0 && (

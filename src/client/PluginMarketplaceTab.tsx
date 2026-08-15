@@ -378,7 +378,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
               {rendered.map((item) => {
                 const sourceLabel = item.packageName !== undefined && item.packageName.length > 0 ? t('sourceNpm') : t('sourceGit')
                 const kindLabel = item.installedKind === 'skill' ? t('typeSkill')
-                  : item.installedKind === 'agent-preset' ? t('typePreset')
+                  : item.installedKind === 'agent-preset' ? t('typeAgent')
                     : t('typePlugin')
                 return (
                   <li key={item.name} style={styles.card}>

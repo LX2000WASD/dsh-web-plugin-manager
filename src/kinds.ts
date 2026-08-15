@@ -343,6 +343,43 @@ export async function removeKindRecord(repoKey: string): Promise<void> {
   })
 }
 
+/** Whether a record's install target still exists on disk. */
+function kindRecordAlive(record: KindRecord): boolean {
+  if (record.type === 'skill' || record.type === 'agent-preset') {
+    const root = record.type === 'skill' ? skillsDirPath() : presetsDirPath()
+    const names = record.names !== null && record.names.length > 0
+      ? record.names
+      : record.name !== null ? [record.name] : []
+    return names.some(name => existsSync(join(root, name)))
+      || (record.location !== null && record.location !== root && existsSync(record.location))
+  }
+  if (record.type === 'cordis-plugin') {
+    return record.location !== null && existsSync(record.location)
+  }
+  return true
+}
+
+/**
+ * Drop ghost records: installs whose directories were removed OUTSIDE the
+ * manager (manual `rm`, another tool, a cleaned-up temp dir). The in-process
+ * record cache cannot notice external deletions, so every read surface
+ * (listKinds, marketplace installed flags) prunes first — otherwise deleted
+ * skills/presets keep showing as installed forever.
+ */
+export async function pruneGhostRecords(): Promise<void> {
+  await enqueueKind(async () => {
+    const records = await loadKindRecords()
+    let changed = false
+    for (const [key, record] of records) {
+      if (!kindRecordAlive(record)) {
+        records.delete(key)
+        changed = true
+      }
+    }
+    if (changed) writeKindRecords(records)
+  })
+}
+
 // ── Blocked repos (detected non-installable → filtered from the marketplace) ──
 
 export function blockedReposFile(): string {

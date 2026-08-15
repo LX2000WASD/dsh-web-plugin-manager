@@ -24,6 +24,9 @@ import {
   PluginEnvironmentsTab, type PluginEnvironmentsTabInjected,
 } from './PluginEnvironmentsTab.tsx'
 import {
+  PluginKindsTab, type PluginKindsTabInjected,
+} from './PluginKindsTab.tsx'
+import {
   PluginMarketplaceTab, type PluginMarketplaceTabInjected,
 } from './PluginMarketplaceTab.tsx'
 import { en, zh, type PluginManagerLocaleKey } from './locales.ts'
@@ -31,6 +34,7 @@ import { en, zh, type PluginManagerLocaleKey } from './locales.ts'
 export type { PluginCatalogTabInjected, PluginCatalogTabProps } from './PluginCatalogTab.tsx'
 export type { PluginManagerTabInjected, PluginManagerTabProps } from './PluginManagerSettingsTab.tsx'
 export type { PluginEnvironmentsTabInjected, PluginEnvironmentsTabProps } from './PluginEnvironmentsTab.tsx'
+export type { PluginKindsTabInjected, PluginKindsTabProps } from './PluginKindsTab.tsx'
 export type { PluginMarketplaceTabInjected, PluginMarketplaceTabProps } from './PluginMarketplaceTab.tsx'
 export type { PluginManagerLocaleKey } from './locales.ts'
 
@@ -88,8 +92,6 @@ export function apply(ctx: ClientContext): void {
     checkUpdates: (profile) => call<UpdateCheckResult>('checkUpdates', { profile }),
     update: (profile, name) => call<CommandResult>('update', { profile, name }),
     analyze: (profile) => call<AnalyzeResult>('analyze', { profile }),
-    listKinds: () => call<KindListView>('listKinds', {}),
-    uninstallKind: (profile, repo) => call<CommandResult>('uninstallKind', { profile, repo }),
   })
 
   // Shadow the official read-only inventory: same slot id 'all', lower
@@ -131,6 +133,25 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: environmentsInjected,
   }, PluginEnvironmentsTab))
+
+  // Skills & Presets: a first-level settings entry above the marketplace.
+  // Profile-less: skills/presets live in the global harness roots. Re-pull
+  // and uninstall call the host install/uninstallKind ops with an empty
+  // profile — the skill/preset branches never touch profile state.
+  const kindsInjected = (): PluginKindsTabInjected => ({
+    kinds: () => call<KindListView>('listKinds', {}),
+    uninstall: (repo) => call<CommandResult>('uninstallKind', { profile: '', repo }),
+    reinstall: (repo) => call<CommandResult>('install', { profile: '', spec: 'https://github.com/' + repo }),
+  })
+
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'kinds',
+    order: 15,
+    label: () => t('kindsTab'),
+    locale: NS,
+    inject: kindsInjected,
+  }, PluginKindsTab))
 
   // Marketplace: a first-level settings entry (after the official Plugins).
   const marketplaceInjected = (): PluginMarketplaceTabInjected => ({
