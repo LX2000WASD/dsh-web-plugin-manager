@@ -61,6 +61,8 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - **已安装判定在服务端**（每请求按目标 profile 计算，12 并发池标注）：① npm 包名（registry pkg_name / 仓库名）② manifest `repository` 双向匹配（同名不同仓库不误判）③ git 缓存源 owner-repo 身份 ④ `~/.dsh/skills|.agent-presets` 目录探测；返回 `installed` / `installedVersion` / `latestVersion`（索引版本字段）/ `updateAvailable`（仅严格更高才提示，回滚不误报）
 - **同名包冲突消解**：同一 pkg_name 只保留一条（已安装优先、否则星数高者），`dropped` 计数透传前端提示「N 个同名包已隐藏」
 - 卡片动作：未安装 → 安装；已装无新版 → 绿色「已安装 vX」；已装有新版 → 橙色「更新」（npm 包走受保护 update 链路重写 specifier + 质量门 + 回滚，git-only 源重装）；星数排序时已安装置顶
+- 卡片布局：标题省略号不挤占按钮区；短 meta 行（星数缩写 2.5K / 来源 npm包|git仓库 / 类型占位）；TAG 行（审核状态 + 功能分类本地化）；单/双列切换（localStorage 记忆）；**增量渲染**——首屏 120 条 + 触底加载更多 + `content-visibility: auto`（~3000 条列表不卡顿，无需服务端分页）
+- **缓存**：进程内存镜像（listing 与 profile 无关，切 profile 只重算已安装标记，零磁盘 IO）+ 磁盘 24h 缓存 + 失败负缓存 5min + registry 原始索引缓存；`refresh=1` 是唯一强制网络路径
 - **网络健壮性**：每请求 15s 超时（AbortSignal.timeout）；支持 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`（undici ProxyAgent——Node 全局 fetch 会丢弃 dispatcher 选项，市场请求必须走 undici 自身 fetch）；失败原因负缓存 5 分钟（`marketplace-failure.json`，避免每次进页重跑全量 GitHub 往返）；索引全挂且无缓存时空列表直接显示失败原因
 - GitHub API 未认证限流 60/h：仅 catalog 独有条目的星数富化会打 API（量小）；403/429 停止富化（星数降级用上次快照元数据），列表本身不受影响；raw 兜底源可达时列表保持非空
 - 系统代理/规则模式加速器对 Node 进程无效（undici 不读系统代理）——市场为空且此类加速器用户，把代理地址写进环境变量，或改 TUN/全局模式

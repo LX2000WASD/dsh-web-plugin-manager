@@ -123,6 +123,13 @@ export const zh = {
   catTool: '通用工具',
   catResource: '聚合资源',
   catOther: '其他',
+  // 卡片短 meta：来源 / 类型（类型在 Phase B 多类型安装落地后填充真实值）。
+  sourceNpm: 'npm包',
+  sourceGit: 'git仓库',
+  sourceLocal: '本地',
+  typePlugin: '插件',
+  colsOne: '单列',
+  colsTwo: '双列',
   noMarketItems: '没有市场条目。',
   marketSourceError: '市场数据源错误',
   marketSourceNote: '提示',
@@ -154,6 +161,7 @@ export const zh = {
   loadOrder: '建议加载顺序',
   marketInstalled: '已安装',
   marketDropped: '{n} 个同名 npm 包已隐藏（同一包只能安装一个）',
+  marketMore: '加载更多',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -280,6 +288,13 @@ export const en = {
   catTool: 'Utility',
   catResource: 'Resources',
   catOther: 'Other',
+  // 卡片短 meta：来源 / 类型（类型在 Phase B 多类型安装落地后填充真实值）。
+  sourceNpm: 'npm pkg',
+  sourceGit: 'git repo',
+  sourceLocal: 'local',
+  typePlugin: 'Plugin',
+  colsOne: '1 column',
+  colsTwo: '2 columns',
   noMarketItems: 'No marketplace entries.',
   marketSourceError: 'Marketplace source error',
   marketSourceNote: 'Note',
@@ -311,4 +326,5 @@ export const en = {
   loadOrder: 'Suggested load order',
   marketInstalled: 'installed',
   marketDropped: '{n} duplicate package(s) hidden (one npm package can only be installed once)',
+  marketMore: 'Load more',
 } satisfies Record<PluginManagerLocaleKey, string>

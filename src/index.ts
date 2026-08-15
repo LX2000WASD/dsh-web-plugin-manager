@@ -506,6 +506,12 @@ export class PluginManagerService extends Service {
    *   4. GitHub search API — only when every index source is unusable
    *      (partial by design, never persisted).
    *
+   * Caching: a 24h disk cache (merged items, profile-independent) plus an
+   * in-process mirror so profile switches (which only recompute installed
+   * flags) never re-read the ~1.7MB file; a 5-minute negative cache records
+   * total source failure; the search fallback never persists. refresh=1 is
+   * the only way to force a network round-trip.
+   *
    * Installed flags are computed server-side per request for the queried
    * profile (package-name / repository / git-cache / skills+presets probing),
    * so "installed" is correct even for plugins installed before the manager.
@@ -516,6 +522,15 @@ export class PluginManagerService extends Service {
     const failurePath = join(cacheDir, 'marketplace-failure.json')
     mkdirSync(cacheDir, { recursive: true })
     const readCache = (): { fetchedAt?: string; items: MarketplaceItem[]; source?: string } => {
+      // In-process mirror first: the listing is profile-independent, so
+      // profile switches (flag recomputation) skip the disk read entirely.
+      if (marketplaceMemoryCache !== null && Date.now() - marketplaceMemoryCache.at < MARKETPLACE_TTL) {
+        return {
+          fetchedAt: new Date(marketplaceMemoryCache.at).toISOString(),
+          items: marketplaceMemoryCache.items,
+          source: marketplaceMemoryCache.source,
+        }
+      }
       try {
         const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { version?: unknown; fetchedAt?: unknown; items?: unknown; source?: unknown }
         // Cache format changed (item shape / source layout): ignore old files.
@@ -528,6 +543,7 @@ export class PluginManagerService extends Service {
       return { items: [] }
     }
     const writeCache = (items: MarketplaceItem[], source: string): void => {
+      marketplaceMemoryCache = { at: Date.now(), items, source }
       writeFileSync(cachePath, JSON.stringify({
         version: MARKETPLACE_CACHE_VERSION,
         fetchedAt: new Date().toISOString(),
@@ -2203,6 +2219,14 @@ function probePort(port: number): Promise<boolean> {
 /** Marketplace snapshot TTL and cache format version. */
 const MARKETPLACE_TTL = 24 * 60 * 60 * 1000
 const MARKETPLACE_CACHE_VERSION = 3
+
+/**
+ * In-process marketplace mirror: the merged listing is profile-independent,
+ * so profile switches (which only recompute installed flags) read this
+ * instead of the ~1.7MB disk file. TTL mirrors the disk cache; invalidated
+ * on every fresh fetch (writeCache).
+ */
+let marketplaceMemoryCache: { at: number; items: MarketplaceItem[]; source?: string } | null = null
 
 /**
  * Negative-cache TTL: after a total source failure the failure reason is
