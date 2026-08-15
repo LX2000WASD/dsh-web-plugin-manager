@@ -144,6 +144,8 @@ interface ResolvedCommand {
   readonly command: string
   /** Directory to prepend to child PATH, or null when already on PATH. */
   readonly dir: string | null
+  /** Win32 only: true when command is a cmd/bat shim that spawn must run through a shell. */
+  readonly shell?: boolean
 }
 
 /** Absolute path of `name` on PATH (POSIX walk; no shell involved). */
@@ -189,8 +191,19 @@ function resolveCommand(name: string): ResolvedCommand {
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
     })
-    const hit = output.split(/\r?\n/).map(line => line.trim()).find(line => line.length > 0)
-    if (hit !== undefined) return { command: hit, dir: dirname(hit) }
+    const hits = output.split(String.fromCharCode(10)).map(line => line.trim()).filter(line => line.length > 0)
+    // npm/nvm shims live as BOTH the bare script and the .cmd wrapper: the
+    // extensionless file cannot be spawned (ENOENT) — prefer an executable
+    // extension, and flag cmd/bat shims so spawns go through a shell.
+    const hit = hits.find(h => h.toLowerCase().endsWith('.exe'))
+      ?? hits.find(h => h.toLowerCase().endsWith('.cmd'))
+      ?? hits.find(h => h.toLowerCase().endsWith('.bat'))
+      ?? hits[0]
+    if (hit !== undefined) {
+      const lower = hit.toLowerCase()
+      const shell = lower.endsWith('.cmd') || lower.endsWith('.bat')
+      return { command: hit, dir: dirname(hit), ...(shell ? { shell: true } : {}) }
+    }
   } catch { /* not on PATH: let the caller surface the error */ }
   return { command: name, dir: null }
 }
@@ -216,7 +229,7 @@ function runDshPlugin(
     execFile(
       tool.command,
       ['plugin', '--profile', profile, verb, ...args],
-      { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: commandEnv(tool.dir) },
+      { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: commandEnv(tool.dir), ...(tool.shell === true ? { shell: true } : {}) },
       (error, stdout, stderr) => {
         const output = [stdout, stderr].filter(Boolean).join('\n')
         if (error === null) {
@@ -403,6 +416,7 @@ export class PluginManagerService extends Service {
           stdio: 'ignore',
           windowsHide: true,
           env: commandEnv(tool.dir),
+          ...(tool.shell === true ? { shell: true } : {}),
         })
         // Swallow async spawn errors (e.g. dsh missing) — reported below.
         child.on('error', (error) => { spawnError = error.message })
@@ -1006,7 +1020,7 @@ function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number
     execFile(
       tool.command,
       [...args],
-      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: commandEnv(tool.dir) },
+      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: commandEnv(tool.dir), ...(tool.shell === true ? { shell: true } : {}) },
       (error, stdout, stderr) => {
         const output = [stdout, stderr].filter(Boolean).join('\n')
         if (error === null) resolve({ ok: true, output })
@@ -1020,7 +1034,7 @@ function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number
 function isGitRepo(path: string): boolean {
   try {
     const tool = resolveCommand('git')
-    execFileSync(tool.command, ['-C', path, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 5_000, windowsHide: true, env: commandEnv(tool.dir) })
+    execFileSync(tool.command, ['-C', path, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 5_000, windowsHide: true, env: commandEnv(tool.dir), ...(tool.shell === true ? { shell: true } : {}) })
     return true
   } catch {
     return false
@@ -1258,7 +1272,7 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
       if (ref !== undefined) args.push('-b', ref)
       args.push('--depth', '1', repo, dest)
       const tool = resolveCommand('git')
-      execFileSync(tool.command, args, { stdio: 'pipe', timeout: 3 * 60 * 1000, env: commandEnv(tool.dir) })
+      execFileSync(tool.command, args, { stdio: 'pipe', timeout: 3 * 60 * 1000, env: commandEnv(tool.dir), ...(tool.shell === true ? { shell: true } : {}) })
     }
     const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
     if (existsSync(join(pkgDir, 'package.json'))) {
@@ -1314,6 +1328,7 @@ async function npmRegistryLatest(packageName: string): Promise<string | undefine
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
       env: commandEnv(tool.dir),
+      ...(tool.shell === true ? { shell: true } : {}),
     })
     const trimmed = config.trim()
     if (trimmed.length > 0) registry = trimmed.endsWith('/') ? trimmed : trimmed + '/'
