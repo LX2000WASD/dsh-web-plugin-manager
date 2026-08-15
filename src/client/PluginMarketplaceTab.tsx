@@ -458,7 +458,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
                         </span>
                       )}
                       {item.security !== undefined && item.security.status !== 'skipped' && (
-                        <span style={securityBadge(t, item.security).style} title={item.security.status}>
+                        <span style={{ ...styles.tag, ...securityBadge(t, item.security).style }} title={item.security.status}>
                           {securityBadge(t, item.security).text}
                         </span>
                       )}
