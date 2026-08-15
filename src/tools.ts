@@ -68,11 +68,13 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
     // Bundle layers: enabled unless a matching entry is disabled.
     for (const bundle of snap.profile.bundles) {
       const entry = snap.entries.find(e => e.moduleName === bundle)
+      // phase must never be undefined: tool outputs are lossless-JSON
+      // validated and an undefined-valued key fails the round-trip check.
       rows.push({
         id: bundle,
         kind: 'bundle',
         enabled: entry === undefined ? true : entry.enabled,
-        ...(entry !== undefined ? { phase: entry.fiberPhase ?? undefined } : {}),
+        ...(entry !== undefined && entry.fiberPhase !== null ? { phase: entry.fiberPhase } : {}),
       })
     }
     // Insert rows: live-mounted non-bundle plugins.
@@ -88,7 +90,7 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
         kind: 'entry',
         name: entry.moduleName,
         enabled: entry.enabled,
-        phase: entry.fiberPhase ?? (entry.unmounted ? 'unmounted' : undefined),
+        ...(entry.fiberPhase !== null ? { phase: entry.fiberPhase } : entry.unmounted ? { phase: 'unmounted' } : {}),
       })
     }
     return rows
