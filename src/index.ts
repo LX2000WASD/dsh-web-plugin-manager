@@ -808,6 +808,10 @@ export class PluginManagerService extends Service {
    * profile is running.
    */
   async mount(profile: string, packageName: string): Promise<MutationResult> {
+    return enqueueMutation(() => this.mountInner(profile, packageName))
+  }
+
+  private async mountInner(profile: string, packageName: string): Promise<MutationResult> {
     const dir = profileDir(profile)
     if (!existsSync(dir)) return { ok: false, message: `profile not found: ` + profile }
     const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
@@ -850,6 +854,10 @@ export class PluginManagerService extends Service {
 
   /** Enable or disable one plugin row via the managed patch block (live). */
   async setEnabled(profile: string, entryId: string, enabled: boolean): Promise<MutationResult> {
+    return enqueueMutation(() => this.setEnabledInner(profile, entryId, enabled))
+  }
+
+  private async setEnabledInner(profile: string, entryId: string, enabled: boolean): Promise<MutationResult> {
     const dir = profileDir(profile)
     if (!existsSync(dir)) return { ok: false, message: `profile not found: ${profile}` }
     // entryId is the include-tree row id (stable). Random-mount ids (8-hex)
@@ -1084,6 +1092,10 @@ export class PluginManagerService extends Service {
 
   /** Remove one managed insert row (non-bundle plugin, live unmount). */
   async removeInsert(profile: string, rowId: string): Promise<MutationResult> {
+    return enqueueMutation(() => this.removeInsertInner(profile, rowId))
+  }
+
+  private async removeInsertInner(profile: string, rowId: string): Promise<MutationResult> {
     const dir = profileDir(profile)
     if (!existsSync(dir)) return { ok: false, message: `profile not found: ${profile}` }
     try {
@@ -1660,13 +1672,36 @@ function discoverWorkspacePackages(root: string): string[] {
   return found
 }
 /**
+ * Global mutation mutex (process-local): profile-changing operations
+ * (install / remove / update / toggle / mount / insert-row edits) run
+ * strictly serially. Without it, concurrent pnpm calls rewrite the profile
+ * manifest from their own snapshots (lost dependencies), concurrent patch
+ * edits lose rows, and the quality gate scans node_modules mid-change —
+ * all three collapse to no-ops under serialization. The kind-record and
+ * blocklist stores already serialize their own files.
+ *
+ * Process-local only: the dshpm CLI is a separate process (cross-process
+ * locking is out of scope — concurrent CLI mutations are rare).
+ */
+let mutationQueue: Promise<unknown> = Promise.resolve()
+function enqueueMutation<T>(task: () => Promise<T>): Promise<T> {
+  const run = mutationQueue.then(task, task)
+  mutationQueue = run.catch(() => { /* a failed mutation must not wedge the queue */ })
+  return run
+}
+
+/**
  * Install with source preparation: git sources (not published on npm,
  * workspace subpackages) are cloned into a cache directory and installed
  * from there — the "official path" for repositories that never reached the
  * registry — with npm-first when the cloned package is published. ctx null
- * = out-of-process caller (the dshpm CLI).
+ * = out-of-process caller (the dshpm CLI). Serialized by the mutation mutex.
  */
-export async function installWithSource(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
+export function installWithSource(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
+  return enqueueMutation(() => installWithSourceInner(ctx, profile, spec))
+}
+
+async function installWithSourceInner(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
   // npm-first BEFORE cloning for plain GitHub URLs (the marketplace shape:
   // repo name == npm name). A pinned ref / subdir requests a specific git
   // state, so those still clone. On slow networks the registry /latest
@@ -2021,9 +2056,14 @@ export async function installProtected(ctx: Context | null, profile: string, spe
  * Shared remove path: pnpm remove through the official CLI, preserving
  * in-box bundles and cleaning up the managed insert rows of the removed
  * package. ctx null = out-of-process caller (the dshpm CLI); the file
- * removal is identical, only the live unmount is skipped.
+ * removal is identical, only the live unmount is skipped. Serialized by the
+ * mutation mutex.
  */
-export async function removeProtected(ctx: Context | null, profile: string, name: string): Promise<CommandResult> {
+export function removeProtected(ctx: Context | null, profile: string, name: string): Promise<CommandResult> {
+  return enqueueMutation(() => removeProtectedInner(ctx, profile, name))
+}
+
+async function removeProtectedInner(ctx: Context | null, profile: string, name: string): Promise<CommandResult> {
   const before = readBundles(profile)
   const result = await runDshPlugin(profile, 'remove', [name], process.cwd())
   if (result.ok) {
@@ -2037,9 +2077,14 @@ export async function removeProtected(ctx: Context | null, profile: string, name
  * Shared update path for one installed package (source-kind contract as on
  * the service method): npm @latest reinstall / git-cache fetch+reset /
  * git-URL re-resolve, each with the quality gate and rollback. ctx-free —
- * usable from the dshpm CLI without a live host.
+ * usable from the dshpm CLI without a live host. Serialized by the
+ * mutation mutex.
  */
-export async function updateProtected(profile: string, name: string): Promise<CommandResult> {
+export function updateProtected(profile: string, name: string): Promise<CommandResult> {
+  return enqueueMutation(() => updateProtectedInner(profile, name))
+}
+
+async function updateProtectedInner(profile: string, name: string): Promise<CommandResult> {
   const dir = profileDir(profile)
   if (!existsSync(dir)) return { ok: false, exitCode: 1, output: 'profile not found: ' + profile }
   const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
