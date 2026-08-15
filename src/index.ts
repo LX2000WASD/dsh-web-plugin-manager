@@ -1835,6 +1835,17 @@ function readmeFirstLines(dir: string): string {
  * are missing from the installed directory — the package is present but will
  * not load. Source-only repos that never committed build artifacts land here.
  */
+/**
+ * Install-time peer warning note: pnpm warns about "missing peer" for the
+ * official @deepseek-ai/* packages because the profile does not declare them
+ * — the host provides them one level up (profiles/node_modules) and every
+ * plugin shares that single instance. The warning is harmless noise; the
+ * note explains it at the exact moment the user sees it.
+ */
+const PEER_WARNING_NOTE = '\n[plugin-manager] note: pnpm "missing peer @deepseek-ai/*" warnings are harmless — '
+  + 'the DSH host provides these packages in the shared profiles/node_modules; do NOT install them into the profile '
+  + '(a second copy would split module identity and break the plugin).'
+
 function entryWarning(profile: string, packageName: string): string {
   const pkgDir = join(profileDir(profile), 'node_modules', packageName)
   try {
@@ -1989,7 +2000,7 @@ export async function installProtected(ctx: Context | null, profile: string, spe
     return {
       ...result,
       installed: [installed],
-      output: result.output + analysisNote + entryNote
+      output: result.output + analysisNote + entryNote + PEER_WARNING_NOTE
         + '\n[plugin-manager] bundle plugin added to the layer stack — restart the profile to load it (the catalog will show it then).',
     }
   }
@@ -2041,7 +2052,7 @@ export async function installProtected(ctx: Context | null, profile: string, spe
       installed: [installed],
       output: result.output
         + "\n[plugin-manager] quality check passed; mounted " + installed + " as insert row " + rowId + (live.ok ? " (applied live)" : " (file updated; " + (live.message ?? 'mounts on next restart') + ")")
-        + entryNote,
+        + entryNote + PEER_WARNING_NOTE,
     }
   } catch (error: unknown) {
     return {
