@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
-  AnalyzeResult, CommandResult, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
+  AnalyzeResult, CommandResult, KindListView, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
   UpdateCheckResult,
 } from '../types.ts'
 import {
@@ -88,6 +88,8 @@ export function apply(ctx: ClientContext): void {
     checkUpdates: (profile) => call<UpdateCheckResult>('checkUpdates', { profile }),
     update: (profile, name) => call<CommandResult>('update', { profile, name }),
     analyze: (profile) => call<AnalyzeResult>('analyze', { profile }),
+    listKinds: () => call<KindListView>('listKinds', {}),
+    uninstallKind: (profile, repo) => call<CommandResult>('uninstallKind', { profile, repo }),
   })
 
   // Shadow the official read-only inventory: same slot id 'all', lower
@@ -135,6 +137,7 @@ export function apply(ctx: ClientContext): void {
     marketplace: (refresh, profile) => call<MarketplaceResult>('marketplace', { refresh, profile }),
     install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
     update: (profile, name) => call<CommandResult>('update', { profile, name }),
+    unblock: (repo) => call<MutationResult>('unblockRepo', { repo }),
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
   })
 

@@ -38,7 +38,7 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
 import type {
-  CommandResult, InsertRow, ManagedPackage, MarketplaceItem, MarketplaceResult,
+  CommandResult, InsertRow, KindListView, ManagedPackage, MarketplaceItem, MarketplaceResult,
   MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry, StartResult,
   UpdateCheckResult, UpdateInfo,
 } from './types.ts'
@@ -51,9 +51,14 @@ import { analyzeProfile, scanImports, scanNodeModulesNames, scanPackageImports }
 import type { AnalyzeIssue, AnalyzeResult } from './types.ts'
 import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
+import {
+  addBlockedRepo, detectRepoType, installPreset, installSkill, isUnderRoot, loadBlockedRepos,
+  loadKindRecords, normalizeRepoRef, presetsDirPath, removeBlockedRepo, removeKindRecord,
+  saveKindRecord, skillsDirPath, slugDirName, type KindRecord,
+} from './kinds.ts'
 import { marketplaceFetch } from './net.ts'
 import {
-  fetchRegistryRepos, fetchSearchFallback, readRegistryCache, writeRegistryCache,
+  fetchRegistryRepos, fetchSearchFallback, functionalTopics, readRegistryCache, writeRegistryCache,
   type RegistryRepo,
 } from './registry.ts'
 import { registerTools } from './tools.ts'
@@ -569,11 +574,12 @@ export class PluginManagerService extends Service {
       } catch { /* failure recording is best-effort */ }
     }
     // Serve the cache unless it is missing, stale (>24h), or refresh is forced.
+    const blocked = await loadBlockedRepos()
     if (!refresh) {
       const cached = readCache()
       const fetchedAt = Date.parse(cached.fetchedAt ?? '')
       if (!Number.isNaN(fetchedAt) && Date.now() - fetchedAt < MARKETPLACE_TTL && cached.items.length > 0) {
-        const { items, dropped } = dedupeMarketplace(await flagMarketplaceItems(cached.items, profile))
+        const { items, dropped } = dedupeMarketplace(await flagMarketplaceItems(filterBlockedRepos(cached.items, blocked), profile))
         return {
           ok: true,
           items,
@@ -582,6 +588,7 @@ export class PluginManagerService extends Service {
           message: 'served from cache',
           ...(cached.source !== undefined ? { source: cached.source } : {}),
           ...(dropped > 0 ? { dropped } : {}),
+          ...blockedMeta(blocked),
           total: items.length,
         }
       }
@@ -660,7 +667,7 @@ export class PluginManagerService extends Service {
         catalogError === null ? 'catalog' : 'catalog unavailable (' + catalogError + ')',
         markdownError === null ? 'PLUGINS.md' : 'PLUGINS.md unavailable (' + markdownError + ')',
       ].join('; ')
-      const flagged = await flagMarketplaceItems(items, profile)
+      const flagged = await flagMarketplaceItems(filterBlockedRepos(items, blocked), profile)
       const { items: deduped, dropped } = dedupeMarketplace(flagged)
       return {
         ok: true,
@@ -669,13 +676,14 @@ export class PluginManagerService extends Service {
         message: 'fetched ' + deduped.length + ' plugins (' + note + ')',
         source,
         ...(dropped > 0 ? { dropped } : {}),
+        ...blockedMeta(blocked),
         total: deduped.length,
       }
     }
     // Last resort: the on-disk cache (any age — better than an empty list).
     const cached = readCache()
     if (cached.items.length > 0) {
-      const { items: flagged, dropped } = dedupeMarketplace(await flagMarketplaceItems(cached.items, profile))
+      const { items: flagged, dropped } = dedupeMarketplace(await flagMarketplaceItems(filterBlockedRepos(cached.items, blocked), profile))
       return {
         ok: true,
         items: flagged,
@@ -684,6 +692,7 @@ export class PluginManagerService extends Service {
         message: 'sources unavailable; served from cache: ' + (catalogError ?? markdownError ?? 'unknown'),
         ...(cached.source !== undefined ? { source: cached.source } : {}),
         ...(dropped > 0 ? { dropped } : {}),
+        ...blockedMeta(blocked),
         total: flagged.length,
       }
     }
@@ -969,6 +978,86 @@ export class PluginManagerService extends Service {
   /** Remove an installed package via dsh plugin (preserving in-box bundles). */
   async remove(profile: string, name: string): Promise<CommandResult> {
     return removeProtected(this.ctx, profile, name)
+  }
+
+  /**
+   * Kind-install overview for the Manage tab: install records plus the
+   * on-disk skill / preset directories (including non-record installs).
+   */
+  async listKinds(): Promise<KindListView> {
+    const records = await loadKindRecords()
+    return {
+      records: [...records.entries()].map(([repo, record]) => ({ repo, ...record })),
+      skills: [...dirNameSet(skillsDirPath())].sort(),
+      presets: [...dirNameSet(presetsDirPath())].sort(),
+    }
+  }
+
+  /**
+   * Uninstall a marketplace-kind install through its record: skills/presets
+   * delete their directories (path-containment guarded), cordis plugins
+   * remove each recorded package through the protected path (dependency +
+   * insert rows), then the record itself is removed.
+   */
+  async uninstallKind(profile: string, repo: string): Promise<CommandResult> {
+    const key = normalizeRepoRef(repo)
+    if (key === null) return { ok: false, exitCode: 1, output: 'invalid repo: ' + repo }
+    const records = await loadKindRecords()
+    const record = records.get(key)
+    if (record === undefined) {
+      return {
+        ok: false,
+        exitCode: 1,
+        output: 'no install record for ' + key + ' (records cover marketplace-installed plugins/skills/presets;'
+          + ' manual installs are managed in the Manage tab)',
+      }
+    }
+    const log: string[] = []
+    if (record.type === 'skill' || record.type === 'agent-preset') {
+      const root = record.type === 'skill' ? skillsDirPath() : presetsDirPath()
+      const names = record.names !== null && record.names.length > 0
+        ? record.names
+        : record.name !== null ? [record.name] : []
+      let removed = 0
+      for (const name of names) {
+        const target = join(root, name)
+        if (isUnderRoot(target, root) && existsSync(target)) {
+          rmSync(target, { recursive: true, force: true })
+          log.push('removed ' + target)
+          removed++
+        }
+      }
+      if (removed === 0 && record.location !== null && record.location !== root && isUnderRoot(record.location, root) && existsSync(record.location)) {
+        rmSync(record.location, { recursive: true, force: true })
+        log.push('removed ' + record.location)
+      }
+      await removeKindRecord(key)
+      return {
+        ok: true,
+        exitCode: 0,
+        output: 'uninstalled ' + key + ' (' + record.type + ')' + (log.length > 0 ? '\n' + log.join('\n') : ''),
+      }
+    }
+    if (record.type === 'cordis-plugin') {
+      const names = record.names !== null && record.names.length > 0
+        ? record.names
+        : record.name !== null ? [record.name] : []
+      if (names.length === 0) {
+        return { ok: false, exitCode: 1, output: 'install record for ' + key + ' has no package names' }
+      }
+      const outputs: string[] = []
+      let ok = true
+      for (const name of names) {
+        const result = await removeProtected(this.ctx, profile, name)
+        outputs.push(result.output)
+        if (!result.ok) ok = false
+      }
+      await removeKindRecord(key)
+      return { ok, exitCode: ok ? 0 : 1, output: outputs.join('\n\n') }
+    }
+    // instructions / unknown kinds: record cleanup only
+    await removeKindRecord(key)
+    return { ok: true, exitCode: 0, output: 'removed install record for ' + key }
   }
 
   /** Remove one managed insert row (non-bundle plugin, live unmount). */
@@ -1419,7 +1508,14 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
           error: 'the repository contains multiple packages (' + candidates.map(c => c.split('/').pop()).join(', ') + '); install with #路径:<dir> to pick one',
         }
       }
-      return { error: 'no package.json found at ' + pkgDir + ' (or anywhere in the repository)' }
+      // No package.json anywhere: not a cordis plugin — could be a skill or
+      // agent-preset repo (neither ships a manifest). Keep the clone and let
+      // installWithSource's type detection decide.
+      return {
+        spec: pkgDir,
+        created,
+        note: 'cloned ' + repo + ' into ' + dest + ' (no package.json — kind detection will decide)',
+      }
     }
     return {
       spec: pkgDir,
@@ -1546,6 +1642,64 @@ export async function installWithSource(ctx: Context | null, profile: string, sp
   if (prepared.error !== undefined || prepared.spec === undefined) {
     return { ok: false, exitCode: 1, output: '[plugin-manager] ' + (prepared.error ?? 'no install source') }
   }
+  // Kind detection for cloned/local sources: skill and agent-preset repos
+  // install directly (file copies into the official harness roots + an
+  // install record); instructions (not plugin/skill/preset) are refused with
+  // guidance and added to the marketplace blocklist; cordis plugins continue
+  // through the existing npm-first + quality-gate path below.
+  const repoKey = normalizeRepoRef(spec) ?? spec
+  if (existsSync(prepared.spec)) {
+    const kind = detectRepoType(prepared.spec)
+    if (kind === 'skill' || kind === 'agent-preset') {
+      try {
+        const installed = kind === 'skill'
+          ? installSkill(prepared.spec, repoKey)
+          : installPreset(prepared.spec, repoKey)
+        await saveKindRecord(repoKey, {
+          type: kind,
+          name: installed.name,
+          names: installed.names,
+          location: installed.location,
+          version: null,
+          installedAt: new Date().toISOString(),
+        })
+        return {
+          ok: true,
+          exitCode: 0,
+          output: '[plugin-manager] installed ' + (kind === 'skill' ? 'skill' : 'agent preset')
+            + ' "' + installed.name + '" to ' + installed.location
+            + (prepared.note !== undefined ? '\n' + prepared.note : '')
+            + '\n' + (kind === 'skill'
+              ? 'Skills hot-reload (chokidar watch on <dshHome>/skills) — no restart needed.'
+              : 'Presets are discovered per session — pick it in the agent-preset picker.'),
+        }
+      } catch (error: unknown) {
+        return {
+          ok: false,
+          exitCode: 1,
+          output: '[plugin-manager] ' + (kind === 'skill' ? 'skill' : 'agent preset') + ' install failed: '
+            + (error instanceof Error ? error.message : String(error)),
+        }
+      }
+    }
+    if (kind === 'instructions') {
+      // Not a plugin, skill, or preset: refuse, block from the marketplace,
+      // and point the user at what the repository actually is.
+      await addBlockedRepo(repoKey).catch(() => { /* blocklist is advisory */ })
+      const readmeHint = readmeFirstLines(prepared.spec)
+      return {
+        ok: false,
+        exitCode: 1,
+        output: '[plugin-manager] ' + repoKey
+          + ' is not a DSH plugin, skill, or agent preset (no dsh-capable package.json, SKILL.md, or agent.cordis.yml).'
+          + ' It has been added to the marketplace blocklist.'
+          + (readmeHint.length > 0 ? '\n\nRepository README (first lines):\n' + readmeHint : '')
+          + '\n\nIf the repository ships install.sh/install.ps1, we never auto-execute third-party scripts — run it manually if you trust the repo:'
+          + '\n  cd ' + prepared.spec + ' && bash install.sh',
+      }
+    }
+    // cordis-plugin: continue to the npm-first + quality-gate path below.
+  }
   // npm-first: when the cloned package is published on the registry, prefer
   // the npm install (faster, no local link); fall back to the git clone.
   const npmName = prepared.packageName !== undefined ? await probeNpmPublished(prepared.packageName) : undefined
@@ -1580,9 +1734,21 @@ export async function installWithSource(ctx: Context | null, profile: string, sp
   return { ...result, output }
 }
 
+/** First lines of a repository README (install-guidance for refused repos). */
+function readmeFirstLines(dir: string): string {
+  for (const file of ['README.md', 'readme.md', 'README.zh.md', 'README.en.md']) {
+    try {
+      const text = readFileSync(join(dir, file), 'utf8')
+      const trimmed = text.trim()
+      if (trimmed.length === 0) continue
+      return trimmed.split(/\r?\n/).slice(0, 12).join('\n').slice(0, 600)
+    } catch { /* try the next README variant */ }
+  }
+  return ''
+}
+
 /** Whether any profile manifest references the given install path (link:). */
-function cacheDirReferencedByProfile(home: string, pkgDir: string): boolean {
-  const profilesRoot = join(home, 'profiles')
+function cacheDirReferencedByProfile(home: string, pkgDir: string): boolean {  const profilesRoot = join(home, 'profiles')
   let entries: string[] = []
   try {
     entries = readdirSync(profilesRoot, { withFileTypes: true })
@@ -2465,27 +2631,10 @@ async function enrichRepos(items: MarketplaceItem[], prior: Map<string, Marketpl
   return out
 }
 
-/** Normalize a repository reference (URL or owner/repo) to lowercase owner/repo. */
-function normalizeRepoRef(value: string): string | null {
-  const s = value.trim()
-    .replace(/^git\+/i, '')
-    .replace(/^https?:\/\/github\.com\//i, '')
-    .replace(/^git@github\.com:/i, '')
-    .replace(/\.git$/i, '')
-    .split('#')[0]
-    .replace(/\/+$/, '')
-  return s.length > 0 ? s.toLowerCase() : null
-}
-
 /** Identity of a git-cache clone dir (mirrors prepareInstallSource naming: github.com-owner-repo). */
 function gitCacheIdentity(source: string): string | null {
   const match = /github\.com[-/]([^/\s]+)[-/]([^/\s]+)/.exec(source)
   return match !== null ? `github.com-${match[1]!.toLowerCase()}-${match[2]!.toLowerCase()}` : null
-}
-
-/** Slug form used by skill/preset install dirs (~/.dsh/skills/<slug>). */
-function slugDirName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'plugin'
 }
 
 /** Lowercase directory-entry set of one directory (empty when missing). */
@@ -2554,6 +2703,7 @@ function registryToItem(repo: RegistryRepo): MarketplaceItem {
     updatedAt: repo.updated_at,
     createdAt: '',
     url: repo.html_url.length > 0 ? repo.html_url : 'https://github.com/' + repo.full_name,
+    ...(functionalTopics(repo.topics).length > 0 ? { topics: functionalTopics(repo.topics) } : {}),
     ...(repo.pkg_name !== undefined ? { packageName: repo.pkg_name } : {}),
     ...(repo.version !== undefined ? { latestVersion: repo.version } : {}),
     ...(repo.category !== undefined ? { category: repo.category } : {}),
@@ -2647,6 +2797,7 @@ function buildInstalledIndex(profile: string): InstalledIndex | null {
 
 /**
  * Detect whether one marketplace item is installed in the profile:
+ * 0. kind install records (marketplace-installed skills/presets/plugins);
  * 1. repository identity (bidirectional — package name may differ from repo);
  * 2. package name (registry pkg_name or repo basename — the common npm==repo);
  * 3. git-cache clone identity (link:<plugin-manager-src>/github.com-o-r);
@@ -2655,14 +2806,22 @@ function buildInstalledIndex(profile: string): InstalledIndex | null {
  * index version (CI-fetched from the repo's package.json) — strictly newer
  * only, so repo rollbacks never report a false update.
  */
-function flagItemInstalled(item: MarketplaceItem, index: InstalledIndex | null): MarketplaceItem {
+function flagItemInstalled(item: MarketplaceItem, index: InstalledIndex | null, records: ReadonlyMap<string, KindRecord>): MarketplaceItem {
   if (index === null) return { ...item, installed: false, updateAvailable: false }
   let installed = false
   let version: string | undefined
+  let installedKind: string | undefined
   const hit = (found: boolean, hitVersion?: string): void => {
     if (!found) return
     installed = true
     if (version === undefined && hitVersion !== undefined && hitVersion.length > 0) version = hitVersion
+  }
+  // 0. install records (marketplace-installed of any kind)
+  const record = records.get(item.name.toLowerCase())
+  if (record !== undefined) {
+    installed = true
+    installedKind = record.type
+    if (record.version !== null && record.version.length > 0) version = record.version
   }
   // 1. repository identity
   const repoRef = item.name.toLowerCase()
@@ -2688,6 +2847,7 @@ function flagItemInstalled(item: MarketplaceItem, index: InstalledIndex | null):
     ...item,
     installed,
     ...(version !== undefined ? { installedVersion: version } : {}),
+    ...(installedKind !== undefined ? { installedKind } : {}),
     updateAvailable,
   }
 }
@@ -2698,17 +2858,36 @@ function flagItemInstalled(item: MarketplaceItem, index: InstalledIndex | null):
  */
 async function flagMarketplaceItems(items: readonly MarketplaceItem[], profile: string): Promise<MarketplaceItem[]> {
   const index = buildInstalledIndex(profile)
+  const records = await loadKindRecords()
   const out = new Array<MarketplaceItem>(items.length)
   const workers = Math.min(12, items.length)
   let cursor = 0
   const worker = async (): Promise<void> => {
     while (cursor < items.length) {
       const idx = cursor++
-      out[idx] = flagItemInstalled(items[idx]!, index)
+      out[idx] = flagItemInstalled(items[idx]!, index, records)
     }
   }
   await Promise.all(Array.from({ length: workers }, () => worker()))
   return out
+}
+
+/**
+ * Filter out repositories marked as non-installable (detected as neither
+ * plugin nor skill nor preset). Applied to every listing path — the 24h
+ * cache, fresh fetches and the last-resort cache all go through the same
+ * filter, so a blocked repo stays hidden until explicitly unblocked.
+ */
+function filterBlockedRepos(items: readonly MarketplaceItem[], blocked: ReadonlySet<string>): MarketplaceItem[] {
+  if (blocked.size === 0) return [...items]
+  return items.filter(item => !blocked.has(normalizeRepoRef(item.name) ?? item.name))
+}
+
+/** Blocked-repo summary carried on every listing response. */
+function blockedMeta(blocked: ReadonlySet<string>): { blocked?: number; blockedRepos?: string[] } {
+  return blocked.size > 0
+    ? { blocked: blocked.size, blockedRepos: [...blocked].slice(0, 20) }
+    : {}
 }
 
 /**
@@ -3192,6 +3371,27 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.remove(profile, name) })
           return
         }
+        case 'uninstallKind': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          const repo = typeof body['repo'] === 'string' ? body['repo'] : ''
+          sendJson(res, 200, { ok: true, value: await service.uninstallKind(profile, repo) })
+          return
+        }
+        case 'listKinds': {
+          sendJson(res, 200, { ok: true, value: await service.listKinds() })
+          return
+        }
+        case 'unblockRepo': {
+          const repo = typeof body['repo'] === 'string' ? body['repo'] : ''
+          const key = normalizeRepoRef(repo)
+          if (key === null) {
+            sendJson(res, 200, { ok: true, value: { ok: false, message: 'invalid repo: ' + repo } })
+            return
+          }
+          await removeBlockedRepo(key)
+          sendJson(res, 200, { ok: true, value: { ok: true, message: 'unblocked ' + key } })
+          return
+        }
         case 'createProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
           const template = typeof body['template'] === 'string' ? body['template'] : 'web'
@@ -3266,7 +3466,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers
@@ -3309,7 +3509,16 @@ export function apply(ctx: Context, config: PluginManagerConfig): void {
   // install goes through the protected flow (quality gate + rollback).
   ctx.inject(['tools'], (toolsCtx: Context) => {
     toolsCtx.effect(() => {
-      const disposers = registerTools(toolsCtx, service, config.profile)
+      // Parameter-order adapter: the service takes (profile, refresh), the
+      // tool host takes (refresh, profile).
+      const disposers = registerTools(toolsCtx, {
+        list: (profile) => service.list(profile),
+        setEnabled: (profile, entryId, enabled) => service.setEnabled(profile, entryId, enabled),
+        install: (profile, spec) => service.install(profile, spec),
+        remove: (profile, name) => service.remove(profile, name),
+        removeInsert: (profile, rowId) => service.removeInsert(profile, rowId),
+        marketplace: (refresh, profile) => service.marketplace(profile, refresh),
+      }, config.profile)
       const guardDisposer = registerPluginGuard(toolsCtx)
       if (guardDisposer !== null) disposers.push(guardDisposer)
       return () => { for (const dispose of disposers) dispose() }

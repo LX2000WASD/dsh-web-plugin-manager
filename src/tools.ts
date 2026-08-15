@@ -1,8 +1,7 @@
 /**
  * Agent tools for plugin management (plugin_status / plugin_install /
- * plugin_uninstall / plugin_toggle). Registered on ctx.tools when the host
- * provides it (see registerTools). No marketplace features: these operate on
- * the local profile's install state only.
+ * plugin_uninstall / plugin_toggle / plugin_search). Registered on ctx.tools
+ * when the host provides it (see registerTools).
  *
  * Install state has two official shapes:
  *  - bundle plugins (npm package declaring dsh.bundle) live in the profile's
@@ -16,7 +15,8 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { CommandResult, MutationResult, PluginManagerSnapshot } from './types.ts'
+import { findPluginMatches } from './match.ts'
+import type { CommandResult, MarketplaceResult, MutationResult, PluginManagerSnapshot } from './types.ts'
 
 /** Host operations the tools need (implemented by the manager service). */
 export interface PluginToolsHost {
@@ -25,6 +25,7 @@ export interface PluginToolsHost {
   install(profile: string, spec: string): Promise<CommandResult>
   remove(profile: string, name: string): Promise<CommandResult>
   removeInsert(profile: string, rowId: string): Promise<MutationResult>
+  marketplace(refresh: boolean, profile: string): Promise<MarketplaceResult>
 }
 
 /** Tool dependencies captured for one target profile. */
@@ -35,6 +36,7 @@ export interface PluginToolsDeps {
   readonly install: (spec: string) => Promise<CommandResult>
   readonly remove: (name: string) => Promise<CommandResult>
   readonly removeInsert: (rowId: string) => Promise<MutationResult>
+  readonly marketplace: (refresh: boolean) => Promise<MarketplaceResult>
 }
 
 /** One plugin row in the unified status listing. */
@@ -254,6 +256,86 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
         }
       },
     }),
+    defineTool({
+      name: 'plugin_search',
+      description: 'Search the dsh marketplace for plugins matching a need. Returns candidate plugins with their '
+        + 'stars, topics, description and install state (installed in the target profile or not). Matching is '
+        + 'keyword-based over the local marketplace index (name / topics / description) — it cannot judge quality: '
+        + 'advise the user to review the repository before installing (the install itself runs the quality gate). '
+        + 'Use when the user wants to find or compare dsh plugins.',
+      parameters: {
+        query: { type: 'string', required: true, description: 'What the user wants, e.g. "OCR screenshots", "memory rag", "terminal UI". Chinese and English both work.' },
+        limit: { type: 'number', description: 'Maximum number of results (1–10, default 5).' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            query: { type: 'string', required: true },
+            matches: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  name: { type: 'string', required: true },
+                  description: { type: 'string', required: true },
+                  stars: { type: 'number', required: true },
+                  topics: { type: 'array', items: { type: 'string' }, required: true },
+                  installed: { type: 'boolean', required: true },
+                  installedVersion: { type: 'string' },
+                  url: { type: 'string', required: true },
+                },
+              },
+            },
+          },
+        },
+        render: (_args, value) => {
+          const matches = value.matches as Array<{
+            name: string; description: string; stars: number; topics: string[]; installed: boolean; url: string
+          }>
+          if (matches.length === 0) {
+            return [{
+              type: 'text',
+              text: 'No marketplace plugins matched that query. Suggest broader terms (e.g. "image", "terminal", "memory").',
+            }]
+          }
+          const lines = matches.map((m, index) => {
+            const state = m.installed ? ' [installed]' : ''
+            const topics = m.topics.length > 0 ? ` [${m.topics.join(', ')}]` : ''
+            return `${index + 1}. ${m.name} — ${m.stars}★${topics}${state}\n   ${m.description}\n   ${m.url}`
+          })
+          return [{
+            type: 'text',
+            text: lines.join('\n\n')
+              + '\n\nReview the repository before installing — marketplace metadata cannot judge quality.',
+          }]
+        },
+      },
+      async execute(args) {
+        const query = String(args.query ?? '').trim()
+        if (query === '') throw new Error('plugin_search: query must describe what you are looking for')
+        const limit = Math.min(Math.max(1, Number(args.limit) || 5), 10)
+        const result = await deps.marketplace(false)
+        if (!result.ok) {
+          throw new Error('plugin_search: marketplace unavailable: ' + result.message.slice(0, 300))
+        }
+        return {
+          query,
+          matches: findPluginMatches(result.items, query, limit).map(item => ({
+            name: item.name,
+            description: item.description ?? '',
+            stars: item.stars,
+            topics: item.topics !== undefined ? item.topics.slice(0, 3) : [],
+            installed: item.installed,
+            ...(item.installedVersion !== undefined ? { installedVersion: item.installedVersion } : {}),
+            url: item.url,
+          })),
+        }
+      },
+    }),
   ]
 }
 
@@ -272,6 +354,7 @@ export function registerTools(
     install: (spec) => host.install(profile, spec),
     remove: (name) => host.remove(profile, name),
     removeInsert: (rowId) => host.removeInsert(profile, rowId),
+    marketplace: (refresh) => host.marketplace(refresh, profile),
   }
   const definitions = createPluginTools(deps)
   const disposers = definitions.map((definition) => toolsService.register(definition))

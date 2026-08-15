@@ -162,6 +162,16 @@ export const zh = {
   marketInstalled: '已安装',
   marketDropped: '{n} 个同名 npm 包已隐藏（同一包只能安装一个）',
   marketMore: '加载更多',
+  marketBlocked: '{n} 个仓库已被屏蔽（检测为非插件/skill/预设）',
+  unblockButton: '解除屏蔽',
+  typeSkill: 'skill',
+  typePreset: '预设',
+  kindsTitle: '技能与预设',
+  kindsHint: '技能安装即热加载（chokidar watch <dshHome>/skills）；预设由官方设置页管理（复制/删除/默认）。',
+  kindsNone: '暂无市场安装的技能或预设。',
+  reinstallButton: '重新拉取',
+  skillsDirLabel: '已安装技能目录',
+  presetsDirLabel: '预设目录',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -327,4 +337,14 @@ export const en = {
   marketInstalled: 'installed',
   marketDropped: '{n} duplicate package(s) hidden (one npm package can only be installed once)',
   marketMore: 'Load more',
+  marketBlocked: '{n} repo(s) blocked (detected as not plugin/skill/preset)',
+  unblockButton: 'Unblock',
+  typeSkill: 'skill',
+  typePreset: 'preset',
+  kindsTitle: 'Skills & presets',
+  kindsHint: 'Skills hot-reload after install (chokidar watch on <dshHome>/skills); presets are managed by the official settings page (copy/delete/default).',
+  kindsNone: 'No marketplace-installed skills or presets yet.',
+  reinstallButton: 'Re-pull',
+  skillsDirLabel: 'Skill dirs',
+  presetsDirLabel: 'Preset dirs',
 } satisfies Record<PluginManagerLocaleKey, string>

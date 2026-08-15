@@ -48,6 +48,34 @@ const REGISTRY_FILE = 'registry.json'
 /** DSH's own repository is not a plugin — never listed. */
 const EXCLUDED_REPO_NAMES = new Set(['deepseek-harness'])
 
+/**
+ * Eco-generic topics stripped before a repo's topics reach the UI: they are
+ * ecosystem labels (ai/llm/deepseek/dsh/plugin/web/tool/…) rather than
+ * functional signals, and would otherwise dominate every card's topic row.
+ * Mirrors the registry builder's TOPIC_STOP_WORDS.
+ */
+export const TOPIC_STOP_WORDS = new Set([
+  'agent', 'agents', 'ai-agent', 'ai-agents', 'ai', 'llm', 'deepseek', 'deepseek-harness',
+  'dsh', 'dsh-plugin', 'dsh-plugins', 'dshtopic', 'dsh-ecosystem', 'cordis', 'cordis-plugin',
+  'claude', 'claude-code', 'claude-skills', 'codex', 'opencode', 'openclaw', 'hermes-agent',
+  'harness', 'harness-engineering', 'typescript', 'javascript', 'python', 'react', 'nodejs',
+  'open-source', 'self-hosted', 'local-first', 'privacy-first', 'api', 'sdk', 'plugin',
+  'plugins', 'extension', 'openai', 'gemini', 'kimi', 'glm', 'minimax', 'free',
+  'web', 'web-ui', 'ui', 'gui', 'tool', 'tools', 'skill', 'skills', 'agent-skills',
+  'automation', 'workflow', 'multi-agent', 'ai-tools', 'ai-assistant', 'assistant',
+  'chatgpt', 'coding-agent', 'coding-agents', 'coding-assistant', 'agentic-coding',
+  'vibe-coding', 'vibecoding', 'ai-coding', 'developer-tools', 'pdf-parser',
+  'debugging', 'prompt-engineering', 'system-design',
+  'terminal', 'tui', 'cli',
+])
+
+/** Filter a repo's topics down to functional signals (eco-generic tags removed). */
+export function functionalTopics(topics: readonly string[] | undefined): string[] {
+  return (topics ?? [])
+    .filter(topic => !TOPIC_STOP_WORDS.has(String(topic).toLowerCase()))
+    .slice(0, 8)
+}
+
 /** jsDelivr CDN caches can lag hours: older indexes are discarded. */
 const REGISTRY_MAX_AGE_MS = 6 * 60 * 60 * 1000
 /** Search-API fallback cap: the unauthenticated quota is 10/min, keep it small. */

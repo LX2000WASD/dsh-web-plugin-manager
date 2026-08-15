@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, IconSearchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommandResult, MarketplaceItem, MarketplaceResult, ProfileInfo } from '../types.ts'
+import type { CommandResult, MarketplaceItem, MarketplaceResult, MutationResult, ProfileInfo } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
 
@@ -23,6 +23,7 @@ export interface PluginMarketplaceTabInjected {
   readonly profiles: () => Promise<ProfileInfo[]>
   readonly install: (profile: string, spec: string) => Promise<CommandResult>
   readonly update: (profile: string, name: string) => Promise<CommandResult>
+  readonly unblock: (repo: string) => Promise<MutationResult>
 }
 
 /** Full component props assembled by the Settings section renderer. */
@@ -101,7 +102,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   cardMetaRow: {
     display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap',
-    padding: '0 14px 8px',
+    // Fixed minimum: rows without any tag still occupy the same height as
+    // rows with a tag (uniform card heights).
+    minHeight: '28px', padding: '0 14px 8px',
   },
   tagOn: {
     background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent)',
@@ -148,28 +151,8 @@ function formatStars(n: number): string {
   return String(n)
 }
 
-/** Registry classifier category ids → localized label (unknown ids pass through). */
-function categoryLabel(t: (key: PluginManagerLocaleKey) => string, category: string): string {
-  const byId: Record<string, PluginManagerLocaleKey> = {
-    vision: 'catVision',
-    document: 'catDocument',
-    memory: 'catMemory',
-    model: 'catModel',
-    notify: 'catNotify',
-    coding: 'catCoding',
-    conversation: 'catConversation',
-    'web-ui': 'catWebUi',
-    agent: 'catAgent',
-    tool: 'catTool',
-    resource: 'catResource',
-    other: 'catOther',
-  }
-  const key = byId[category]
-  return key !== undefined ? t(key) : category
-}
-
 /** Render the marketplace page. */
-export function PluginMarketplaceTab({ marketplace, profiles, install, update, t }: PluginMarketplaceTabProps): ReactNode {
+export function PluginMarketplaceTab({ marketplace, profiles, install, update, unblock, t }: PluginMarketplaceTabProps): ReactNode {
   const [state, setState] = useState<ViewState>({ status: 'loading' })
   const [busy, setBusy] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -185,7 +168,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, t
   const [visibleCount, setVisibleCount] = useState(RENDER_BATCH)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
 
-  const injected = useRef({ marketplace, profiles, install, update })
+  const injected = useRef({ marketplace, profiles, install, update, unblock })
 
   /** Fetch the listing; installed flags are computed server-side per profile. */
   const fetchMarketplace = (refresh: boolean, profile: string): void => {
@@ -245,6 +228,15 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, t
       ? injected.current.update(targetProfile, item.packageName)
       : injected.current.install(targetProfile, item.url)
     runCommand(item, action, 'update')
+  }
+
+  /** Unblock one repository (restores it in the listing on the next fetch). */
+  const onUnblock = (repo: string): void => {
+    setBusy('unblock:' + repo)
+    void injected.current.unblock(repo).finally(() => {
+      setBusy(null)
+      fetchMarketplace(false, targetProfile)
+    })
   }
 
   const items = state.status === 'ready' ? state.result.items : []
@@ -342,6 +334,23 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, t
           {state.result.dropped !== undefined && state.result.dropped > 0 && (
             <p style={styles.status}>{t('marketDropped', { n: state.result.dropped })}</p>
           )}
+          {state.result.blocked !== undefined && state.result.blocked > 0 && (
+            <div style={styles.heading}>
+              <p style={styles.status}>{t('marketBlocked', { n: state.result.blocked })}</p>
+              {(state.result.blockedRepos ?? []).map(repo => (
+                <Button
+                  key={repo}
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy !== null}
+                  onClick={() => onUnblock(repo)}
+                  title={repo}
+                >
+                  {t('unblockButton')} {repo}
+                </Button>
+              ))}
+            </div>
+          )}
           <label style={styles.search}>
             <IconSearchOutline16 aria-hidden="true" />
             <input
@@ -368,6 +377,9 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, t
             <ul style={{ ...styles.cards, gridTemplateColumns: cols === 2 ? 'repeat(2, minmax(0, 1fr))' : 'repeat(1, minmax(0, 1fr))' }}>
               {rendered.map((item) => {
                 const sourceLabel = item.packageName !== undefined && item.packageName.length > 0 ? t('sourceNpm') : t('sourceGit')
+                const kindLabel = item.installedKind === 'skill' ? t('typeSkill')
+                  : item.installedKind === 'agent-preset' ? t('typePreset')
+                    : t('typePlugin')
                 return (
                   <li key={item.name} style={styles.card}>
                     <div style={styles.cardRow}>
@@ -397,9 +409,9 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, t
                     <div style={styles.cardMetaRow}>
                       <span style={styles.tag} title={String(item.stars)}>★ {formatStars(item.stars)}</span>
                       <span style={styles.tag} title={item.packageName}>{sourceLabel}</span>
-                      <span style={styles.tag}>{t('typePlugin')}</span>
+                      <span style={styles.tag}>{kindLabel}</span>
                     </div>
-                    {/* Tags row: evidence status + functional category. */}
+                    {/* Tags row: evidence status + real functional topics. */}
                     <div style={styles.cardMetaRow}>
                       {item.status !== undefined && item.status.length > 0 && (
                         <span style={{ ...styles.tag, ...(item.status.includes('✅') ? styles.tagOn : {}) }} title={item.status}>
@@ -408,15 +420,18 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, t
                               : t('statusPending')}
                         </span>
                       )}
-                      {item.category !== undefined && item.category.length > 0 && (
-                        <span style={styles.tag} title={item.category}>{categoryLabel(t, item.category)}</span>
+                      {item.topics !== undefined && item.topics.slice(0, 2).map(topic => (
+                        <span key={topic} style={styles.tag} title={item.topics!.join(', ')}>{topic}</span>
+                      ))}
+                      {item.topics !== undefined && item.topics.length > 2 && (
+                        <span style={styles.tag} title={item.topics!.join(', ')}>+{item.topics.length - 2}</span>
                       )}
                     </div>
                     <div style={{ minWidth: 0, overflow: 'hidden', padding: '0 14px 10px' }}>
-                      {/* A space (not empty) keeps the line height identical for
-                          cards without a description. */}
+                      {/* No-break space keeps the description line height for
+                          cards without a description — uniform card heights. */}
                       <span style={styles.cardDesc} title={item.description ?? ''}>
-                        {item.description !== undefined && item.description.length > 0 ? item.description : ' '}
+                        {item.description !== undefined && item.description.length > 0 ? item.description : '\u00A0'}
                       </span>
                     </div>
                     <div style={{ padding: '0 14px 10px' }}>

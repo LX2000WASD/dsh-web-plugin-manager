@@ -24,11 +24,12 @@
  * --home <path> overrides the Harness home (default: $DSH_HOME or ~/.dsh).
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { analyzeProfile } from './analyze.ts'
 import { installWithSource, removeProtected, updateProtected } from './index.ts'
+import { isUnderRoot, loadKindRecords, normalizeRepoRef, presetsDirPath, removeKindRecord, skillsDirPath } from './kinds.ts'
 import { addInsertRow, readInsertRows, readManagedIds, removeInsertRow, writePatch } from './patch.ts'
 
 /** Resolve the Harness home directory (DSH_HOME env, then ~/.dsh). */
@@ -95,6 +96,7 @@ Usage:
   dshpm mount <name>     [--profile <name>]   Mount an installed-but-unmounted dependency as an insert row
   dshpm list             [--profile <name>]   List bundles, packages, and insert rows
   dshpm analyze          [--profile <name>]   Run the dependency/conflict health analysis
+  dshpm uninstall-kind <owner/repo> [--profile <name>]   Uninstall a marketplace-installed skill/preset/plugin
   dshpm help | --help                         Show this help
   dshpm version | --version                   Show the package version
 
@@ -172,6 +174,62 @@ async function cmdRemove(profile: string, name: string): Promise<number> {
   }
   process.stdout.write(JSON.stringify(name) + ' is not a managed insert row nor a profile dependency\n')
   return 1
+}
+
+/** dshpm uninstall-kind: remove a marketplace-kind install (skill/preset/cordis). */
+async function cmdUninstallKind(profile: string, repo: string): Promise<number> {
+  const dir = profileDir(profile)
+  if (!existsSync(dir)) {
+    process.stdout.write('profile not found: ' + profile + '\n')
+    return 1
+  }
+  const records = await loadKindRecords()
+  const key = normalizeRepoRef(repo)
+  const record = key !== null ? records.get(key) : undefined
+  if (record === undefined) {
+    process.stdout.write('no install record for ' + repo + ' (records cover marketplace-installed plugins/skills/presets)\n')
+    return 1
+  }
+  const root = record.type === 'skill'
+    ? skillsDirPath()
+    : record.type === 'agent-preset' ? presetsDirPath() : null
+  if (root !== null) {
+    const names = record.names !== null && record.names.length > 0
+      ? record.names
+      : record.name !== null ? [record.name] : []
+    let removed = 0
+    for (const name of names) {
+      const target = join(root, name)
+      if (isUnderRoot(target, root) && existsSync(target)) {
+        rmSync(target, { recursive: true, force: true })
+        process.stdout.write('removed ' + target + '\n')
+        removed++
+      }
+    }
+    if (removed === 0 && record.location !== null && isUnderRoot(record.location, root) && existsSync(record.location)) {
+      rmSync(record.location, { recursive: true, force: true })
+      process.stdout.write('removed ' + record.location + '\n')
+    }
+    await removeKindRecord(key!)
+    process.stdout.write('uninstalled ' + key + ' (' + record.type + ')\n')
+    return 0
+  }
+  if (record.type === 'cordis-plugin') {
+    const names = record.names !== null && record.names.length > 0
+      ? record.names
+      : record.name !== null ? [record.name] : []
+    let ok = true
+    for (const name of names) {
+      const result = await removeProtected(null, profile, name)
+      process.stdout.write(result.output + '\n')
+      if (!result.ok) ok = false
+    }
+    await removeKindRecord(key!)
+    return ok ? 0 : 1
+  }
+  await removeKindRecord(key!)
+  process.stdout.write('removed install record for ' + key + '\n')
+  return 0
 }
 
 function cmdList(profile: string): number {
@@ -299,6 +357,14 @@ async function main(): Promise<number> {
       return 1
     }
     return await cmdRemove(profile, name)
+  }
+  if (command === 'uninstall-kind') {
+    const repo = positionals[1]
+    if (repo === undefined) {
+      process.stdout.write('dshpm uninstall-kind: missing repo (owner/repo)\n')
+      return 1
+    }
+    return await cmdUninstallKind(profile, repo)
   }
   if (command === 'update') {
     const name = positionals[1]

@@ -113,12 +113,16 @@ export interface MarketplaceItem {
   readonly category?: string
   /** Catalog lifecycle state (active / archived / ...), when known. */
   readonly lifecycle?: string
+  /** Real repository topics (eco-generic tags filtered server-side). */
+  readonly topics?: readonly string[]
   /** Latest version from the registry index (repo package.json, CI-fetched). */
   readonly latestVersion?: string
   /** Whether the queried profile has this plugin installed (server-side). */
   readonly installed: boolean
   /** Installed version in the queried profile, when detected. */
   readonly installedVersion?: string
+  /** Install kind from the marketplace record (skill/agent-preset/cordis-plugin). */
+  readonly installedKind?: string
   /** Whether a newer version than the installed one is available. */
   readonly updateAvailable: boolean
 }
@@ -137,6 +141,37 @@ export interface MarketplaceResult {
   readonly dropped?: number
   /** Total entries after deduplication. */
   readonly total?: number
+  /** How many repositories are blocked (non-plugin/skill/preset detection). */
+  readonly blocked?: number
+  /** Blocked repository names (first 20), for the unblock surface. */
+  readonly blockedRepos?: readonly string[]
+}
+
+/** One kind-install record as surfaced to the Manage tab. */
+export interface KindRecordView {
+  /** Normalized repository key (owner/repo). */
+  readonly repo: string
+  /** Install kind: skill | agent-preset | cordis-plugin | instructions. */
+  readonly type: string
+  /** Display name (single install). */
+  readonly name: string | null
+  /** All installed names. */
+  readonly names: string[] | null
+  /** Install location. */
+  readonly location: string | null
+  /** Installed version, when the kind carries one. */
+  readonly version: string | null
+  /** ISO install time. */
+  readonly installedAt: string
+}
+
+/** Kind-install overview for the Manage tab. */
+export interface KindListView {
+  readonly records: readonly KindRecordView[]
+  /** Directory names under <dshHome>/skills. */
+  readonly skills: readonly string[]
+  /** Directory names under <dshHome>/.agent-presets. */
+  readonly presets: readonly string[]
 }
 
 /** Result of launching a profile instance. */
