@@ -17,14 +17,20 @@ export const MARKETPLACE_FETCH_TIMEOUT_MS = 15_000
 
 /** Cached agents, one per proxy URL (agents are stateless dispatchers). */
 const agents = new Map<string, ProxyAgent>()
+/** Upper bound on cached agents (proxy env changes are rare). */
+const MAX_AGENTS = 8
 
 /** Whether a NO_PROXY entry covers the host (simple suffix match). */
 function noProxyMatches(host: string): boolean {
   const noProxy = process.env.NO_PROXY ?? process.env.no_proxy
   if (noProxy === undefined || noProxy === '') return false
+  const h = host.toLowerCase()
   return noProxy.split(',').some((entry) => {
-    const e = entry.trim()
-    return e === '*' || host === e || host.endsWith('.' + e)
+    const e = entry.trim().toLowerCase()
+    if (e === '*') return true
+    // Strip an optional port from the entry (NO_PROXY=host:port form).
+    const hostPart = e.startsWith('[') ? e.slice(1, e.indexOf(']') + 1) : e.split(':')[0]!
+    return h === hostPart || h.endsWith('.' + hostPart)
   })
 }
 
@@ -39,6 +45,14 @@ export function proxyAgentFor(url: string): ProxyAgent | null {
   if (agent === undefined) {
     agent = new ProxyAgent(proxy)
     agents.set(proxy, agent)
+    // Bound the cache: drop the oldest entry when it grows (audit — the
+    // map used to grow without bound and never destroyed agents).
+    while (agents.size > MAX_AGENTS) {
+      const oldest = agents.keys().next().value
+      if (oldest === undefined) break
+      agents.get(oldest)?.close()
+      agents.delete(oldest)
+    }
   }
   return agent
 }
@@ -51,9 +65,16 @@ export function proxyAgentFor(url: string): ProxyAgent | null {
  */
 export async function marketplaceFetch(url: string, init?: UndiciRequestInit): Promise<UndiciResponse> {
   const agent = proxyAgentFor(url)
+  // Combine the caller's signal with the timeout instead of overwriting it
+  // (audit: AbortSignal.timeout used to clobber init.signal).
+  const callerSignal = init?.signal
+  const timeoutSignal = AbortSignal.timeout(MARKETPLACE_FETCH_TIMEOUT_MS)
+  const combined = callerSignal !== undefined && callerSignal !== null
+    ? AbortSignal.any([callerSignal, timeoutSignal])
+    : timeoutSignal
   return await undiciFetch(url, {
     ...init,
-    signal: AbortSignal.timeout(MARKETPLACE_FETCH_TIMEOUT_MS),
+    signal: combined,
     ...(agent !== null ? { dispatcher: agent } : {}),
   })
 }

@@ -38,7 +38,11 @@ import type { ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
 // reaches the verb.
 const DSH_PLUGIN_MUTATION =
   /\bdsh\s+plugin\b(?:\s+--[^\s]+(?:\s+[^\s-][^\s]*)?)*\s+(?:add|install|remove|rm|update|upgrade|uninstall|delete)\b/
-const PNPM_MUTATION = /\bpnpm\b[\s\S]{0,80}?\b(?:add|remove|rm)\b/
+// Any package-manager add/remove/rm hitting a profile dir — pnpm, npm,
+// yarn, bun, and their --dir/-C variants (audit: the old guard only
+// covered pnpm).
+const PM_MUTATION = /\b(?:pnpm|npm|yarn|bun)\b[\s\S]{0,80}?\b(?:add|remove|rm|uninstall|install)\b/
+const PM_DIR_FLAG = /(?:--dir|--prefix|-C)\b[^;\n&|]{0,60}?/ 
 const PROFILE_DIR_MARKER = /profiles|\\.dsh|DSH_HOME/
 
 /** Denial reason shown to the model in the tool result. */
@@ -68,7 +72,7 @@ function commandText(exec: ToolExecution): string | null {
 function isRawPluginMutation(command: string): boolean {
   for (const segment of command.split(/[;\n&|]+/)) {
     if (DSH_PLUGIN_MUTATION.test(segment)) return true
-    if (PNPM_MUTATION.test(segment) && PROFILE_DIR_MARKER.test(segment)) return true
+    if (PM_MUTATION.test(segment) && PROFILE_DIR_MARKER.test(segment)) return true
   }
   return false
 }

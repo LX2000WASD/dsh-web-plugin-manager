@@ -1202,8 +1202,18 @@ export class PluginManagerService extends Service {
       const profile = entry.kind === 'cordis-plugin' ? entry.profile : (targetProfile.length > 0 ? targetProfile : 'web')
       try {
         const result = await installWithSource(this.ctx, profile, entry.source)
-        outputs.push('[' + entry.name + '] ' + (result.ok ? 'restored' : 'FAILED: ' + result.output.slice(0, 300)))
-        if (!result.ok) ok = false
+        if (!result.ok && result.awaiting !== undefined) {
+          // The repository needs install-time env vars the backup cannot
+          // carry — say exactly which, so the restore is not a dead end
+          // (audit m4).
+          outputs.push('[' + entry.name + '] PAUSED: needs environment variable(s) '
+            + result.awaiting.questions.map(q => q.id).join(', ')
+            + ' — install it manually from the marketplace/Manage tab and provide them')
+          ok = false
+        } else {
+          outputs.push('[' + entry.name + '] ' + (result.ok ? 'restored' : 'FAILED: ' + result.output.slice(0, 300)))
+          if (!result.ok) ok = false
+        }
       } catch (error: unknown) {
         outputs.push('[' + entry.name + '] FAILED: ' + (error instanceof Error ? error.message : String(error)))
         ok = false
@@ -1381,7 +1391,10 @@ export class PluginManagerService extends Service {
       }
     }
     if (record.type === 'cordis-plugin') {
-      if (profile.length === 0) {
+      // The record carries the profile the plugin was installed into —
+      // fall back to it when the caller passes none (audit m3).
+      const targetProfile = profile.length > 0 ? profile : (record.profile ?? '')
+      if (targetProfile.length === 0) {
         return {
           ok: false,
           exitCode: 1,
@@ -1397,7 +1410,7 @@ export class PluginManagerService extends Service {
       const outputs: string[] = []
       let ok = true
       for (const name of names) {
-        const result = await removeProtected(this.ctx, profile, name)
+        const result = await removeProtected(this.ctx, targetProfile, name)
         outputs.push(result.output)
         if (!result.ok) ok = false
       }
@@ -1872,7 +1885,10 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
   try {
     const cacheRoot = join(dshHome(), 'plugin-manager-src')
     mkdirSync(cacheRoot, { recursive: true })
-    const base = repo.replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/^\/+/, '').replace(/[^A-Za-z0-9._-]/g, '-')
+    // Drop a trailing .git so the clone dir name matches gitCacheIdentity
+    // (audit: git+https://…repo.git used to cache as …-repo-git).
+    const base = repo.replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/^\/+/, '')
+      .replace(/\.git$/, '').replace(/[^A-Za-z0-9._-]/g, '-')
     const dirName = base + (ref !== undefined ? '-' + ref.replace(/[^A-Za-z0-9._-]/g, '-') : '')
     const dest = join(cacheRoot, dirName)
     const created = !existsSync(dest)
@@ -2113,9 +2129,17 @@ async function installWithSourceInner(ctx: Context | null, profile: string, spec
     const kind = detectRepoType(prepared.spec)
     if (kind === 'skill' || kind === 'agent-preset') {
       try {
+        // Names owned by OTHER live records must not be silently
+        // overwritten by this install (audit m1).
+        const records = await loadKindRecords()
+        const occupied = new Set<string>()
+        for (const [otherKey, record] of records) {
+          if (otherKey === repoKey) continue
+          for (const name of record.names ?? []) occupied.add(name)
+        }
         const installed = kind === 'skill'
-          ? installSkill(prepared.spec, repoKey)
-          : installPreset(prepared.spec, repoKey)
+          ? installSkill(prepared.spec, repoKey, occupied)
+          : installPreset(prepared.spec, repoKey, occupied)
         await saveKindRecord(repoKey, {
           type: kind,
           name: installed.name,
@@ -2229,6 +2253,26 @@ async function installWithSourceInner(ctx: Context | null, profile: string, spec
     return {
       ...result,
       output: hintOutput + '\n[plugin-manager] the repository may not commit build artifacts (dist/lib), or the package is not published to npm — check that the main/exports entry file exists in the repo, or install the npm package by name.',
+    }
+  }
+  if (result.ok) {
+    // cordis-plugin install succeeded: keep a kind record so the
+    // marketplace uninstall / listKinds surfaces it (audit m3 — previously
+    // cordis installs never recorded anything and uninstall-kind was dead
+    // for them). The record also carries the target profile.
+    const installedNames = result.installed ?? []
+    if (installedNames.length > 0) {
+      try {
+        await saveKindRecord(repoKey, {
+          type: 'cordis-plugin',
+          name: installedNames[0] ?? null,
+          names: installedNames.length > 0 ? [...installedNames] : null,
+          location: join(profileDir(profile), 'node_modules'),
+          version: null,
+          installedAt: new Date().toISOString(),
+          profile: profile,
+        })
+      } catch { /* the install record is advisory */ }
     }
   }
   return { ...result, output }
@@ -3299,7 +3343,10 @@ async function enrichRepos(items: MarketplaceItem[], prior: Map<string, Marketpl
 
 /** Identity of a git-cache clone dir (mirrors prepareInstallSource naming: github.com-owner-repo). */
 function gitCacheIdentity(source: string): string | null {
-  const match = /github\.com[-/]([^/\s]+)[-/]([^/\s]+)/.exec(source)
+  // The clone cache strips a trailing .git from the dir name
+  // (prepareInstallSource) — the identity must too, or the installed
+  // detection misses `git+https://…repo.git` sources (audit).
+  const match = /github\.com[-/]([^/\s]+?)[-/]([^/\s]+?)(?:\.git)?$/i.exec(source)
   return match !== null ? `github.com-${match[1]!.toLowerCase()}-${match[2]!.toLowerCase()}` : null
 }
 

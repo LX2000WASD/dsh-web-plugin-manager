@@ -50,6 +50,14 @@ export function slugDirName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'plugin'
 }
 
+/** Windows reserved device names (CON/NUL/COM1...) — mkdir fails EINVAL. */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+
+/** A directory name safe on every platform (reserved names get a suffix). */
+export function safeDirName(name: string): string {
+  return WINDOWS_RESERVED.test(name) ? name + '-skill' : name
+}
+
 /** Normalize a repository reference (URL or owner/repo) to lowercase owner/repo. */
 export function normalizeRepoRef(value: string): string | null {
   const s = value.trim()
@@ -230,7 +238,7 @@ function copyFilter(src: string): boolean {
  * collections); names come from SKILL.md frontmatter, falling back to the
  * repo name (single root) or the directory name (multiple roots).
  */
-export function installSkill(root: string, repoName: string): { name: string; names: string[]; location: string } {
+export function installSkill(root: string, repoName: string, occupied?: Set<string>): { name: string; names: string[]; location: string } {
   const skillRoots = findSkillRoots(root)
   if (skillRoots.length === 0) throw new Error('no SKILL.md found in the repository')
   const destRoot = skillsDirPath()
@@ -239,7 +247,13 @@ export function installSkill(root: string, repoName: string): { name: string; na
   const repoSlug = slugDirName(repoName.split('/').pop() ?? repoName)
   for (const skillRoot of skillRoots) {
     const fallback = skillRoots.length === 1 ? repoSlug : slugDirName(skillRoot.split(sep).pop() ?? '')
-    const name = skillDisplayName(skillRoot) ?? fallback
+    const name = safeDirName(skillDisplayName(skillRoot) ?? fallback)
+    // A name owned by ANOTHER live install record would be silently
+    // overwritten — refuse with guidance instead (audit m1).
+    if (occupied !== undefined && occupied.has(name)) {
+      throw new Error('skill name "' + name + '" is already installed from another repository — '
+        + 'rename the SKILL.md frontmatter name, or uninstall the other skill first')
+    }
     const dest = join(destRoot, name)
     rmSync(dest, { recursive: true, force: true })
     cpSync(skillRoot, dest, { recursive: true, filter: copyFilter })
@@ -258,7 +272,7 @@ export function installSkill(root: string, repoName: string): { name: string; na
  * `preset` name falls back to the repo name as the id); a root preset copies
  * under the repo name.
  */
-export function installPreset(root: string, repoName: string): { name: string; names: string[]; location: string } {
+export function installPreset(root: string, repoName: string, occupied?: Set<string>): { name: string; names: string[]; location: string } {
   const presetRoots = findPresetRoots(root)
   if (presetRoots.length === 0) throw new Error('no agent.cordis.yml found in the repository')
   const repoSlug = slugDirName(repoName.split('/').pop() ?? repoName)
@@ -267,7 +281,11 @@ export function installPreset(root: string, repoName: string): { name: string; n
   const installed: string[] = []
   for (const presetRoot of presetRoots) {
     const base = presetRoot === root ? '' : presetRoot.split(sep).pop() ?? ''
-    const id = base === '' || base === 'preset' ? repoSlug : slugDirName(base)
+    const id = safeDirName(base === '' || base === 'preset' ? repoSlug : slugDirName(base))
+    if (occupied !== undefined && occupied.has(id)) {
+      throw new Error('preset id "' + id + '" is already installed from another repository — '
+        + 'rename the preset directory, or uninstall the other preset first')
+    }
     const dest = join(destRoot, id)
     rmSync(dest, { recursive: true, force: true })
     cpSync(presetRoot, dest, { recursive: true, filter: copyFilter })
@@ -295,6 +313,8 @@ export interface KindRecord {
   readonly version: string | null
   /** ISO timestamp. */
   readonly installedAt: string
+  /** Target profile (cordis-plugin installs; skill/preset are global). */
+  readonly profile?: string
 }
 
 export function kindRecordsFile(): string {

@@ -75,6 +75,7 @@ export function scanImports(filePath: string): string[] {
     const statement = /(?:^|[;\n])\s*(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]/g
     const sideEffect = /(?:^|[;\n])\s*import\s*['"]([^'"]+)['"]/g
     const dynamic = /(?:import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g
+    const dynamicTemplate = /(?:import\s*\(\s*|require\s*\(\s*)`([^`$]+)`/g
     for (const match of code.matchAll(statement)) {
       const spec = match[1]!
       if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
@@ -88,6 +89,11 @@ export function scanImports(filePath: string): string[] {
       found.add(spec)
     }
     for (const match of code.matchAll(dynamic)) {
+      const spec = match[1]!
+      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
+      found.add(spec)
+    }
+    for (const match of code.matchAll(dynamicTemplate)) {
       const spec = match[1]!
       if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
       found.add(spec)
@@ -114,6 +120,7 @@ function relativeImports(filePath: string): string[] {
     const statement = /(?:^|[;\n])\s*(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]/g
     const sideEffect = /(?:^|[;\n])\s*import\s*['"]([^'"]+)['"]/g
     const dynamic = /(?:import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g
+    const dynamicTemplate = /(?:import\s*\(\s*|require\s*\(\s*)`([^`$]+)`/g
     for (const match of code.matchAll(statement)) {
       const spec = match[1]!
       if (spec.startsWith('.') && !spec.endsWith('.css') && !spec.endsWith('.json')) found.add(spec)
@@ -594,23 +601,28 @@ export function analyzeProfile(
   }
 
   // Service conflicts: the same service name registered by several plugins.
-  const serviceOwners = new Map<string, string[]>()
+  // The disable target must be the patch ROW ID (setEnabled targets rows),
+  // not the package name — scoped names (row slug) differ, and a mismatched
+  // target disabled nothing silently (audit).
+  const rowTarget = (pkg: AnalyzePackage): string => pkg.rowId ?? pkg.name
+  const serviceOwners = new Map<string, Array<{ name: string; target: string }>>()
   for (const pkg of packages) {
     for (const service of pkg.services) {
       const owners = serviceOwners.get(service) ?? []
-      owners.push(pkg.name)
+      owners.push({ name: pkg.name, target: rowTarget(pkg) })
       serviceOwners.set(service, owners)
     }
   }
   for (const [service, owners] of serviceOwners) {
     if (owners.length > 1) {
+      const names = owners.map(o => o.name)
       issues.push({
         kind: 'service-conflict',
-        message: 'service ' + service + ' is registered by ' + owners.join(' and ') + ' (later registrations shadow earlier ones)',
+        message: 'service ' + service + ' is registered by ' + names.join(' and ') + ' (later registrations shadow earlier ones)',
         fix: {
           action: 'disable-entry',
-          target: owners[1]!,
-          label: '禁用后注册者 ' + owners[1],
+          target: owners[1]!.target,
+          label: '禁用后注册者 ' + owners[1]!.name,
           confirm: true,
         },
       })
@@ -627,24 +639,25 @@ export function analyzeProfile(
     { kind: 'route-conflict', label: 'web route', entries: packages.map(pkg => pkg.routes) },
   ]
   for (const { kind, label, entries } of conflictSets) {
-    const owners = new Map<string, string[]>()
+    const owners = new Map<string, Array<{ name: string; target: string }>>()
     packages.forEach((pkg, index) => {
       for (const name of entries[index] ?? []) {
         const list = owners.get(name) ?? []
-        list.push(pkg.name)
+        list.push({ name: pkg.name, target: rowTarget(pkg) })
         owners.set(name, list)
       }
     })
     for (const [name, packageOwners] of owners) {
       if (packageOwners.length > 1) {
+        const names = packageOwners.map(o => o.name)
         issues.push({
           kind,
-          message: label + ' ' + name + ' is registered by ' + packageOwners.join(' and ')
+          message: label + ' ' + name + ' is registered by ' + names.join(' and ')
             + ' (the second registration fails loud at runtime)',
           fix: {
             action: 'disable-entry',
-            target: packageOwners[1]!,
-            label: '禁用后注册者 ' + packageOwners[1],
+            target: packageOwners[1]!.target,
+            label: '禁用后注册者 ' + packageOwners[1]!.name,
             confirm: true,
           },
         })
