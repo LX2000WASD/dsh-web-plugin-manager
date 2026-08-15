@@ -163,16 +163,16 @@ function formatStars(n: number): string {
   return String(n)
 }
 
-/** dsh.so security badge: label + tone for the risk level. */
+/** dsh.so security badge: tone by risk level (no icons — text only). */
 function securityBadge(
   t: (key: PluginManagerLocaleKey) => string,
   security: { riskLevel: string; status: string },
 ): { text: string; style: React.CSSProperties } {
   const risk = security.riskLevel
-  if (risk === 'low') return { text: '🔒 ' + t('securityLow'), style: styles.securityLow }
-  if (risk === 'medium') return { text: '⚠️ ' + t('securityMedium'), style: styles.securityMedium }
-  if (risk === 'high' || risk === 'critical') return { text: '🚨 ' + t('securityHigh'), style: styles.securityHigh }
-  return { text: '⏳ ' + t('securityUnknown'), style: styles.tag }
+  if (risk === 'low') return { text: t('securityLow'), style: styles.securityLow }
+  if (risk === 'medium') return { text: t('securityMedium'), style: styles.securityMedium }
+  if (risk === 'high' || risk === 'critical') return { text: t('securityHigh'), style: styles.securityHigh }
+  return { text: t('securityUnknown'), style: styles.tag }
 }
 
 /** Render the marketplace page. */
@@ -401,9 +401,14 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
             <ul style={{ ...styles.cards, gridTemplateColumns: cols === 2 ? 'repeat(2, minmax(0, 1fr))' : 'repeat(1, minmax(0, 1fr))' }}>
               {rendered.map((item) => {
                 const sourceLabel = item.packageName !== undefined && item.packageName.length > 0 ? t('sourceNpm') : t('sourceGit')
-                const kindLabel = item.installedKind === 'skill' ? t('typeSkill')
-                  : item.installedKind === 'agent-preset' ? t('typeAgent')
-                    : t('typePlugin')
+                // Kind (skill/agent/plugin) is only known for installed items —
+                // type detection requires a clone, which the listing cannot
+                // afford for ~3000 entries. Uninstalled items show no type tag.
+                const kindLabel = item.installed
+                  ? item.installedKind === 'skill' ? t('typeSkill')
+                    : item.installedKind === 'agent-preset' ? t('typeAgent')
+                      : t('typePlugin')
+                  : null
                 return (
                   <li key={item.name} style={styles.card}>
                     <div style={styles.cardRow}>
@@ -433,9 +438,9 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
                     <div style={styles.cardMetaRow}>
                       <span style={styles.tag} title={String(item.stars)}>★ {formatStars(item.stars)}</span>
                       <span style={styles.tag} title={item.packageName}>{sourceLabel}</span>
-                      <span style={styles.tag}>{kindLabel}</span>
+                      {kindLabel !== null && <span style={styles.tag}>{kindLabel}</span>}
                     </div>
-                    {/* Tags row: evidence status + dsh.so verification/security + topics. */}
+                    {/* Tags row: adp (awesome) status + so (dsh.so) verification/security + topics. */}
                     <div style={styles.cardMetaRow}>
                       {item.status !== undefined && item.status.length > 0 && (
                         <span style={{ ...styles.tag, ...(item.status.includes('✅') ? styles.tagOn : {}) }} title={item.status}>
