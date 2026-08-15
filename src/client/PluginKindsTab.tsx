@@ -130,6 +130,8 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
     void injected.current.uninstall(record.repo).then((result) => {
       setOutput('$ uninstall ' + record.repo + '\n' + result.output)
       reload()
+    }, (error: unknown) => {
+      setOutput('$ uninstall ' + record.repo + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     }).finally(() => setBusy(null))
   }
 
@@ -141,6 +143,8 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
         : ''
       setOutput('$ re-pull ' + record.repo + '\n' + result.output + pausedNote)
       reload()
+    }, (error: unknown) => {
+      setOutput('$ re-pull ' + record.repo + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     }).finally(() => setBusy(null))
   }
 

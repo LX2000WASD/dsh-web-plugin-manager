@@ -176,14 +176,18 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
   const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, fixIssue, fixAll })
 
+  // Request sequence guard: a slow response from an earlier profile must
+  // not overwrite the state of the currently selected one (audit M8).
+  const loadSeq = useRef(0)
   const load = (profile: string): void => {
     if (profile.length === 0) return
+    const seq = ++loadSeq.current
     // Keep showing the previous snapshot during refreshes so the page does
     // not collapse to the top (only the first load shows the loading state).
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
     void injected.current.list(profile).then(
-      (snapshot) => setState({ status: 'ready', snapshot }),
-      (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
+      (snapshot) => { if (seq === loadSeq.current) setState({ status: 'ready', snapshot }) },
+      (error: unknown) => { if (seq === loadSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }) },
     )
   }
 
@@ -212,6 +216,10 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     setSelected(name)
     setUpdates({})
     setAnalysis(null)
+    // C2 env form and command output are profile-bound — never leave them
+    // dangling across a profile switch (audit M9 / m-1).
+    setEnvQuestions(null)
+    setOutput('')
     load(name)
   }
 
@@ -223,6 +231,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       setAnalysis(result)
       setFixedKeys(new Set())
       setConfirmKey(null)
+    } catch (error: unknown) {
+      setOutput('$ analyze --profile ' + selected + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setAnalyzing(false)
     }
@@ -248,6 +258,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
         setFixedKeys(current => new Set(current).add(fixKey))
         void onAnalyze()
       }
+    } catch (error: unknown) {
+      setOutput('$ fix ' + issue.kind + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setFixing(null)
     }
@@ -259,6 +271,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       const result = await injected.current.fixAll(selected)
       setOutput('$ fix all\n' + result.output)
       void onAnalyze()
+    } catch (error: unknown) {
+      setOutput('$ fix all\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setFixing(null)
     }
@@ -297,6 +311,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       setEnvQuestions(null)
       setSpec('')
       load(selected)
+    } catch (error: unknown) {
+      setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -321,6 +337,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       setEnvQuestions(null)
       setSpec('')
       load(selected)
+    } catch (error: unknown) {
+      setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -333,6 +351,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       const result = await remove(selected, name)
       setOutput('$ dsh plugin --profile ' + selected + ' remove ' + name + '\n' + result.output)
       load(selected)
+    } catch (error: unknown) {
+      setOutput('$ dsh plugin --profile ' + selected + ' remove ' + name + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -345,6 +365,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       const result = await removeInsert(selected, rowId)
       setOutput(result.message)
       load(selected)
+    } catch (error: unknown) {
+      setOutput('$ removeInsert ' + rowId + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -364,6 +386,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
           ? updatable.map(item => '  ' + item.name + ': ' + (item.currentVersion ?? '?') + ' → ' + (item.latestVersion ?? '?')).join('\n')
           : '  all ' + result.items.length + ' packages up to date')
         + '\n' + result.message)
+    } catch (error: unknown) {
+      setOutput('$ check updates --profile ' + selected + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setChecking(false)
     }
@@ -377,6 +401,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       setOutput('$ update ' + name + '\n' + result.output + '\n' + (result.ok ? t('updateRestartHint') : t('updateFailedHint')))
       setUpdates(current => { const next = { ...current }; if (result.ok) delete next[name]; return next })
       load(selected)
+    } catch (error: unknown) {
+      setOutput('$ update ' + name + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }

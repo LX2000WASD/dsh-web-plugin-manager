@@ -142,6 +142,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
       const result = await injected.current.createProfile(name, template)
       setOutput(result.message)
       if (result.ok) { setNewName(''); refresh() }
+    } catch (error: unknown) {
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -155,6 +157,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
       const result = await injected.current.renameProfile(oldName, newProfileName.trim())
       setOutput(result.message)
       if (result.ok) refresh()
+    } catch (error: unknown) {
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -167,6 +171,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
       const result = await injected.current.removeProfile(name)
       setOutput(result.message)
       if (result.ok) refresh()
+    } catch (error: unknown) {
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -178,6 +184,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
       const result = await injected.current.startProfile(name)
       setOutput(result.message)
       if (result.ok && result.url !== undefined) window.open(result.url, '_blank')
+    } catch (error: unknown) {
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -188,6 +196,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
     try {
       const result = await injected.current.stopProfile(name)
       setOutput(result.message)
+    } catch (error: unknown) {
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -201,6 +211,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
       const result = await injected.current.copyPlugins(transferFrom, transferTo, names)
       setOutput('$ copy ' + names.join(', ') + ' ' + transferFrom + ' -> ' + transferTo + '\n' + result.output)
       setTransferNames('')
+    } catch (error: unknown) {
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -215,10 +227,12 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
-      anchor.download = 'dsh-backup-' + (backupProfile.length > 0 ? backupProfile : 'all') + '-' + backup.exportedAt.slice(0, 10) + '.json'
+      anchor.download = 'dsh-backup-' + (backupProfile.length > 0 ? backupProfile : 'all') + '-' + (backup.exportedAt ?? '').slice(0, 10) + '.json'
       anchor.click()
       URL.revokeObjectURL(url)
       setOutput('$ export backup (' + backup.profiles.length + ' profile(s), ' + backup.kinds.length + ' kind record(s))')
+    } catch (error: unknown) {
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -250,6 +264,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
       // Re-diff so the restored state is visible.
       const diff = await injected.current.backupDiff(backupData, backupProfile)
       setDiffResult(diff)
+    } catch (error: unknown) {
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }

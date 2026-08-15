@@ -179,14 +179,18 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Request sequence guard: a slow response from an earlier profile must not
+  // overwrite the state of the currently selected one (audit M8).
+  const loadSeq = useRef(0)
   const load = (profile: string): void => {
     if (profile.length === 0) return
+    const seq = ++loadSeq.current
     // Keep showing the previous snapshot during refreshes so the page does
     // not collapse to the top (only the first load shows the loading state).
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
     void injected.current.list(profile).then(
-      (snapshot) => setState({ status: 'ready', snapshot }),
-      (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
+      (snapshot) => { if (seq === loadSeq.current) setState({ status: 'ready', snapshot }) },
+      (error: unknown) => { if (seq === loadSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }) },
     )
   }
 
@@ -204,6 +208,8 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
       const result = await injected.current.setEnabled(selected, entryId, enable)
       setExpanded(null)
       load(selected)
+    } catch (error: unknown) {
+      window.alert((error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }
@@ -218,6 +224,8 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
       setExpanded(null)
       load(selected)
       if (!result.ok) window.alert(result.message)
+    } catch (error: unknown) {
+      window.alert((error instanceof Error ? error.message : String(error)))
     } finally {
       setBusy(null)
     }

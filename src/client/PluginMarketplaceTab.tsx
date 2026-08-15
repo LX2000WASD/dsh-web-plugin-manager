@@ -197,12 +197,16 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
 
   const injected = useRef({ marketplace, profiles, install, update, unblock })
 
+  // Request sequence guard: a slow response for an earlier profile must not
+  // overwrite the listing of the currently selected one (audit M8).
+  const fetchSeq = useRef(0)
   /** Fetch the listing; installed flags are computed server-side per profile. */
   const fetchMarketplace = (refresh: boolean, profile: string): void => {
+    const seq = ++fetchSeq.current
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
     void injected.current.marketplace(refresh, profile).then(
-      (result) => setState({ status: 'ready', result }),
-      (error: unknown) => setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }),
+      (result) => { if (seq === fetchSeq.current) setState({ status: 'ready', result }) },
+      (error: unknown) => { if (seq === fetchSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }) },
     )
   }
 
@@ -222,6 +226,9 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
 
   const onTargetProfileChange = (value: string): void => {
     setTargetProfile(value)
+    // The C2 env form is bound to the previous profile — never let its
+    // answers leak into another environment's install (audit M9).
+    setAwaiting(null)
     fetchMarketplace(false, value)
   }
 
@@ -244,6 +251,9 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
       }
       // Re-fetch so installed/update flags reflect the change.
       fetchMarketplace(false, targetProfile)
+    }, (error: unknown) => {
+      // Network failures and non-200 envelopes must not go silent (audit M7).
+      setOutput('$ ' + label + ' ' + item.displayName + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     }).finally(() => {
       setBusy(null)
     })
@@ -271,9 +281,12 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
   /** Unblock one repository (restores it in the listing on the next fetch). */
   const onUnblock = (repo: string): void => {
     setBusy('unblock:' + repo)
-    void injected.current.unblock(repo).finally(() => {
-      setBusy(null)
+    void injected.current.unblock(repo).then(() => {
       fetchMarketplace(false, targetProfile)
+    }, (error: unknown) => {
+      setOutput('$ unblock ' + repo + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
+    }).finally(() => {
+      setBusy(null)
     })
   }
 
