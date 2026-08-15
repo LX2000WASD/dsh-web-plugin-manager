@@ -70,8 +70,17 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 ## agent 工具与安装守卫
 
 - `plugin_status` / `plugin_install` / `plugin_uninstall` / `plugin_toggle`（目标 profile 由配置 `profile` 指定，默认 `web`）；依赖注入避免循环导入
+- `plugin_search`：自然语言检索市场（本地索引，name 3 分 / topics 2 分 / 描述 1 分加权，空查询按星数；中英文分词），结果带已安装标记与仓库链接，并提示"安装前先浏览仓库"（索引元数据无法判断质量，安装本身走质量门）
 - 安装守卫（`src/guard.ts`）：`tools.guard` 拒绝 bash/run_code 中裸 `dsh plugin add/remove/update` 与指向 profile 目录的 `pnpm add/remove`（只读 verb list/status/dump-config/help 放行），拒绝原因直接给模型指路 `plugin_*` 工具与 `dshpm`；`systemPrompt.section`（order 300）常驻提示同一规则
 - 守卫只拦 agent 工具调用，拦不住用户在终端手工执行裸命令
+
+## 多类型安装（skill / agent 预设）
+
+- 类型检测分层：根/嵌套 `agent.cordis.yml` → 预设（官方单文件判定，preset.yml 仅显示元数据）；根 package.json 声明 DSH 能力 → cordis 插件；根 `SKILL.md` → skill；嵌套预设/插件/技能根；其余（含含 install.sh 的仓库——**永不自动执行第三方脚本**）→ 非三类，拒绝安装并加入市场屏蔽名单
+- skill 安装到官方根 `<dshHome>/skills`（frontmatter name 优先，技能集合仓库逐个装，跳过点目录/node_modules/vendored）；**chokidar watch 默认开启 → 安装/删除即热加载**；预设安装到 `<dshHome>/.agent-presets`（目录名即 preset id，官方每次会话发现重读）；预设的管理（复制/删除/默认）由官方设置页完成
+- 安装记录 `installed-kinds.json`（市场安装的来源/类型/位置/时间，串行队列读写）；市场已安装判定与卡片类型徽标（skill/预设/插件）来自记录
+- 市场卸载：管理页「技能与预设」区块（记录列表 + 卸载 + git 源重新拉取）；`dshpm uninstall-kind <owner/repo>`；skill/预设删目录含路径越界防护，cordis 按记录逐个走受保护 remove
+- 屏蔽名单：安装时检测为非三类的仓库写入 `blocked-repos.json`，市场所有列表路径（缓存/新拉/兜底）统一过滤，响应带 `blocked`/`blockedRepos`；市场页提供「解除屏蔽」
 
 ## CLI（dshpm）
 
