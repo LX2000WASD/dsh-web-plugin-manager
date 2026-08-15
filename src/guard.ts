@@ -21,21 +21,23 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
 
 /**
- * Shell commands the agent may legitimately run against the dsh CLI without
- * touching plugin state: listing, dumping config, help. Everything else on
- * the plugin subcommand is a mutation.
+ * Mutating plugin-command patterns, evaluated PER SHELL SEGMENT (see
+ * isRawPluginMutation): the official CLI's plugin subcommand whose first
+ * non-flag token is a write verb, or pnpm add/remove/rm combined with a dsh
+ * profile directory marker inside the same segment. The marker may sit
+ * before or after the verb (pnpm --dir <profile-dir> add foo).
+ *
+ * The dsh plugin verb is positional: the subcommand takes only flags
+ * (--profile X) before the verb, so a read-only call (list/status/help) is
+ * simply a verb that is not in the mutation set. There is no whole-command
+ * read-only exemption — an echo or comment mentioning "plugin list" in the
+ * same script can never exempt a real mutation.
  */
-const DSH_PLUGIN_READ_ONLY = /\b(?:list|ls|status|dump-config|dump|help|-h|--help|--dump-config)\b/
-
-/**
- * Mutating plugin-command patterns: the official CLI's plugin subcommand
- * with a write verb, or pnpm add/remove/rm combined with a dsh profile
- * directory marker anywhere in the command (which bypasses the quality gate
- * exactly like the raw CLI). The marker may sit before or after the verb
- * (pnpm --dir ~/.dsh/profiles/web add foo).
- */
+// Flags may carry a space-separated value (--profile web): the optional
+// value is backtrackable, so a flag WITHOUT a value (--force add x) still
+// reaches the verb.
 const DSH_PLUGIN_MUTATION =
-  /\bdsh\s+plugin\b[\s\S]{0,160}?\b(?:add|install|remove|rm|update|upgrade|uninstall|delete)\b/
+  /\bdsh\s+plugin\b(?:\s+--[^\s]+(?:\s+[^\s-][^\s]*)?)*\s+(?:add|install|remove|rm|update|upgrade|uninstall|delete)\b/
 const PNPM_MUTATION = /\bpnpm\b[\s\S]{0,80}?\b(?:add|remove|rm)\b/
 const PROFILE_DIR_MARKER = /profiles|\\.dsh|DSH_HOME/
 
@@ -58,13 +60,17 @@ function commandText(exec: ToolExecution): string | null {
 
 /**
  * Whether a command mutates plugin state through the unprotected raw path.
- * Read-only dsh plugin verbs (list/status/dump-config/help) are allowed.
+ * Each shell segment (commands separated by ; newline & or |) is judged on
+ * its own: a read-only dsh plugin call in one segment must not exempt a
+ * mutating call in another, and a profile-dir mention in one segment must
+ * not implicate a plain pnpm command in another.
  */
 function isRawPluginMutation(command: string): boolean {
-  if (DSH_PLUGIN_MUTATION.test(command)) {
-    if (!DSH_PLUGIN_READ_ONLY.test(command)) return true
+  for (const segment of command.split(/[;\n&|]+/)) {
+    if (DSH_PLUGIN_MUTATION.test(segment)) return true
+    if (PNPM_MUTATION.test(segment) && PROFILE_DIR_MARKER.test(segment)) return true
   }
-  return PNPM_MUTATION.test(command) && PROFILE_DIR_MARKER.test(command)
+  return false
 }
 
 /** One guard instance for the running host (registered once per apply). */
