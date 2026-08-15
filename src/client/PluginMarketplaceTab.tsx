@@ -126,6 +126,26 @@ function shortDate(iso: string): string {
   return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0')
 }
 
+/** Registry classifier category ids → localized label (unknown ids pass through). */
+function categoryLabel(t: (key: PluginManagerLocaleKey) => string, category: string): string {
+  const byId: Record<string, PluginManagerLocaleKey> = {
+    vision: 'catVision',
+    document: 'catDocument',
+    memory: 'catMemory',
+    model: 'catModel',
+    notify: 'catNotify',
+    coding: 'catCoding',
+    conversation: 'catConversation',
+    'web-ui': 'catWebUi',
+    agent: 'catAgent',
+    tool: 'catTool',
+    resource: 'catResource',
+    other: 'catOther',
+  }
+  const key = byId[category]
+  return key !== undefined ? t(key) : category
+}
+
 /** Render the marketplace page. */
 export function PluginMarketplaceTab({ marketplace, profiles, install, update, t }: PluginMarketplaceTabProps): ReactNode {
   const [state, setState] = useState<ViewState>({ status: 'loading' })
@@ -321,10 +341,10 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, t
                       </span>
                     )}
                     {item.packageName !== undefined && item.packageName.length > 0 && (
-                      <span style={styles.tag} title={item.packageName}>npm {item.packageName}</span>
+                      <span style={styles.tag} title={item.packageName}>📦 {item.packageName}</span>
                     )}
                     {item.category !== undefined && item.category.length > 0 && (
-                      <span style={styles.tag}>{item.category}</span>
+                      <span style={styles.tag}>{categoryLabel(t, item.category)}</span>
                     )}
                   </div>
                   <div style={{ minWidth: 0, overflow: 'hidden', padding: '0 14px 10px' }}>
