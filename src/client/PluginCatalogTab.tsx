@@ -313,6 +313,7 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
         <span style={styles.filterLabel}>{t('profileLabel')}</span>
         <PmSelect
           ariaLabel={t('profileLabel')}
+          disabled={busy !== null}
           value={selected}
           options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
           onChange={onSelect}

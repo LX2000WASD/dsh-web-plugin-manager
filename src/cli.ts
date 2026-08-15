@@ -113,11 +113,12 @@ protected flow the Web UI and the plugin_* agent tools use.
 }
 
 /** Parse --profile/--home flags out of argv; returns [positionals, options]. */
-function parseArgs(argv: readonly string[]): { positionals: string[]; profile: string; home: string | null; envs: Record<string, string> } {
+function parseArgs(argv: readonly string[]): { positionals: string[]; profile: string; home: string | null; envs: Record<string, string>; errors: string[] } {
   const positionals: string[] = []
   let profile = 'web'
   let home: string | null = null
   const envs: Record<string, string> = {}
+  const errors: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
     if (arg === '--profile' && i + 1 < argv.length) {
@@ -128,7 +129,7 @@ function parseArgs(argv: readonly string[]): { positionals: string[]; profile: s
       const pair = argv[++i]!
       const eq = pair.indexOf('=')
       if (eq > 0) envs[pair.slice(0, eq)] = pair.slice(eq + 1)
-      else process.stderr.write('dshpm: ignoring --env ' + pair + ' (expected KEY=value)\n')
+      else errors.push('--env ' + pair + ' needs KEY=value')
     } else if (arg.startsWith('--profile=')) {
       profile = arg.slice('--profile='.length)
     } else if (arg.startsWith('--home=')) {
@@ -137,12 +138,12 @@ function parseArgs(argv: readonly string[]): { positionals: string[]; profile: s
       const pair = arg.slice('--env='.length)
       const eq = pair.indexOf('=')
       if (eq > 0) envs[pair.slice(0, eq)] = pair.slice(eq + 1)
-      else process.stderr.write('dshpm: ignoring --env ' + pair + ' (expected KEY=value)\n')
+      else errors.push('--env ' + pair + ' needs KEY=value')
     } else {
       positionals.push(arg)
     }
   }
-  return { positionals, profile, home, envs }
+  return { positionals, profile, home, envs, errors }
 }
 
 async function cmdInstall(profile: string, source: string, envs: Record<string, string>): Promise<number> {
@@ -344,7 +345,11 @@ function cmdAnalyze(profile: string): number {
 }
 
 async function main(): Promise<number> {
-  const { positionals, profile, home, envs } = parseArgs(process.argv.slice(2))
+  const { positionals, profile, home, envs, errors } = parseArgs(process.argv.slice(2))
+  if (errors.length > 0) {
+    for (const error of errors) process.stderr.write('dshpm: ' + error + '\n')
+    return 1
+  }
   if (home !== null) process.env.DSH_HOME = home
   const command = positionals[0]
   if (command === undefined || command === 'help' || command === '--help' || command === '-h') {
@@ -368,12 +373,20 @@ async function main(): Promise<number> {
       process.stdout.write('dshpm install: missing source (npm name, github:user/repo, git URL, tarball, or local path)\n')
       return 1
     }
+    if (positionals.length > 2) {
+      process.stdout.write('dshpm install: too many arguments (extra: ' + positionals.slice(2).join(' ') + ')\n')
+      return 1
+    }
     return await cmdInstall(profile, source, envs)
   }
   if (command === 'remove') {
     const name = positionals[1]
     if (name === undefined) {
       process.stdout.write('dshpm remove: missing plugin name\n')
+      return 1
+    }
+    if (positionals.length > 2) {
+      process.stdout.write('dshpm remove: too many arguments (extra: ' + positionals.slice(2).join(' ') + ')\n')
       return 1
     }
     return await cmdRemove(profile, name)
@@ -384,12 +397,20 @@ async function main(): Promise<number> {
       process.stdout.write('dshpm uninstall-kind: missing repo (owner/repo)\n')
       return 1
     }
+    if (positionals.length > 2) {
+      process.stdout.write('dshpm uninstall-kind: too many arguments (extra: ' + positionals.slice(2).join(' ') + ')\n')
+      return 1
+    }
     return await cmdUninstallKind(profile, repo)
   }
   if (command === 'update') {
     const name = positionals[1]
     if (name === undefined) {
       process.stdout.write('dshpm update: missing plugin name\n')
+      return 1
+    }
+    if (positionals.length > 2) {
+      process.stdout.write('dshpm update: too many arguments (extra: ' + positionals.slice(2).join(' ') + ')\n')
       return 1
     }
     return await cmdUpdate(profile, name)
@@ -400,10 +421,26 @@ async function main(): Promise<number> {
       process.stdout.write('dshpm mount: missing plugin name\n')
       return 1
     }
+    if (positionals.length > 2) {
+      process.stdout.write('dshpm mount: too many arguments (extra: ' + positionals.slice(2).join(' ') + ')\n')
+      return 1
+    }
     return cmdMount(profile, name)
   }
-  if (command === 'list') return cmdList(profile)
-  if (command === 'analyze') return cmdAnalyze(profile)
+  if (command === 'list') {
+    if (positionals.length > 1) {
+      process.stdout.write('dshpm list: too many arguments (extra: ' + positionals.slice(1).join(' ') + ')\n')
+      return 1
+    }
+    return cmdList(profile)
+  }
+  if (command === 'analyze') {
+    if (positionals.length > 1) {
+      process.stdout.write('dshpm analyze: too many arguments (extra: ' + positionals.slice(1).join(' ') + ')\n')
+      return 1
+    }
+    return cmdAnalyze(profile)
+  }
   process.stdout.write('dshpm: unknown command ' + JSON.stringify(command) + ' (try dshpm --help)\n')
   return 1
 }

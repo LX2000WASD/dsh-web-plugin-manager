@@ -363,6 +363,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
         <span style={styles.filterLabel}>{t('installTarget')}</span>
         <PmSelect
           ariaLabel={t('installTarget')}
+          disabled={busy !== null || awaiting !== null}
           value={targetProfile}
           options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
           onChange={onTargetProfileChange}

@@ -54,7 +54,7 @@ import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
 import {
   addBlockedRepo, detectRepoType, installPreset, installSkill, isUnderRoot, loadBlockedRepos,
   loadKindRecords, looksLikeDshPlugin, normalizeRepoRef, presetsDirPath, pruneGhostRecords, removeBlockedRepo, removeKindRecord,
-  saveKindRecord, skillsDirPath, slugDirName, type KindRecord,
+  renameRetry, rmRetry, saveKindRecord, skillsDirPath, slugDirName, type KindRecord,
 } from './kinds.ts'
 import { marketplaceFetch } from './net.ts'
 import {
@@ -415,7 +415,7 @@ export class PluginManagerService extends Service {
     const newDir = profileDir(newName)
     if (existsSync(newDir)) return { ok: false, message: "profile already exists: " + newName }
     try {
-      renameSync(oldDir, newDir)
+      renameRetry(oldDir, newDir)
       return { ok: true, message: "renamed " + oldName + " to " + newName }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
@@ -430,7 +430,7 @@ export class PluginManagerService extends Service {
     if (!existsSync(dir)) return { ok: false, message: "profile not found: " + name }
     if (isHostProfile(name)) return { ok: false, message: "cannot remove the running profile (" + name + ")" }
     try {
-      rmSync(dir, { recursive: true, force: true })
+      rmRetry(dir)
       return { ok: true, message: "removed profile " + name }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
@@ -1130,6 +1130,9 @@ export class PluginManagerService extends Service {
     const already: string[] = []
     const missingProfiles: string[] = []
     const unrestorable: string[] = []
+    // Ghost records (dirs deleted externally) would be judged "already
+    // installed" and skip the reinstall — prune first (audit n1).
+    await pruneGhostRecords()
     // Kind records (global skills/presets).
     const records = await loadKindRecords()
     for (const kind of backup.kinds) {
@@ -1827,9 +1830,12 @@ async function checkPackageUpdate(dir: string, name: string, source: string): Pr
       message: 'registry lookup failed (offline?)',
     }
   }
+  // Compare semver-wise: a string compare flags 1.2 vs 1.2.0 as an update
+  // (audit) — compareVersions pads missing segments.
+  const hasUpdate = installed !== undefined && compareVersions(installed, latest) < 0
   return {
     name,
-    hasUpdate: installed !== undefined && installed !== latest,
+    hasUpdate,
     ...(installed !== undefined ? { currentVersion: installed } : {}),
     latestVersion: latest,
     source: 'npm',
@@ -3536,10 +3542,20 @@ async function flagMarketplaceItems(items: readonly MarketplaceItem[], profile: 
 /** Overlay the dsh.so verification/security metadata onto the listing. */
 function overlayDshSo(items: readonly MarketplaceItem[], dshSo: readonly DshSoEntry[] | null): MarketplaceItem[] {
   if (dshSo === null || dshSo.length === 0) return [...items]
-  // dsh.so keys entries by the repo basename (no owner segment).
+  // dsh.so keys entries by the repo basename (no owner segment), so a
+  // basename shared by several owners (alice/tools vs bob/tools) cannot be
+  // attributed safely — skip the overlay for duplicated basenames instead of
+  // mis-tagging one owner with the other's metadata (audit).
+  const nameCounts = new Map<string, number>()
+  for (const item of items) {
+    const key = item.displayName.toLowerCase()
+    nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1)
+  }
   const byName = new Map(dshSo.map(entry => [entry.name.toLowerCase(), entry]))
   return items.map(item => {
-    const overlay = byName.get(item.displayName.toLowerCase())
+    const key = item.displayName.toLowerCase()
+    if (nameCounts.get(key) !== 1) return item
+    const overlay = byName.get(key)
     if (overlay === undefined) return item
     return {
       ...item,
@@ -3797,10 +3813,15 @@ function resolveInstalledName(profile: string, source: string): string | null {
   // Windows: the caller's source is a backslash path (clone cache) while pnpm
   // writes forward slashes (link:C:/Users/...) — compare both forms or the
   // match fails and the quality gate + insert-row mount are silently skipped.
+  // Comparisons are case-insensitive on Windows: a case-mismatched path must
+  // not silently skip the quality gate (audit W3).
+  const ci = process.platform === 'win32'
+  const eq = (a: string, b: string): boolean => ci ? a.toLowerCase() === b.toLowerCase() : a === b
+  const inc = (a: string, b: string): boolean => ci ? a.toLowerCase().includes(b.toLowerCase()) : a.includes(b)
   const normalized = source.replace(/\\/g, '/')
   const hit = Object.keys(deps).find(key =>
-    deps[key] === source || deps[key]?.includes(source)
-    || (normalized !== source && (deps[key] === normalized || deps[key]?.includes(normalized))))
+    eq(deps[key]!, source) || (deps[key] !== undefined && inc(deps[key], source))
+    || (normalized !== source && (eq(deps[key]!, normalized) || (deps[key] !== undefined && inc(deps[key], normalized)))))
   return hit ?? null
 }
 

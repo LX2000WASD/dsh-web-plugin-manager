@@ -18,17 +18,19 @@ export interface PmSelectOption {
  * @param props.onChange - selection callback.
  * @param props.ariaLabel - accessible label for the trigger button.
  */
-export function PmSelect({ value, options, onChange, ariaLabel }: {
+export function PmSelect({ value, options, onChange, ariaLabel, disabled }: {
   value: string
   options: readonly PmSelectOption[]
   onChange: (value: string) => void
   ariaLabel?: string
+  /** Lock the selector while a mutation is running (audit m-4). */
+  disabled?: boolean
 }): ReactNode {
   const [open, setOpen] = useState(false)
   const selected = options.find(option => option.value === value)
   return (
     <Menu
-      open={open}
+      open={open && disabled !== true}
       anchor={(
         <Button
           size="sm"
@@ -36,6 +38,7 @@ export function PmSelect({ value, options, onChange, ariaLabel }: {
           aria-label={ariaLabel}
           title={selected?.label ?? value}
           style={{ maxWidth: 160 }}
+          disabled={disabled}
           onClick={() => setOpen(current => !current)}
         >
           <span

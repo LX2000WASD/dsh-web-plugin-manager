@@ -24,7 +24,12 @@ export function scoreItem(item: MarketplaceItem, tokens: readonly string[]): num
   const topics = (item.topics ?? []).map(topic => topic.toLowerCase())
   for (const token of tokens) {
     if (name.includes(token) || fullName.includes(token)) score += 3
-    if (topics.some(topic => topic.includes(token) || token.includes(topic))) score += 2
+    // Topic hits: short tokens (ai/api/ui) match exactly only — the old
+    // reverse substring (token.includes(topic)) hit unrelated entries for
+    // every 2-3 letter topic (audit).
+    if (token.length <= 3
+      ? topics.includes(token)
+      : topics.some(topic => topic.includes(token))) score += 2
     if (description.includes(token)) score += 1
   }
   return score

@@ -295,7 +295,18 @@ function satisfiesRange(installed: string, range: string): boolean {
   if (compareVersions(installed, req) < 0) return false
   const major = Number.parseInt(req.split('.')[0] ?? '0', 10)
   const installedMajor = Number.parseInt(installed.split('.')[0] ?? '0', 10)
-  if (spec.startsWith('^')) return installedMajor === major || major === 0
+  if (spec.startsWith('^')) {
+    if (major > 0) return installedMajor === major
+    // ^0.x locks the minor (^0.2.3 allows 0.2.x, NOT 0.3.0) — the old code
+    // returned true for any major === 0 and missed peer mismatches (audit).
+    const minor = Number.parseInt(req.split('.')[1] ?? '0', 10)
+    const installedMinor = Number.parseInt(installed.split('.')[1] ?? '0', 10)
+    if (minor > 0) return installedMajor === 0 && installedMinor === minor
+    // ^0.0.x is exact (^0.0.3 allows only 0.0.3).
+    const patch = Number.parseInt(req.split('.')[2] ?? '0', 10)
+    const installedPatch = Number.parseInt(installed.split('.')[2] ?? '0', 10)
+    return installedMajor === 0 && installedMinor === 0 && installedPatch === patch
+  }
   if (spec.startsWith('~')) {
     const minor = Number.parseInt(req.split('.')[1] ?? '0', 10)
     const installedMinor = Number.parseInt(installed.split('.')[1] ?? '0', 10)

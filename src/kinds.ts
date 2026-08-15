@@ -17,7 +17,7 @@
  * from every marketplace listing, cached or fresh).
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 
@@ -326,7 +326,14 @@ function writeKindRecords(records: Map<string, KindRecord>): void {
   mkdirSync(join(kindRecordsFile(), '..'), { recursive: true })
   const data: Record<string, KindRecord> = {}
   for (const [key, record] of records) data[key] = record
-  writeFileSync(kindRecordsFile(), JSON.stringify({ version: 1, records: data }, undefined, 2) + '\n')
+  // Atomic write (tmp + rename): a concurrent dshpm CLI write or a crash
+  // mid-write must not leave a truncated JSON that reads as an empty map
+  // (audit m2).
+  const target = kindRecordsFile()
+  const tmp = target + '.tmp'
+  writeFileSync(tmp, JSON.stringify({ version: 1, records: data }, undefined, 2) + '\n')
+  renameSync(tmp, target)
+  try { rmSync(tmp, { force: true }) } catch { /* best-effort */ }
 }
 
 /** Persist one record (serialized read-modify-write). */
@@ -408,7 +415,11 @@ export async function loadBlockedRepos(): Promise<Set<string>> {
 
 function writeBlockedRepos(repos: Set<string>): void {
   mkdirSync(join(blockedReposFile(), '..'), { recursive: true })
-  writeFileSync(blockedReposFile(), JSON.stringify({ version: 1, repos: [...repos].sort() }, undefined, 2) + '\n')
+  const target = blockedReposFile()
+  const tmp = target + '.tmp'
+  writeFileSync(tmp, JSON.stringify({ version: 1, repos: [...repos].sort() }, undefined, 2) + '\n')
+  renameSync(tmp, target)
+  try { rmSync(tmp, { force: true }) } catch { /* best-effort */ }
 }
 
 /** Block a repository (detected as not plugin/skill/preset). */
@@ -436,7 +447,48 @@ export function ensureCacheDir(): void {
   mkdirSync(join(dshHomePath(), 'plugin-manager-cache'), { recursive: true })
 }
 
-/** Path-containment guard for deletions: target must stay under a managed root. */
+/**
+ * Path-containment guard for deletions: target must stay under a managed
+ * root. Windows file systems are case-insensitive while JS startsWith is
+ * case-sensitive — a case-mismatched path would wrongly block a legal
+ * deletion (audit W2).
+ */
 export function isUnderRoot(target: string, root: string): boolean {
-  return resolve(target).startsWith(resolve(root) + sep)
+  const t = resolve(target)
+  const r = resolve(root)
+  if (process.platform === 'win32') return t.toLowerCase().startsWith(r.toLowerCase() + sep)
+  return t.startsWith(r + sep)
+}
+
+/**
+ * Remove a tree with brief retries. Windows AV scanners / editors hold
+ * transient handles and rmSync fails EPERM/EBUSY on the first attempt
+ * (audit W1); `force` only tolerates a missing path, not an open handle.
+ */
+export function rmRetry(target: string): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rmSync(target, { recursive: true, force: true })
+      return
+    } catch (error: unknown) {
+      if (attempt >= 3) throw error
+      // Synchronous short backoff (no timers available in sync call sites).
+      const end = Date.now() + 120
+      while (Date.now() < end) { /* spin */ }
+    }
+  }
+}
+
+/** Rename with brief retries (Windows: destination busy / AV scanning). */
+export function renameRetry(from: string, to: string): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (error: unknown) {
+      if (attempt >= 3) throw error
+      const end = Date.now() + 120
+      while (Date.now() < end) { /* spin */ }
+    }
+  }
 }

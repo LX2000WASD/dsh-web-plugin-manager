@@ -52,6 +52,14 @@ describe('scoreItem', () => {
   it('no hit scores 0', () => {
     assert.equal(scoreItem(item(), ['zzz-nonexistent']), 0)
   })
+  it('short topic tokens match exactly, not as reverse substrings (audit)', () => {
+    // 'ai-agent' contains 'ai' as a substring — the old reverse match scored it.
+    assert.equal(scoreItem(item({ topics: ['ai'] }), ['ai-agent']), 0)
+    assert.equal(scoreItem(item({ topics: ['ai'] }), ['ai']), 2)
+    // long tokens keep substring semantics (description emptied so the
+    // topic is the only hit source)
+    assert.equal(scoreItem(item({ topics: ['dsh-plugin'], description: '' }), ['plugin']), 2)
+  })
 })
 
 describe('findPluginMatches', () => {

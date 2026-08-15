@@ -316,7 +316,9 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
       },
       async execute(args) {
         const query = String(args.query ?? '').trim()
-        if (query === '') throw new Error('plugin_search: query must describe what you are looking for')
+        // Empty query is not an error: findPluginMatches falls back to the
+        // top entries by stars (audit — the old throw made cold-start probes
+        // fail instead of suggesting the popular plugins).
         const limit = Math.min(Math.max(1, Number(args.limit) || 5), 10)
         const result = await deps.marketplace(false)
         if (!result.ok) {
