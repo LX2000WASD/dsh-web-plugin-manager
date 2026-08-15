@@ -206,7 +206,8 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
   useEffect(() => {
     void injected.current.profiles().then((items) => {
       setProfileList(items)
-      const current = items.find(profile => profile.isCurrent === true)
+      const current = items.find(profile => profile.running !== null)
+        ?? items.find(profile => profile.isCurrent === true)
       const target = current !== undefined ? current.name : 'web'
       setTargetProfile(target)
       fetchMarketplace(false, target)

@@ -181,8 +181,12 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     void injected.current.profiles().then((items) => {
       setProfileList(items)
       if (items.length > 0) {
-        // Default to the profile hosting this running plugin, else the first.
-        const current = items.find(profile => profile.isCurrent === true) ?? items[0]!
+        // Default to the profile RUNNING this instance (multiple profiles can
+        // host the manager; the running one is the "current environment"),
+        // else one hosting the manager, else the first.
+        const current = items.find(profile => profile.running !== null)
+          ?? items.find(profile => profile.isCurrent === true)
+          ?? items[0]!
         setSelected(current.name)
         load(current.name)
       } else {

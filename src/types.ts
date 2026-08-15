@@ -178,6 +178,47 @@ export interface KindListView {
   readonly presets: readonly string[]
 }
 
+/** One profile's install manifest inside a backup file. */
+export interface BackupProfile {
+  readonly name: string
+  /** Bundle layer stack. */
+  readonly bundles: readonly string[]
+  /** Dependencies: name → install source (npm range / git URL / link path). */
+  readonly dependencies: Record<string, string>
+}
+
+/** Backup file: install manifests + marketplace kind records (reinstallable list). */
+export interface BackupFile {
+  readonly app: string
+  readonly appVersion?: string
+  readonly exportedAt: string
+  readonly profiles: readonly BackupProfile[]
+  /** Marketplace-installed skills/presets (global, not profile-scoped). */
+  readonly kinds: readonly KindRecordView[]
+}
+
+/** One restorable entry in a backup diff. */
+export interface BackupDiffEntry {
+  readonly profile: string
+  readonly name: string
+  readonly source: string
+  /** kind: skill | agent-preset | cordis-plugin. */
+  readonly kind: string
+}
+
+/** Diff between a backup and the current installation state. */
+export interface BackupDiffResult {
+  readonly ok: boolean
+  /** Entries to reinstall. */
+  readonly missing: readonly BackupDiffEntry[]
+  /** Entries already present (skipped). */
+  readonly already: readonly string[]
+  /** Profiles in the backup that do not exist locally (create them first). */
+  readonly missingProfiles: readonly string[]
+  /** Entries that cannot be restored (local-path sources no longer present). */
+  readonly unrestorable: readonly string[]
+}
+
 /** Result of launching a profile instance. */
 export interface StartResult {
   readonly ok: boolean

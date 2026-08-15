@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
-  AnalyzeResult, CommandResult, KindListView, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
+  AnalyzeResult, BackupDiffResult, BackupFile, CommandResult, KindListView, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
   UpdateCheckResult,
 } from '../types.ts'
 import {
@@ -123,6 +123,9 @@ export function apply(ctx: ClientContext): void {
     createProfile: (name, template) => call<MutationResult>('createProfile', { name, template }),
     renameProfile: (oldName, newName) => call<MutationResult>('renameProfile', { oldName, newName }),
     removeProfile: (name) => call<MutationResult>('removeProfile', { name }),
+    backupExport: (profile) => call<BackupFile>('backupExport', { profile }),
+    backupDiff: (backup, profile) => call<BackupDiffResult>('backupDiff', { profile, backup }),
+    backupRestore: (backup, profile) => call<CommandResult>('backupRestore', { profile, backup }),
   })
 
   ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({

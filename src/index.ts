@@ -38,8 +38,8 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
 import type {
-  CommandResult, InsertRow, KindListView, ManagedPackage, MarketplaceItem, MarketplaceResult,
-  MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry, StartResult,
+  BackupDiffEntry, BackupDiffResult, BackupFile, BackupProfile, CommandResult, InsertRow, KindListView, ManagedPackage,
+  MarketplaceItem, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry, StartResult,
   UpdateCheckResult, UpdateInfo,
 } from './types.ts'
 import {
@@ -1014,6 +1014,137 @@ export class PluginManagerService extends Service {
       skills: [...dirNameSet(skillsDirPath())].sort(),
       presets: [...dirNameSet(presetsDirPath())].sort(),
     }
+  }
+
+  /**
+   * Export a backup file: install manifests for one profile (or all) plus
+   * the marketplace kind records. A reinstallable LIST, not data/config —
+   * patch user config, node_modules entities, credentials are excluded.
+   */
+  async backupExport(profileFilter: string): Promise<BackupFile> {
+    const profiles: BackupProfile[] = []
+    const root = join(dshHome(), 'profiles')
+    for (const entry of readdirSafe(root)) {
+      if (!entry.isDirectory() || entry.name === 'node_modules') continue
+      if (profileFilter.length > 0 && entry.name !== profileFilter) continue
+      const dir = join(root, entry.name)
+      const manifest = readManifest(dir) as {
+        dependencies?: Record<string, string>
+        dsh?: { profile?: { bundles?: string[] } }
+      }
+      const dependencies = manifest.dependencies ?? {}
+      const bundles = manifest.dsh?.profile?.bundles ?? []
+      if (bundles.length === 0 && Object.keys(dependencies).length === 0) continue
+      profiles.push({ name: entry.name, bundles, dependencies })
+    }
+    const records = await loadKindRecords()
+    let appVersion = 'unknown'
+    try {
+      const manifest = JSON.parse(
+        readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+      ) as { version?: unknown }
+      if (typeof manifest.version === 'string') appVersion = manifest.version
+    } catch { /* version is advisory */ }
+    return {
+      app: OUR_PACKAGE_NAME,
+      appVersion,
+      exportedAt: new Date().toISOString(),
+      profiles,
+      kinds: [...records.entries()].map(([repo, record]) => ({ repo, ...record })),
+    }
+  }
+
+  /**
+   * Diff a backup against the current installation state. Local-path sources
+   * (link:/file:/absolute) that no longer exist are unrestorable, not
+   * missing — reinstalling them would only fail.
+   */
+  async backupDiff(backup: BackupFile, targetProfile: string): Promise<BackupDiffResult> {
+    const missing: BackupDiffEntry[] = []
+    const already: string[] = []
+    const missingProfiles: string[] = []
+    const unrestorable: string[] = []
+    // Kind records (global skills/presets).
+    const records = await loadKindRecords()
+    for (const kind of backup.kinds) {
+      if (records.has(kind.repo)) {
+        already.push(kind.repo)
+        continue
+      }
+      if (!/^[a-z0-9._-]+\/[a-z0-9._-]+$/i.test(kind.repo) || kind.repo.includes('\\') || kind.repo.includes(':')) {
+        // Local-path source: restorable only while the directory still exists
+        // on this machine (a cross-machine restore cannot reach it).
+        if (existsSync(kind.repo)) {
+          missing.push({ profile: '', name: kind.repo, source: kind.repo, kind: kind.type })
+        } else {
+          unrestorable.push(kind.repo + ' (local-path source)')
+        }
+        continue
+      }
+      missing.push({ profile: '', name: kind.repo, source: 'https://github.com/' + kind.repo, kind: kind.type })
+    }
+    // Profile dependencies.
+    for (const bp of backup.profiles) {
+      if (targetProfile.length > 0 && bp.name !== targetProfile) continue
+      if (!existsSync(profileDir(bp.name))) {
+        missingProfiles.push(bp.name)
+        continue
+      }
+      const manifest = readManifest(profileDir(bp.name)) as { dependencies?: Record<string, string> }
+      const deps = manifest.dependencies ?? {}
+      for (const [name, source] of Object.entries(bp.dependencies)) {
+        if (deps[name] !== undefined) {
+          already.push(bp.name + '/' + name)
+          continue
+        }
+        if (/^(link|file):/.test(source) || source.startsWith('/')) {
+          const localPath = source.replace(/^(link|file):/, '')
+          if (!existsSync(localPath)) {
+            unrestorable.push(bp.name + '/' + name + ' (local source gone: ' + localPath + ')')
+            continue
+          }
+        }
+        missing.push({ profile: bp.name, name, source, kind: 'cordis-plugin' })
+      }
+    }
+    return { ok: true, missing, already, missingProfiles, unrestorable }
+  }
+
+  /**
+   * Restore a backup: reinstall every missing entry through the protected
+   * install chain (quality gate + rollback apply). Failures do not abort the
+   * batch — each entry is reported, and the overall result is failed when
+   * any entry failed. Serialized by the mutation mutex (installWithSource).
+   */
+  async backupRestore(backup: BackupFile, targetProfile: string): Promise<CommandResult> {
+    const diff = await this.backupDiff(backup, targetProfile)
+    if (diff.missing.length === 0) {
+      return {
+        ok: diff.unrestorable.length === 0,
+        exitCode: diff.unrestorable.length === 0 ? 0 : 1,
+        output: 'nothing to restore'
+          + (diff.unrestorable.length > 0 ? '\nunrestorable:\n  ' + diff.unrestorable.join('\n  ') : ''),
+      }
+    }
+    const outputs: string[] = []
+    let ok = true
+    for (const entry of diff.missing) {
+      // Kind installs (skill/preset) ignore the profile; cordis goes into it.
+      const profile = entry.kind === 'cordis-plugin' ? entry.profile : (targetProfile.length > 0 ? targetProfile : 'web')
+      try {
+        const result = await installWithSource(this.ctx, profile, entry.source)
+        outputs.push('[' + entry.name + '] ' + (result.ok ? 'restored' : 'FAILED: ' + result.output.slice(0, 300)))
+        if (!result.ok) ok = false
+      } catch (error: unknown) {
+        outputs.push('[' + entry.name + '] FAILED: ' + (error instanceof Error ? error.message : String(error)))
+        ok = false
+      }
+    }
+    if (diff.unrestorable.length > 0) {
+      outputs.push('unrestorable:\n  ' + diff.unrestorable.join('\n  '))
+      ok = false
+    }
+    return { ok, exitCode: ok ? 0 : 1, output: outputs.join('\n') }
   }
 
   /**
@@ -3585,6 +3716,31 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           sendJson(res, 200, { ok: true, value: await service.listKinds() })
           return
         }
+        case 'backupExport': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          sendJson(res, 200, { ok: true, value: await service.backupExport(profile) })
+          return
+        }
+        case 'backupDiff': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          const backup = body['backup'] as BackupFile | undefined
+          if (backup === undefined || typeof backup !== 'object' || !Array.isArray(backup.profiles)) {
+            sendJson(res, 400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
+            return
+          }
+          sendJson(res, 200, { ok: true, value: await service.backupDiff(backup, profile) })
+          return
+        }
+        case 'backupRestore': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          const backup = body['backup'] as BackupFile | undefined
+          if (backup === undefined || typeof backup !== 'object' || !Array.isArray(backup.profiles)) {
+            sendJson(res, 400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
+            return
+          }
+          sendJson(res, 200, { ok: true, value: await service.backupRestore(backup, profile) })
+          return
+        }
         case 'unblockRepo': {
           const repo = typeof body['repo'] === 'string' ? body['repo'] : ''
           const key = normalizeRepoRef(repo)
@@ -3670,7 +3826,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'backupExport', 'backupDiff', 'backupRestore', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

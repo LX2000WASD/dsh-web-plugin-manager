@@ -6,7 +6,9 @@
 import React, { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommandResult, MutationResult, ProfileInfo, StartResult } from '../types.ts'
+import type {
+  BackupDiffResult, BackupFile, CommandResult, MutationResult, ProfileInfo, StartResult,
+} from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
 
@@ -19,6 +21,9 @@ export interface PluginEnvironmentsTabInjected {
   readonly createProfile: (name: string, template: string) => Promise<MutationResult>
   readonly renameProfile: (oldName: string, newName: string) => Promise<MutationResult>
   readonly removeProfile: (name: string) => Promise<MutationResult>
+  readonly backupExport: (profile: string) => Promise<BackupFile>
+  readonly backupDiff: (backup: BackupFile, profile: string) => Promise<BackupDiffResult>
+  readonly backupRestore: (backup: BackupFile, profile: string) => Promise<CommandResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -96,7 +101,7 @@ const styles: Record<string, React.CSSProperties> = {
 }
 
 /** Render the environment management tab. */
-export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile, t }: PluginEnvironmentsTabProps): ReactNode {
+export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile, backupExport, backupDiff, backupRestore, t }: PluginEnvironmentsTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [newName, setNewName] = useState('')
@@ -107,15 +112,25 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
   const [transferNames, setTransferNames] = useState('')
   const [transferFrom, setTransferFrom] = useState('')
   const [transferTo, setTransferTo] = useState('')
+  // Backup/restore state: target profile ('' = all), imported backup + diff.
+  const [backupProfile, setBackupProfile] = useState('')
+  const [backupData, setBackupData] = useState<BackupFile | null>(null)
+  const [diffResult, setDiffResult] = useState<BackupDiffResult | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  const injected = useRef({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile })
+  const injected = useRef({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile, backupExport, backupDiff, backupRestore })
 
   const refresh = (): void => {
     void injected.current.profiles().then(setProfileList, () => { /* keep last list */ })
   }
 
   useEffect(() => {
-    void injected.current.profiles().then(setProfileList, () => { /* keep last list */ })
+    void injected.current.profiles().then((items) => {
+      setProfileList(items)
+      // Backup/restore defaults to the profile RUNNING this instance.
+      const running = items.find(profile => profile.running !== null)
+      if (running !== undefined) setBackupProfile(running.name)
+    }, () => { /* keep last list */ })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -186,6 +201,55 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
       const result = await injected.current.copyPlugins(transferFrom, transferTo, names)
       setOutput('$ copy ' + names.join(', ') + ' ' + transferFrom + ' -> ' + transferTo + '\n' + result.output)
       setTransferNames('')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Export the selected environment (or all) as a downloadable JSON backup. */
+  const onBackupExport = async (): Promise<void> => {
+    setBusy('backup-export')
+    try {
+      const backup = await injected.current.backupExport(backupProfile)
+      const blob = new Blob([JSON.stringify(backup, undefined, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = 'dsh-backup-' + (backupProfile.length > 0 ? backupProfile : 'all') + '-' + backup.exportedAt.slice(0, 10) + '.json'
+      anchor.click()
+      URL.revokeObjectURL(url)
+      setOutput('$ export backup (' + backup.profiles.length + ' profile(s), ' + backup.kinds.length + ' kind record(s))')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Read an imported backup file and diff it against the current state. */
+  const onBackupFile = async (file: File | null): Promise<void> => {
+    if (file === null) return
+    try {
+      const backup = JSON.parse(await file.text()) as BackupFile
+      setBackupData(backup)
+      const diff = await injected.current.backupDiff(backup, backupProfile)
+      setDiffResult(diff)
+      setOutput('$ import ' + file.name + ' — diff computed ('
+        + diff.missing.length + ' missing, ' + diff.already.length + ' already, '
+        + diff.missingProfiles.length + ' missing profiles, ' + diff.unrestorable.length + ' unrestorable)')
+    } catch (error: unknown) {
+      setOutput('$ import failed: ' + (error instanceof Error ? error.message : String(error)))
+    }
+  }
+
+  /** Restore every missing entry from the imported backup. */
+  const onBackupRestore = async (): Promise<void> => {
+    if (backupData === null) return
+    setBusy('backup-restore')
+    try {
+      const result = await injected.current.backupRestore(backupData, backupProfile)
+      setOutput('$ restore\n' + result.output)
+      // Re-diff so the restored state is visible.
+      const diff = await injected.current.backupDiff(backupData, backupProfile)
+      setDiffResult(diff)
     } finally {
       setBusy(null)
     }
@@ -336,6 +400,71 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
             {busy === 'transfer' ? t('transferring') : t('transferButton')}
           </Button>
         </div>
+      </div>
+
+      <div style={styles.heading}>
+        <h3 style={styles.headingTitle}>{t('backupTitle')}</h3>
+      </div>
+      <div style={styles.formCol}>
+        <div style={styles.toolbar}>
+          <span style={styles.filterLabel}>{t('backupTargetLabel')}</span>
+          <PmSelect
+            ariaLabel={t('backupTargetLabel')}
+            value={backupProfile}
+            options={[
+              { value: '', label: t('backupAll') },
+              ...profileList.map(profile => ({ value: profile.name, label: profile.name })),
+            ]}
+            onChange={setBackupProfile}
+          />
+          <span style={{ marginLeft: 'auto' }} />
+          <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onBackupExport()}>
+            {busy === 'backup-export' ? t('exporting') : t('backupExportButton')}
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => fileInputRef.current?.click()}>
+            {t('backupImportButton')}
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: 'none' }}
+            onChange={(event: React.ChangeEvent<HTMLInputElement>) => {
+              const file = event.currentTarget.files?.[0] ?? null
+              void onBackupFile(file)
+              event.currentTarget.value = ''
+            }}
+          />
+          {diffResult !== null && (
+            <>
+              {diffResult.missing.length > 0 && (
+                <Button variant="primary" disabled={busy !== null} onClick={() => void onBackupRestore()}>
+                  {busy === 'backup-restore' ? t('restoring') : t('backupRestoreButton')}
+                </Button>
+              )}
+              <span style={styles.filterLabel}>
+                {t('backupDiffSummary', {
+                  missing: diffResult.missing.length,
+                  already: diffResult.already.length,
+                })}
+              </span>
+            </>
+          )}
+        </div>
+        {diffResult !== null && (
+          <div>
+            {diffResult.missingProfiles.length > 0 && (
+              <p style={styles.status}>{t('backupMissingProfiles')}: {diffResult.missingProfiles.join(', ')}</p>
+            )}
+            {diffResult.unrestorable.length > 0 && (
+              <p style={styles.status}>{t('backupUnrestorable')}:</p>
+            )}
+            {diffResult.unrestorable.map(item => <p key={item} style={styles.status}>- {item}</p>)}
+            {diffResult.missing.length === 0 && diffResult.missingProfiles.length === 0 && (
+              <p style={styles.status}>{t('backupUpToDate')}</p>
+            )}
+          </div>
+        )}
       </div>
 
       {output.length > 0 && (
