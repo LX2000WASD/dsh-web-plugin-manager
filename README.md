@@ -49,7 +49,7 @@ dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
 | 查看 | 合并展示层栈/依赖/挂载行/运行条目；手动安装未挂载的依赖显示「未挂载」并可一键挂载 |
 | 实时启停 | managed 块编辑 patch，经 loader 直接应用，实时生效、重启后持久 |
 | 安装 | 官方 dsh plugin CLI + 质量门 + 自动回滚；非 bundle 自动写挂载行并实时加载；git 源自动 clone、已发布 npm 优先 |
-| 更新 | 检查更新（npm dist-tag / git HEAD / 安装 commit），更新带质量门与回滚 |
+| 更新 | 检查更新（npm dist-tag / git HEAD / 安装 commit），更新带质量门与回滚；**含管理器自身（自更新）**——管理页可直接点更新升级 dsh-web-plugin-manager，失败自动装回旧版本 |
 | 健康检查 | 依赖图/缺失/循环/重复行 id/同名注册冲突（服务/工具/section/路由）/peer 版本/官方包重复；运行中追加 pending 与失败诊断 |
 | 环境管理 | 启停、复制/转移插件、创建/重命名/删除 profile（官方 profile 只读） |
 | 市场 | awesome-dsh-plugins 双源合并、24h 缓存、已安装徽标、15s 超时、代理支持、失败负缓存 |
@@ -82,7 +82,7 @@ dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
 - 更新检测边界：本地目录安装（非 git）报告"不可检测"；git URL 源需 manifest 记录安装 commit（gitHead）
 - 健康检查为静态+尽力而为：同名注册冲突依赖源码正则扫描（动态拼接的名字检测不到）；语义冲突（两个插件做相反的事）无同名可查，不在检测范围
 - 手动安装的插件不会自动挂载：管理器显示「未挂载」并提供「挂载」/ `dshpm mount`，不擅自改变 profile 行为
-- 0.3.0 恢复指引（该版本已在 npm 标记 BROKEN）：0.3.0 把官方包声明为普通依赖、会在 profile 里装出重复拷贝。升级到 0.3.2 即可自动清理——`dsh plugin --profile <name> update dsh-web-plugin-manager`（pnpm 会剪除孤儿重复包）后重启实例；若实例已无法启动，先手动删除 `node_modules/@deepseek-ai/` 下的 dsh-tools/schemastery/cosmokit 再更新
+- 错误版本恢复指引（0.3.0/0.3.1/0.3.4 已在 npm 标记 deprecated，使用 0.3.5）：旧版本声明有缺陷（官方包普通依赖装重复拷贝 / 守卫绕过 / 未声明 js-yaml），安装旧版会在 profile 里留下问题。升级到 0.3.5 即可自动清理——`dsh plugin --profile <name> add dsh-web-plugin-manager@latest`（pnpm 剪除孤儿重复包）后重启实例；若实例已无法启动，先手动删除 `node_modules/@deepseek-ai/` 下的 dsh-tools/schemastery/cosmokit 再更新
 - 市场条目来源于 awesome 目录，个别仓库可能已删除/私有
 - 市场代理：host 读 `HTTP_PROXY`/`HTTPS_PROXY`；系统代理/规则模式加速器对 Node 进程无效（undici 不读系统代理）——把代理写进环境变量或改 TUN/全局模式
 - GitHub API 未认证限流 60/h：富化遇 403/429 即停止（降级用上次快照元数据），列表不受影响
