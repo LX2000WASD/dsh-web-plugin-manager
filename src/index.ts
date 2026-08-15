@@ -1218,7 +1218,7 @@ async function checkPackageUpdate(dir: string, name: string, source: string): Pr
  * git specs is a ref/branch). The cache is kept: local-directory installs
  * are pnpm links that need their source to stay in place.
  */
-function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string; packageName?: string } {
+function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string; packageName?: string; created?: boolean } {
   const trimmed = spec.trim()
   const gitUrl = /^(?:git\+)?(https?:\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
   const gitFile = /^file:(\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
@@ -1240,7 +1240,8 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
     const base = repo.replace(/^https?:\/\//, '').replace(/^git@/, '').replace(/^\/+/, '').replace(/[^A-Za-z0-9._-]/g, '-')
     const dirName = base + (ref !== undefined ? '-' + ref.replace(/[^A-Za-z0-9._-]/g, '-') : '')
     const dest = join(cacheRoot, dirName)
-    if (!existsSync(dest)) {
+    const created = !existsSync(dest)
+    if (created) {
       const args = ['clone']
       if (ref !== undefined) args.push('-b', ref)
       args.push('--depth', '1', repo, dest)
@@ -1255,6 +1256,7 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
           return {
             spec: pkgDir,
             packageName: manifest.name,
+            created,
             note: 'cloned ' + repo + (subdir !== undefined ? ' (' + subdir + ')' : '') + ' into ' + dest,
           }
         }
@@ -1275,6 +1277,7 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
     }
     return {
       spec: pkgDir,
+      created,
       note: 'cloned ' + repo + (subdir !== undefined ? ' (' + subdir + ')' : '') + ' into ' + dest + ' — keep this cache directory: the installed package links to it',
     }
   } catch (error: unknown) {
@@ -1282,21 +1285,55 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
   }
 }
 
-/** Whether a package name exists on the npm registry (short timeout). */
-function probeNpmPublished(packageName: string): string | undefined {
+/**
+ * Whether a package name exists on the npm registry. Uses the registry's
+ * /latest endpoint (a tiny document) instead of `npm view` (which pulls the
+ * full packument and routinely exceeds short timeouts on slow networks),
+ * through the proxy-aware marketplaceFetch (15s cap) with one retry.
+ * Registry resolved from the npm config so mirrors and private registries
+ * work.
+ */
+async function probeNpmPublished(packageName: string): Promise<string | undefined> {
+  let registry = 'https://registry.npmjs.org/'
   try {
     const tool = resolveCommand('npm')
-    const output = execFileSync(tool.command, ['view', packageName, 'version'], {
+    const config = execFileSync(tool.command, ['config', 'get', 'registry'], {
       encoding: 'utf8',
-      timeout: 10_000,
+      timeout: 5_000,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
       env: commandEnv(tool.dir),
     })
-    return output.trim().length > 0 ? packageName : undefined
-  } catch {
-    return undefined
+    const trimmed = config.trim()
+    if (trimmed.length > 0) registry = trimmed.endsWith('/') ? trimmed : trimmed + '/'
+  } catch { /* registry defaults to npmjs.org */ }
+  const url = registry + encodeURIComponent(packageName) + '/latest'
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await marketplaceFetch(url, {
+        headers: { ...GITHUB_UA },
+        redirect: 'follow',
+      })
+      if (response.ok) {
+        const doc = await response.json() as { version?: string }
+        return typeof doc.version === 'string' ? packageName : undefined
+      }
+      return undefined // 404 / 4xx: not published (no retry for definitive answers)
+    } catch {
+      // network / timeout: retry once, then report undetected
+    }
   }
+  return undefined
+}
+
+/** Bare-package root of a specifier (subpath imports resolve through it). */
+function declaredRoot(spec: string): string | undefined {
+  if (spec.startsWith('@')) {
+    const parts = spec.split('/')
+    return parts.length >= 2 ? parts[0] + '/' + parts[1] : undefined
+  }
+  const first = spec.split('/')[0]
+  return first !== undefined && first.length > 0 ? first : undefined
 }
 
 /** Find cordis-style packages inside a cloned repository (depth 3). */
@@ -1338,26 +1375,79 @@ function discoverWorkspacePackages(root: string): string[] {
  * = out-of-process caller (the dshpm CLI).
  */
 export async function installWithSource(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
+  // npm-first BEFORE cloning for plain GitHub URLs (the marketplace shape:
+  // repo name == npm name). A pinned ref / subdir requests a specific git
+  // state, so those still clone. On slow networks the registry /latest
+  // probe is tiny and fast, so the npm path wins instead of a doomed clone.
+  const plainGit = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/#\s]+)\/([^\/#\s]+?)(?:\.git)?$/.exec(spec.trim())
+  if (plainGit !== null) {
+    const npmName = await probeNpmPublished(plainGit[2]!)
+    if (npmName !== undefined) {
+      const result = await installProtected(ctx, profile, npmName)
+      return {
+        ...result,
+        output: result.output + '\n[plugin-manager] installed from npm (' + npmName + ' — the GitHub repository publishes it)',
+      }
+    }
+  }
   const prepared = prepareInstallSource(spec)
   if (prepared.error !== undefined || prepared.spec === undefined) {
     return { ok: false, exitCode: 1, output: '[plugin-manager] ' + (prepared.error ?? 'no install source') }
   }
   // npm-first: when the cloned package is published on the registry, prefer
   // the npm install (faster, no local link); fall back to the git clone.
-  const npmName = prepared.packageName !== undefined ? probeNpmPublished(prepared.packageName) : undefined
+  const npmName = prepared.packageName !== undefined ? await probeNpmPublished(prepared.packageName) : undefined
   const result = npmName !== undefined
     ? await installProtected(ctx, profile, npmName)
     : await installProtected(ctx, profile, prepared.spec)
   const note = npmName !== undefined
     ? 'installed from npm (' + npmName + '; the repository also publishes it)'
     : prepared.note
-  if (note !== undefined) {
+  const output = note !== undefined
+    ? result.output + '\n[plugin-manager] ' + note
+    : result.output
+  if (!result.ok) {
+    // A failed install leaves a clone behind only if it is unreferenced:
+    // git sources often lack committed build artifacts (dist/lib), which
+    // the quality gate catches as an unresolvable entry file — clean the
+    // freshly created cache dir and say so.
+    if (prepared.created && !cacheDirReferencedByProfile(dshHome(), prepared.spec)) {
+      try {
+        rmSync(prepared.spec, { recursive: true, force: true })
+        return {
+          ...result,
+          output: output + '\n[plugin-manager] the repository may not commit build artifacts (dist/lib), or the package is not published to npm — check that the main/exports entry file exists in the repo, or install the npm package by name. Removed the unused clone cache.',
+        }
+      } catch { /* cleanup is best-effort */ }
+    }
     return {
       ...result,
-      output: result.output + '\n[plugin-manager] ' + note,
+      output: output + '\n[plugin-manager] the repository may not commit build artifacts (dist/lib), or the package is not published to npm — check that the main/exports entry file exists in the repo, or install the npm package by name.',
     }
   }
-  return result
+  return { ...result, output }
+}
+
+/** Whether any profile manifest references the given install path (link:). */
+function cacheDirReferencedByProfile(home: string, pkgDir: string): boolean {
+  const profilesRoot = join(home, 'profiles')
+  let entries: string[] = []
+  try {
+    entries = readdirSync(profilesRoot, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+  } catch {
+    return false
+  }
+  for (const name of entries) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(profilesRoot, name, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> }
+      for (const value of Object.values(manifest.dependencies ?? {})) {
+        if (value.includes(pkgDir)) return true
+      }
+    } catch { /* unreadable profile: skip */ }
+  }
+  return false
 }
 
 /**
@@ -1676,7 +1766,10 @@ function qualityIssues(profile: string, packageName: string): string[] {
   // one in the entry.
   const imports = scanPackageImports(pkgDir, entry)
   for (const spec of imports) {
-    if (declared.has(spec) || isLoaderProvided(spec)) continue
+    // A subpath import (unpdf/pdfjs) is covered by declaring its parent
+    // package (unpdf): Node resolves subpaths through the parent entry.
+    const parent = declaredRoot(spec)
+    if (declared.has(spec) || (parent !== undefined && declared.has(parent)) || isLoaderProvided(spec)) continue
     issues.push("imports " + spec + " but does not declare it (would fail at boot)")
   }
   // Declared is not installed: a dependency line that pnpm could not place
