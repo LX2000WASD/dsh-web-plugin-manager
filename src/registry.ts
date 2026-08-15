@@ -247,3 +247,102 @@ export function writeRegistryCache(repos: RegistryRepo[]): void {
     }, undefined, 2) + '\n')
   } catch { /* cache write is best-effort */ }
 }
+
+// ── dsh.so registry (verification L1–L5 + automated security scan) ──
+
+/**
+ * One dsh.so registry entry (https://www.dsh.so/plugins-index.json). The
+ * community-run registry independently verifies every listed plugin and runs
+ * a static security scan — we overlay that metadata onto our own listing
+ * (verification level + risk level) as a quality signal; the entry itself is
+ * never used as an install source.
+ */
+export interface DshSoEntry {
+  readonly name: string
+  /** How far the plugin was actually tested (1 found … 5 feature-tested). */
+  readonly verification?: { readonly level: number; readonly label: string; readonly lastVerifiedAt?: string | null }
+  /** Automated security scan result. */
+  readonly security?: {
+    readonly status: 'audited' | 'pending' | 'failed' | 'skipped'
+    readonly riskLevel: 'low' | 'medium' | 'high' | 'critical' | 'unknown'
+    readonly scannedAt?: string | null
+  }
+}
+
+const DSH_SO_INDEX_URL = 'https://www.dsh.so/plugins-index.json'
+/** Reuse the fetched dsh.so index for this long (the index is rebuilt on their side). */
+const DSH_SO_TTL_MS = 24 * 60 * 60 * 1000
+
+/** dsh.so index disk cache. */
+export function dshSoCacheFile(): string {
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return join(home, 'plugin-manager-cache', 'dshso-index.json')
+}
+
+/** Normalize one raw dsh.so entry (keeps only the overlay fields). */
+function normalizeDshSoEntry(raw: unknown): DshSoEntry | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const entry = raw as Record<string, unknown>
+  const name = typeof entry.name === 'string' && entry.name.length > 0 ? entry.name : ''
+  if (name.length === 0) return null
+  const verification = entry.verification as Record<string, unknown> | null | undefined
+  const security = entry.security as Record<string, unknown> | null | undefined
+  return {
+    name,
+    ...(verification !== null && typeof verification === 'object'
+      && typeof verification.level === 'number'
+      ? {
+          verification: {
+            level: verification.level,
+            label: typeof verification.label === 'string' ? verification.label : 'L' + verification.level,
+          },
+        }
+      : {}),
+    ...(security !== null && typeof security === 'object'
+      && typeof security.riskLevel === 'string'
+      ? {
+          security: {
+            status: String(security.status ?? '') as DshSoSecurity['status'],
+            riskLevel: String(security.riskLevel ?? '') as DshSoSecurity['riskLevel'],
+          },
+        }
+      : {}),
+  }
+}
+
+/** Convenience alias for the security sub-shape. */
+type DshSoSecurity = NonNullable<DshSoEntry['security']>
+
+/** Fetch the dsh.so index (network, then disk cache); null when unusable. */
+export async function fetchDshSoIndex(): Promise<DshSoEntry[] | null> {
+  try {
+    const response = await marketplaceFetch(DSH_SO_INDEX_URL, { headers: { 'user-agent': 'dsh-web-plugin-manager' } })
+    if (!response.ok) throw new Error('dsh.so index HTTP ' + response.status)
+    const data = await response.json() as { plugins?: unknown }
+    const list = Array.isArray(data.plugins) ? data.plugins : []
+    const entries: DshSoEntry[] = []
+    const seen = new Set<string>()
+    for (const raw of list) {
+      const entry = normalizeDshSoEntry(raw)
+      if (entry === null || seen.has(entry.name.toLowerCase())) continue
+      seen.add(entry.name.toLowerCase())
+      entries.push(entry)
+    }
+    if (entries.length > 0) {
+      try {
+        mkdirSync(dirname(dshSoCacheFile()), { recursive: true })
+        writeFileSync(dshSoCacheFile(), JSON.stringify({ savedAt: new Date().toISOString(), entries }, undefined, 2) + '\n')
+      } catch { /* cache write is best-effort */ }
+      return entries
+    }
+  } catch { /* fall through to the disk cache */ }
+  try {
+    const data = JSON.parse(readFileSync(dshSoCacheFile(), 'utf8')) as { savedAt?: string; entries?: unknown }
+    const age = Date.now() - Date.parse(typeof data.savedAt === 'string' ? data.savedAt : '')
+    if (Number.isNaN(age) || age > DSH_SO_TTL_MS) return null
+    const list = Array.isArray(data.entries) ? data.entries : []
+    return list.map(normalizeDshSoEntry).filter((entry): entry is DshSoEntry => entry !== null)
+  } catch {
+    return null
+  }
+}

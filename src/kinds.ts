@@ -180,6 +180,7 @@ export function findPluginRoots(root: string, maxDepth = 3, limit = 50): string[
  */
 export function detectRepoType(root: string): RepoKind {
   const has = (name: string): boolean => existsSync(join(root, name))
+  // Root-level shapes first.
   if (findPresetRoots(root, 0, 1).length > 0) return 'agent-preset'
   if (has('package.json')) {
     let looksLike = false
@@ -188,10 +189,15 @@ export function detectRepoType(root: string): RepoKind {
       looksLike = looksLikeDshPlugin(manifest) === true
     } catch { /* unreadable manifest: keep checking */ }
     if (looksLike) return 'cordis-plugin'
+    // A tool-chain package.json on a pure skill repo stays a skill.
     if (findSkillRoots(root, 0, 1).length > 0) return 'skill'
-    return 'instructions'
+    // Non-plugin package.json (aggregate pages, desktop apps): fall through
+    // to the nested checks before giving up — the repo may carry presets or
+    // skills in subdirectories (e.g. dsh-anchored-standard's preset/).
+  } else if (findSkillRoots(root, 0, 1).length > 0) {
+    return 'skill'
   }
-  if (findSkillRoots(root, 0, 1).length > 0) return 'skill'
+  // Nested shapes (skin/multi-package repos, preset collections, skill sets).
   if (findPresetRoots(root).length > 0) return 'agent-preset'
   if (findPluginRoots(root).length > 0) return 'cordis-plugin'
   if (findSkillRoots(root, 5, 1).length > 0) return 'skill'

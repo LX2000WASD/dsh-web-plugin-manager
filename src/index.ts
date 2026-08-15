@@ -53,13 +53,13 @@ import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
 import {
   addBlockedRepo, detectRepoType, installPreset, installSkill, isUnderRoot, loadBlockedRepos,
-  loadKindRecords, normalizeRepoRef, presetsDirPath, pruneGhostRecords, removeBlockedRepo, removeKindRecord,
+  loadKindRecords, looksLikeDshPlugin, normalizeRepoRef, presetsDirPath, pruneGhostRecords, removeBlockedRepo, removeKindRecord,
   saveKindRecord, skillsDirPath, slugDirName, type KindRecord,
 } from './kinds.ts'
 import { marketplaceFetch } from './net.ts'
 import {
-  fetchRegistryRepos, fetchSearchFallback, functionalTopics, readRegistryCache, writeRegistryCache,
-  type RegistryRepo,
+  fetchDshSoIndex, fetchRegistryRepos, fetchSearchFallback, functionalTopics, readRegistryCache, writeRegistryCache,
+  type DshSoEntry, type RegistryRepo,
 } from './registry.ts'
 import { registerTools } from './tools.ts'
 
@@ -579,17 +579,22 @@ export class PluginManagerService extends Service {
       const cached = readCache()
       const fetchedAt = Date.parse(cached.fetchedAt ?? '')
       if (!Number.isNaN(fetchedAt) && Date.now() - fetchedAt < MARKETPLACE_TTL && cached.items.length > 0) {
-        const { items, dropped } = dedupeMarketplace(await flagMarketplaceItems(filterBlockedRepos(cached.items, blocked), profile))
+        // The cached listing may predate the dsh.so overlay (or the overlay
+        // fields were dropped by an older cache version) — overlay from the
+        // disk-cached dsh.so index (fast, no network when the TTL holds).
+        const dshSo = await fetchDshSoIndex().catch(() => null)
+        const items = overlayDshSo(cached.items, dshSo)
+        const { items: deduped, dropped } = dedupeMarketplace(await flagMarketplaceItems(filterBlockedRepos(items, blocked), profile))
         return {
           ok: true,
-          items,
+          items: deduped,
           cachedAt: cached.fetchedAt,
           fromCache: true,
           message: 'served from cache',
           ...(cached.source !== undefined ? { source: cached.source } : {}),
           ...(dropped > 0 ? { dropped } : {}),
           ...blockedMeta(blocked),
-          total: items.length,
+          total: deduped.length,
         }
       }
       // Recent total failure: serve the recorded reason instead of re-running
@@ -627,6 +632,12 @@ export class PluginManagerService extends Service {
       markdownError = error instanceof Error ? error.message : String(error)
       return []
     })
+    // dsh.so registry: independent verification (L1–L5) + security scan
+    // metadata, overlaid onto matching entries (never an install source).
+    const dshSo = await fetchDshSoIndex().catch((error: unknown) => {
+      console.warn('[plugin-manager] dsh.so index unavailable: ' + (error instanceof Error ? error.message : String(error)))
+      return null
+    })
     const curated = mergeMarketplace(catalogItems, markdownItems)
     // Registry base: network index → disk cache → search fallback (partial,
     // never persisted). The catalog-only path remains when all fail.
@@ -649,6 +660,7 @@ export class PluginManagerService extends Service {
       items = curated
       source = 'catalog'
     }
+    items = overlayDshSo(items, dshSo)
     // Registry entries already carry stars/dates — only catalog-only entries
     // (metadata unknown) need GitHub enrichment, so the rate limit is rarely
     // reached even with a 3000-entry listing.
@@ -683,7 +695,8 @@ export class PluginManagerService extends Service {
     // Last resort: the on-disk cache (any age — better than an empty list).
     const cached = readCache()
     if (cached.items.length > 0) {
-      const { items: flagged, dropped } = dedupeMarketplace(await flagMarketplaceItems(filterBlockedRepos(cached.items, blocked), profile))
+      const dshSo = await fetchDshSoIndex().catch(() => null)
+      const { items: flagged, dropped } = dedupeMarketplace(await flagMarketplaceItems(filterBlockedRepos(overlayDshSo(cached.items, dshSo), blocked), profile))
       return {
         ok: true,
         items: flagged,
@@ -1536,14 +1549,22 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
   }
 }
 
+/** The npm registry's /latest document (the full latest manifest). */
+interface NpmLatestManifest {
+  readonly version?: string
+  readonly dsh?: unknown
+  readonly dependencies?: Record<string, unknown>
+  readonly peerDependencies?: Record<string, unknown>
+}
+
 /**
- * Latest dist-tag version of an npm package. Uses the registry's /latest
+ * Latest dist-tag manifest of an npm package. Uses the registry's /latest
  * endpoint (a tiny document) instead of `npm view` (which pulls the full
  * packument and routinely exceeds short timeouts on slow networks), through
  * the proxy-aware marketplaceFetch (15s cap) with one retry. Registry
  * resolved from the npm config so mirrors and private registries work.
  */
-async function npmRegistryLatest(packageName: string): Promise<string | undefined> {
+async function npmRegistryManifest(packageName: string): Promise<NpmLatestManifest | undefined> {
   let registry = 'https://registry.npmjs.org/'
   try {
     const tool = resolveCommand('npm')
@@ -1567,8 +1588,8 @@ async function npmRegistryLatest(packageName: string): Promise<string | undefine
         redirect: 'follow',
       })
       if (response.ok) {
-        const doc = await response.json() as { version?: string }
-        return typeof doc.version === 'string' ? doc.version : undefined
+        const doc = await response.json() as NpmLatestManifest
+        return typeof doc.version === 'string' ? doc : undefined
       }
       return undefined // 404 / 4xx: not published (no retry for definitive answers)
     } catch {
@@ -1578,9 +1599,23 @@ async function npmRegistryLatest(packageName: string): Promise<string | undefine
   return undefined
 }
 
-/** Whether a package name exists on the npm registry. */
+/** Latest dist-tag version of an npm package (version-only wrapper). */
+async function npmRegistryLatest(packageName: string): Promise<string | undefined> {
+  return (await npmRegistryManifest(packageName))?.version
+}
+
+/**
+ * npm-first probe: returns the package name ONLY when the npm package is a
+ * real DSH plugin (declares the dsh field or depends on the DSH core).
+ * Skill / agent-preset / non-plugin repos that happen to publish npm packages
+ * (e.g. a skill repo whose name collides with an npm package) must fall
+ * through to the clone + type-detection path — installing them as cordis
+ * plugins would mount a useless dependency instead of the skill.
+ */
 async function probeNpmPublished(packageName: string): Promise<string | undefined> {
-  return (await npmRegistryLatest(packageName)) !== undefined ? packageName : undefined
+  const manifest = await npmRegistryManifest(packageName)
+  if (manifest === undefined) return undefined
+  return looksLikeDshPlugin(manifest) === true ? packageName : undefined
 }
 
 /** Bare-package root of a specifier (subpath imports resolve through it). */
@@ -1722,6 +1757,9 @@ export async function installWithSource(ctx: Context | null, profile: string, sp
     ? result.output + '\n[plugin-manager] ' + note
     : result.output
   if (!result.ok) {
+    // Append a readable failure classification when the raw output matches a
+    // known npm/pnpm failure signature.
+    const hintOutput = withFailureHint(output)
     // A failed install leaves a clone behind only if it is unreferenced:
     // git sources often lack committed build artifacts (dist/lib), which
     // the quality gate catches as an unresolvable entry file — clean the
@@ -1731,13 +1769,13 @@ export async function installWithSource(ctx: Context | null, profile: string, sp
         rmSync(prepared.spec, { recursive: true, force: true })
         return {
           ...result,
-          output: output + '\n[plugin-manager] the repository may not commit build artifacts (dist/lib), or the package is not published to npm — check that the main/exports entry file exists in the repo, or install the npm package by name. Removed the unused clone cache.',
+          output: hintOutput + '\n[plugin-manager] the repository may not commit build artifacts (dist/lib), or the package is not published to npm — check that the main/exports entry file exists in the repo, or install the npm package by name. Removed the unused clone cache.',
         }
       } catch { /* cleanup is best-effort */ }
     }
     return {
       ...result,
-      output: output + '\n[plugin-manager] the repository may not commit build artifacts (dist/lib), or the package is not published to npm — check that the main/exports entry file exists in the repo, or install the npm package by name.',
+      output: hintOutput + '\n[plugin-manager] the repository may not commit build artifacts (dist/lib), or the package is not published to npm — check that the main/exports entry file exists in the repo, or install the npm package by name.',
     }
   }
   return { ...result, output }
@@ -1756,8 +1794,84 @@ function readmeFirstLines(dir: string): string {
   return ''
 }
 
+/**
+ * Post-install entry verification: warn when the installed package's load
+ * entries (main / exports "." and "./client", conditional exports recursed)
+ * are missing from the installed directory — the package is present but will
+ * not load. Source-only repos that never committed build artifacts land here.
+ */
+function entryWarning(profile: string, packageName: string): string {
+  const pkgDir = join(profileDir(profile), 'node_modules', packageName)
+  try {
+    const manifest = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as {
+      main?: unknown
+      exports?: unknown
+      dsh?: { client?: unknown; bundle?: unknown }
+    }
+    const targets: string[] = []
+    if (typeof manifest.main === 'string' && manifest.main.length > 0) targets.push(manifest.main)
+    const collect = (node: unknown): void => {
+      if (typeof node === 'string') {
+        if (node.length > 0) targets.push(node)
+        return
+      }
+      if (node === null || typeof node !== 'object') return
+      for (const value of Object.values(node)) collect(value)
+    }
+    if (manifest.exports !== null && typeof manifest.exports === 'object') {
+      const exportsObj = manifest.exports as Record<string, unknown>
+      for (const sub of ['.', './client']) {
+        if (Object.prototype.hasOwnProperty.call(exportsObj, sub)) collect(exportsObj[sub])
+      }
+    }
+    // A pure client-manifest plugin needs no host entry (browser-only).
+    if (targets.length === 0 && manifest.dsh?.client !== undefined) return ''
+    const missing = targets.filter(target => !existsSync(join(pkgDir, target)))
+    return missing.length > 0
+      ? '\n[plugin-manager] ⚠ ' + packageName + ' installed but its load entries are missing: ' + missing.join(', ')
+        + ' — the plugin may not take effect; check the repository build instructions (source-only repos need a build step).'
+      : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Classify common npm/pnpm failure signatures into a readable troubleshooting
+ * hint (bilingual not needed — the CLI and UI both show raw output).
+ */
+function classifyInstallFailure(text: string): string | null {
+  const rules: Array<[RegExp, string]> = [
+    [/ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|premature close|network request failed/i,
+      '网络错误：无法连接 npm registry / GitHub，请检查网络或代理后重试。'],
+    [/EINTEGRITY|integrity checksum failed/i,
+      '依赖完整性校验失败（常见于网络缓存损坏）：删除依赖目录后重试，或清 npm 缓存（npm cache clean --force）。'],
+    [/ETARGET|No matching version|404 Not Found|E404|ENOVERSIONS/i,
+      '依赖版本不存在：某个依赖或其版本在 registry 找不到（私有包、版本号错误或未发布）。'],
+    [/gyp ERR|node-gyp|python(3)?(\s|\.exe)? not found|not found: python/i,
+      '原生模块编译失败：node-gyp 需要 Python 与 C++ 构建工具链，请先安装（Windows: Visual Studio Build Tools）。'],
+    [/MODULE_NOT_FOUND|Cannot find module/i,
+      '缺少模块：包或依赖不完整——可能是源码型仓库未构建，或本地链接依赖被剥离后仍被引用。'],
+    [/ERR_PNPM|Command failed/i,
+      '构建/包管理命令失败：请查看上方日志输出定位具体步骤。'],
+    [/EACCES|EPERM|EBUSY/i,
+      '权限/占用错误：目标目录被占用或没有写入权限（Windows 常见：杀毒软件锁文件）。'],
+  ]
+  for (const [re, hint] of rules) {
+    if (re.test(text)) return hint
+  }
+  return null
+}
+
+/** Append the failure classification (if any) to a command output. */
+function withFailureHint(output: string): string {
+  const hint = classifyInstallFailure(output)
+  return hint !== null ? output + '\n[plugin-manager] ' + hint : output
+}
+
 /** Whether any profile manifest references the given install path (link:). */
-function cacheDirReferencedByProfile(home: string, pkgDir: string): boolean {  const profilesRoot = join(home, 'profiles')
+function cacheDirReferencedByProfile(home: string, pkgDir: string): boolean {
+  const profilesRoot = join(home, 'profiles')
   let entries: string[] = []
   try {
     entries = readdirSync(profilesRoot, { withFileTypes: true })
@@ -1818,6 +1932,9 @@ export async function installProtected(ctx: Context | null, profile: string, spe
   }
 
   const isBundle = exportsBundlePatch(profile, installed)
+  // Post-install entry verification: warn when the load entries are missing
+  // (source-only repos), so "installed but not working" is caught up front.
+  const entryNote = entryWarning(profile, installed)
   // Post-install analysis summary: dependency/conflict/compatibility issues
   // between the new package and the profile (warnings — the install itself
   // already passed the quality gate).
@@ -1837,7 +1954,7 @@ export async function installProtected(ctx: Context | null, profile: string, spe
     return {
       ...result,
       installed: [installed],
-      output: result.output + analysisNote
+      output: result.output + analysisNote + entryNote
         + '\n[plugin-manager] bundle plugin added to the layer stack — restart the profile to load it (the catalog will show it then).',
     }
   }
@@ -1888,7 +2005,8 @@ export async function installProtected(ctx: Context | null, profile: string, spe
       ...result,
       installed: [installed],
       output: result.output
-        + "\n[plugin-manager] quality check passed; mounted " + installed + " as insert row " + rowId + (live.ok ? " (applied live)" : " (file updated; " + (live.message ?? 'mounts on next restart') + ")"),
+        + "\n[plugin-manager] quality check passed; mounted " + installed + " as insert row " + rowId + (live.ok ? " (applied live)" : " (file updated; " + (live.message ?? 'mounts on next restart') + ")")
+        + entryNote,
     }
   } catch (error: unknown) {
     return {
@@ -1974,7 +2092,7 @@ export async function updateProtected(profile: string, name: string): Promise<Co
   // would otherwise disappear from the profile).
   const previousVersion = readPackageInfo(dir, name).version
   const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
-  if (!result.ok) return result
+  if (!result.ok) return { ...result, output: withFailureHint(result.output) }
   restoreInBoxBundles(profile, before)
   const installed = resolveInstalledName(profile, name)
   if (installed === null) return { ...result, installed: [name] }
@@ -2880,6 +2998,26 @@ async function flagMarketplaceItems(items: readonly MarketplaceItem[], profile: 
   }
   await Promise.all(Array.from({ length: workers }, () => worker()))
   return out
+}
+
+/** Overlay the dsh.so verification/security metadata onto the listing. */
+function overlayDshSo(items: readonly MarketplaceItem[], dshSo: readonly DshSoEntry[] | null): MarketplaceItem[] {
+  if (dshSo === null || dshSo.length === 0) return [...items]
+  // dsh.so keys entries by the repo basename (no owner segment).
+  const byName = new Map(dshSo.map(entry => [entry.name.toLowerCase(), entry]))
+  return items.map(item => {
+    const overlay = byName.get(item.displayName.toLowerCase())
+    if (overlay === undefined) return item
+    return {
+      ...item,
+      ...(overlay.verification !== undefined
+        ? { verification: { level: overlay.verification.level, label: overlay.verification.label } }
+        : {}),
+      ...(overlay.security !== undefined
+        ? { security: { riskLevel: overlay.security.riskLevel, status: overlay.security.status } }
+        : {}),
+    }
+  })
 }
 
 /**

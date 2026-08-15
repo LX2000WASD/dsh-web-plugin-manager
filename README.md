@@ -67,7 +67,7 @@ dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
 | 更新 | 检查更新（npm dist-tag / git HEAD / 安装 commit），更新带质量门与回滚；**含管理器自身（自更新）**——管理页可直接点更新升级 dsh-web-plugin-manager，失败自动装回旧版本 |
 | 健康检查 | 依赖图/缺失/循环/重复行 id/同名注册冲突（服务/工具/section/路由）/peer 版本/官方包重复；运行中追加 pending 与失败诊断 |
 | 环境管理 | 启停、复制/转移插件、创建/重命名/删除 profile（官方 profile 只读） |
-| 市场 | 静态索引（topic:dsh-plugin 全量 ~3100 条，多源兜底 + gzip + 磁盘缓存）+ awesome 精选覆盖层；服务端已安装判定（包名/repository 双向/git 源/目录探测）；更新检测（索引版本对比，含橙标更新按钮）；同名包冲突消解；24h 缓存、15s 超时、代理支持、失败负缓存 |
+| 市场 | 静态索引（topic:dsh-plugin 全量 ~3100 条，多源兜底 + gzip + 磁盘缓存）+ awesome 精选覆盖层 + **dsh.so 独立验证/安全扫描徽标**（L1-L5 + 风险等级叠加）；服务端已安装判定（包名/repository 双向/git 源/目录探测）；更新检测（索引版本对比，含橙标更新按钮）；同名包冲突消解；24h 缓存、15s 超时、代理支持、失败负缓存 |
 | agent 工具 | plugin_status/search/install/uninstall/toggle + 安装守卫（拦截裸命令并引导）+ 提示词注入；plugin_search 自然语言检索市场（name/topics/描述加权），结果提示安装前先浏览仓库 |
 
 功能与限制的详细说明见 [docs/feature-reference.md](docs/feature-reference.md)（随仓库与 npm 包发布）。

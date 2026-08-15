@@ -58,6 +58,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 
 - **静态索引为主**：[DSH-Plugins-Marketplace](https://github.com/bradeGithub/DSH-Plugins-Marketplace) 的 CI 索引 `registry.json.gz`（topic:dsh-plugin 全量 ~3100 仓库，含星数/更新时间/pkg_name/版本/分类，每 2 小时更新）——多源兜底链：`api.github.com contents`（有 `GH_TOKEN`/`GITHUB_TOKEN` 带认证）→ jsDelivr CDN（`generated_at` 新鲜度 6h 校验）→ `raw.githubusercontent` → 本地磁盘缓存（上次成功完整索引）→ GitHub 搜索 API（topic:dsh-plugin，残缺应急，不落盘）；索引条目自带星数，不再逐个打 GitHub API
 - **精选覆盖层**：[awesome-dsh-plugins](https://github.com/AdamPlatin123/awesome-dsh-plugins) 结构化 catalog（catalog/plugins/*.json + tombstones）+ PLUGINS.md 双源合并，叠加在索引之上（状态徽标/精选描述/包名/分类），精选独有条目追加；24h 缓存，空结果不写正缓存
+- **dsh.so 验证/安全叠加**：[dsh.so](https://www.dsh.so) 独立索引（1630 条，全部带 verification L1–L5 + 自动化安全扫描）按仓库名叠加 verification/security 徽标到卡片（TAG 行与 awesome 状态徽标同行，不新增条目、不作安装源）；dsh.so 索引独立磁盘缓存 24h，失败降级不阻塞；注意扫描为静态启发式，`high` 风险可能是误报（如本管理器自身也被标 high）——徽标是"装前留意"信号，最终判定仍是安装质量门
 - **已安装判定在服务端**（每请求按目标 profile 计算，12 并发池标注）：① npm 包名（registry pkg_name / 仓库名）② manifest `repository` 双向匹配（同名不同仓库不误判）③ git 缓存源 owner-repo 身份 ④ `~/.dsh/skills|.agent-presets` 目录探测；返回 `installed` / `installedVersion` / `latestVersion`（索引版本字段）/ `updateAvailable`（仅严格更高才提示，回滚不误报）
 - **同名包冲突消解**：同一 pkg_name 只保留一条（已安装优先、否则星数高者），`dropped` 计数透传前端提示「N 个同名包已隐藏」
 - 卡片动作：未安装 → 安装；已装无新版 → 绿色「已安装 vX」；已装有新版 → 橙色「更新」（npm 包走受保护 update 链路重写 specifier + 质量门 + 回滚，git-only 源重装）；星数排序时已安装置顶

@@ -121,6 +121,18 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-state-warning-primary)',
     borderColor: 'var(--dsw-alias-state-warning-primary)',
   },
+  securityLow: {
+    background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent)',
+    color: 'var(--dsw-alias-state-success-primary)',
+  },
+  securityMedium: {
+    background: 'color-mix(in srgb, var(--dsw-alias-state-warning-primary) 12%, transparent)',
+    color: 'var(--dsw-alias-state-warning-primary)',
+  },
+  securityHigh: {
+    background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent)',
+    color: 'var(--dsw-alias-state-error-primary)',
+  },
   status: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)', margin: 0 },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
@@ -149,6 +161,18 @@ function formatStars(n: number): string {
   if (n >= 1_000_000) return trimZero((n / 1_000_000).toFixed(1)) + 'M'
   if (n >= 1_000) return trimZero((n / 1_000).toFixed(1)) + 'K'
   return String(n)
+}
+
+/** dsh.so security badge: label + tone for the risk level. */
+function securityBadge(
+  t: (key: PluginManagerLocaleKey) => string,
+  security: { riskLevel: string; status: string },
+): { text: string; style: React.CSSProperties } {
+  const risk = security.riskLevel
+  if (risk === 'low') return { text: '🔒 ' + t('securityLow'), style: styles.securityLow }
+  if (risk === 'medium') return { text: '⚠️ ' + t('securityMedium'), style: styles.securityMedium }
+  if (risk === 'high' || risk === 'critical') return { text: '🚨 ' + t('securityHigh'), style: styles.securityHigh }
+  return { text: '⏳ ' + t('securityUnknown'), style: styles.tag }
 }
 
 /** Render the marketplace page. */
@@ -411,13 +435,26 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
                       <span style={styles.tag} title={item.packageName}>{sourceLabel}</span>
                       <span style={styles.tag}>{kindLabel}</span>
                     </div>
-                    {/* Tags row: evidence status + real functional topics. */}
+                    {/* Tags row: evidence status + dsh.so verification/security + topics. */}
                     <div style={styles.cardMetaRow}>
                       {item.status !== undefined && item.status.length > 0 && (
                         <span style={{ ...styles.tag, ...(item.status.includes('✅') ? styles.tagOn : {}) }} title={item.status}>
                           {item.status.includes('✅') ? t('statusVerified')
                             : item.status.includes('archived') ? t('statusArchived')
                               : t('statusPending')}
+                        </span>
+                      )}
+                      {item.verification !== undefined && (
+                        <span
+                          style={{ ...styles.tag, ...(item.verification.level >= 2 ? styles.tagOn : {}) }}
+                          title={item.verification.label}
+                        >
+                          {t('dsoVerified')} L{item.verification.level}
+                        </span>
+                      )}
+                      {item.security !== undefined && item.security.status !== 'skipped' && (
+                        <span style={securityBadge(t, item.security).style} title={item.security.status}>
+                          {securityBadge(t, item.security).text}
                         </span>
                       )}
                       {item.topics !== undefined && item.topics.slice(0, 2).map(topic => (

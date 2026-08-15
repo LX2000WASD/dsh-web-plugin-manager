@@ -115,6 +115,10 @@ export interface MarketplaceItem {
   readonly lifecycle?: string
   /** Real repository topics (eco-generic tags filtered server-side). */
   readonly topics?: readonly string[]
+  /** dsh.so independent verification (L1 found … L5 feature-tested). */
+  readonly verification?: { readonly level: number; readonly label: string }
+  /** dsh.so automated security scan result. */
+  readonly security?: { readonly riskLevel: string; readonly status: string }
   /** Latest version from the registry index (repo package.json, CI-fetched). */
   readonly latestVersion?: string
   /** Whether the queried profile has this plugin installed (server-side). */
