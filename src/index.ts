@@ -208,6 +208,31 @@ function resolveCommand(name: string): ResolvedCommand {
   return { command: name, dir: null }
 }
 
+/**
+ * Canonical spawn form for a resolved command. Win32 .cmd/.bat shims cannot
+ * be spawned directly (CreateProcess) and must NOT go through spawn's
+ * shell:true either — Node only concatenates args (DEP0190) and the shim's
+ * own quoted lines break under cmd /c re-parsing. Instead spawn cmd.exe
+ * directly with the quoted batch path and quoted args as ONE command-line
+ * argument (the cross-spawn pattern, with windowsVerbatimArguments so Node
+ * passes it through untouched).
+ */
+function resolveExec(tool: ResolvedCommand, args: readonly string[]): { command: string; args: readonly string[]; verbatim: boolean } {
+  if (tool.shell !== true) return { command: tool.command, args, verbatim: false }
+  // cmd /s strips only the first and last quote characters, so the batch
+  // path alone is quoted and arguments are quoted ONLY when they need it
+  // (spaces / cmd specials); bare tokens stay bare (cross-spawn pattern).
+  const comspec = process.env.ComSpec ?? process.env.comspec ?? 'cmd.exe'
+  const quotedArgs = args.length > 0
+    ? ' ' + args.map(a => /[\s&|<>^%()]/.test(a) ? '"' + String(a).replace(/"/g, '""') + '"' : String(a)).join(' ')
+    : ''
+  return {
+    command: comspec,
+    args: ['/d', '/s', '/c', '"' + tool.command + '"' + quotedArgs],
+    verbatim: true,
+  }
+}
+
 /** Child env with an extra directory prepended to PATH (null dir → base env). */
 function commandEnv(dir: string | null, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (dir === null) return base ?? process.env
@@ -226,10 +251,11 @@ function runDshPlugin(
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const tool = resolveCommand('dsh')
+    const exec = resolveExec(tool, ['plugin', '--profile', profile, verb, ...args])
     execFile(
-      tool.command,
-      ['plugin', '--profile', profile, verb, ...args],
-      { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: commandEnv(tool.dir), ...(tool.shell === true ? { shell: true } : {}) },
+      exec.command,
+      exec.args,
+      { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: commandEnv(tool.dir), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) },
       (error, stdout, stderr) => {
         const output = [stdout, stderr].filter(Boolean).join('\n')
         if (error === null) {
@@ -410,13 +436,14 @@ export class PluginManagerService extends Service {
         // visible via the process scan; the profile list reports it as
         // running and the stop button manages it).
         const tool = resolveCommand('dsh')
-        const child = spawn(tool.command, ['--profile', name, '--port', String(port)], {
+        const exec = resolveExec(tool, ['--profile', name, '--port', String(port)])
+        const child = spawn(exec.command, exec.args, {
           cwd: process.cwd(),
           detached: true,
           stdio: 'ignore',
           windowsHide: true,
           env: commandEnv(tool.dir),
-          ...(tool.shell === true ? { shell: true } : {}),
+          ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}),
         })
         // Swallow async spawn errors (e.g. dsh missing) — reported below.
         child.on('error', (error) => { spawnError = error.message })
@@ -1017,10 +1044,11 @@ export class PluginManagerService extends Service {
 function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
     const tool = resolveCommand(cmd)
+    const exec = resolveExec(tool, [...args])
     execFile(
-      tool.command,
-      [...args],
-      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: commandEnv(tool.dir), ...(tool.shell === true ? { shell: true } : {}) },
+      exec.command,
+      exec.args,
+      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true, env: commandEnv(tool.dir), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) },
       (error, stdout, stderr) => {
         const output = [stdout, stderr].filter(Boolean).join('\n')
         if (error === null) resolve({ ok: true, output })
@@ -1034,7 +1062,8 @@ function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number
 function isGitRepo(path: string): boolean {
   try {
     const tool = resolveCommand('git')
-    execFileSync(tool.command, ['-C', path, 'rev-parse', '--git-dir'], { stdio: 'ignore', timeout: 5_000, windowsHide: true, env: commandEnv(tool.dir), ...(tool.shell === true ? { shell: true } : {}) })
+    const exec = resolveExec(tool, ['-C', path, 'rev-parse', '--git-dir'])
+    execFileSync(exec.command, exec.args, { stdio: 'ignore', timeout: 5_000, windowsHide: true, env: commandEnv(tool.dir), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) })
     return true
   } catch {
     return false
@@ -1272,7 +1301,8 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
       if (ref !== undefined) args.push('-b', ref)
       args.push('--depth', '1', repo, dest)
       const tool = resolveCommand('git')
-      execFileSync(tool.command, args, { stdio: 'pipe', timeout: 3 * 60 * 1000, env: commandEnv(tool.dir), ...(tool.shell === true ? { shell: true } : {}) })
+      const exec = resolveExec(tool, args)
+      execFileSync(exec.command, exec.args, { stdio: 'pipe', timeout: 3 * 60 * 1000, env: commandEnv(tool.dir), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) })
     }
     const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
     if (existsSync(join(pkgDir, 'package.json'))) {
@@ -1322,13 +1352,14 @@ async function npmRegistryLatest(packageName: string): Promise<string | undefine
   let registry = 'https://registry.npmjs.org/'
   try {
     const tool = resolveCommand('npm')
-    const config = execFileSync(tool.command, ['config', 'get', 'registry'], {
+    const exec = resolveExec(tool, ['config', 'get', 'registry'])
+    const config = execFileSync(exec.command, exec.args, {
       encoding: 'utf8',
       timeout: 5_000,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
       env: commandEnv(tool.dir),
-      ...(tool.shell === true ? { shell: true } : {}),
+      ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}),
     })
     const trimmed = config.trim()
     if (trimmed.length > 0) registry = trimmed.endsWith('/') ? trimmed : trimmed + '/'
