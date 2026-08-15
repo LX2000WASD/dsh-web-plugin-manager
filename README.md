@@ -25,19 +25,34 @@ dsh plugin --profile <name> add .
 
 重启 profile 后，Web UI 的 **设置** 会出现 **插件管理** 标签页与 **市场** 一级菜单。
 
+## CLI（dshpm）
+
+用户让 AI 安装插件时，AI 默认会跑裸 `dsh plugin add` / `pnpm add`——这绕过了全部防护。本包提供 `dshpm` bin（随插件安装进入 profile 的 node_modules，也可 `node <profile>/node_modules/dsh-web-plugin-manager/dist/cli.js` 直接调用），所有变更走与 Web UI 完全相同的受保护链路（质量门 + 自动回滚 + 分析 + insert 行维护）：
+
+```sh
+dshpm install <source> --profile <name>   # npm 名 / github:user/repo / git URL / tarball / 本地路径
+dshpm remove <name>    --profile <name>   # insert 行 + 包依赖一并清理
+dshpm mount <name>     --profile <name>   # 补挂载官方 CLI 手动安装的未挂载依赖
+dshpm list             --profile <name>   # bundle 层栈 / 已装包 / insert 行
+dshpm analyze          --profile <name>   # 健康检查，有问题退出码 1
+```
+
+配合注入的提示词与工具守卫，AI 会在尝试裸命令前/时被引导到 `plugin_install` 工具或 `dshpm`。
+
 ## 功能
 
 | 能力 | 说明 |
 |---|---|
-| 查看 | 四源合并：include 树稳定行（`EntryOptions.id`）+ `dsh.profile.bundles` 层栈 + `package.json` 依赖 + `cordis.patch.yml` insert 行；非运行 profile 显示离线合成条目（官方 in-box 包不标记为已安装） |
-| 实时启停 | 受控编辑 profile 的 `cordis.patch.yml`（managed-block 机制，保留用户内容，可逆可审阅）；变更经 loader include 直接应用，**实时生效、零重启**（绕开平台 watcher 死锁，见架构）；重启后持久 |
-| 安装 | 调用官方 `dsh plugin` CLI（复用 pnpm reconcile），保护 in-box bundles（base/web-app/headless）；**非 bundle 插件自动写 insert 行并实时挂载**；git 源自动 clone 缓存，**已发布 npm 的包优先走 npm 安装** |
-| 质量门 | 安装时扫描**整条加载链**（入口 + 相对 import 可达文件）的 import，对照声明依赖 + 平台白名单（`@deepseek-ai/dsh-client-*` / `cordis-plugin-*` 前缀族）；覆盖副作用导入、re-export、动态 import、minified 形态，`import type` 不误报；**声明了但未安装**的依赖同样拦截；**bundle 插件的 `cordis.patch.yml` 行名逐一校验**；任何问题自动回滚，profile 保持可启动 |
-| 更新 | 管理页「检查更新」：npm 包对比 registry dist-tag；git 缓存源 `git fetch` 对比远端 HEAD；git URL 源对比安装 commit。可更新插件淡绿边框标识，更新按钮位于删除左侧（仅检测到更新时可点）。npm 走 `@latest` 重装，git 缓存 fetch+reset，均带质量门与回滚 |
-| 健康检查 | 管理页「健康检查」：依赖图（包间 import 边）+ 缺失/被禁用依赖 + **循环依赖** + 重复 patch 行 id + **同名服务冲突** + **peerDependencies 版本满足性**（含官方核心包，经共享 fallback 解析）；运行中 profile 追加诊断：pending 注入根因（对比活跃服务表）、fiber 加载失败原因；输出建议加载顺序（拓扑序） |
-| 环境管理 | 设置 → 插件 → 环境：启动/停止（终端或后台）、复制/转移插件、创建/重命名/删除 profile |
-| 市场 | 设置一级菜单「市场」：数据源为 [awesome-dsh-plugins](https://github.com/AdamPlatin123/awesome-dsh-plugins) 结构化 catalog + PLUGINS.md 双源合并（✅/待测/已归档状态），GitHub API 补星数/更新时间，24h 缓存；**已安装条目显示「已安装」徽标并禁用安装按钮**（按 npm 包名 / 仓库 / git 缓存源匹配）；选择安装目标环境后一键安装 |
-| agent 工具 | `plugin_status` / `plugin_install` / `plugin_uninstall` / `plugin_toggle`（目标 profile 由配置 `profile` 指定，默认 `web`） |
+| 查看 | 合并展示层栈/依赖/挂载行/运行条目；手动安装未挂载的依赖显示「未挂载」并可一键挂载 |
+| 实时启停 | managed 块编辑 patch，经 loader 直接应用，实时生效、重启后持久 |
+| 安装 | 官方 dsh plugin CLI + 质量门 + 自动回滚；非 bundle 自动写挂载行并实时加载；git 源自动 clone、已发布 npm 优先 |
+| 更新 | 检查更新（npm dist-tag / git HEAD / 安装 commit），更新带质量门与回滚 |
+| 健康检查 | 依赖图/缺失/循环/重复行 id/同名注册冲突（服务/工具/section/路由）/peer 版本/官方包重复；运行中追加 pending 与失败诊断 |
+| 环境管理 | 启停、复制/转移插件、创建/重命名/删除 profile（官方 profile 只读） |
+| 市场 | awesome-dsh-plugins 双源合并、24h 缓存、已安装徽标、15s 超时、代理支持、失败负缓存 |
+| agent 工具 | plugin_status/install/uninstall/toggle + 安装守卫（拦截裸命令并引导）+ 提示词注入 |
+
+功能与限制的详细说明见 [docs/feature-reference.md](docs/feature-reference.md)（随仓库与 npm 包发布）。
 
 ## 架构
 
@@ -47,20 +62,27 @@ dsh plugin --profile <name> add .
 - **Patch 编辑**：`src/patch.ts` —— 标记块（`# dsh-plugin-manager:managed:start/end`）追加/移除，行级操作，原子写入（tmp + rename）；处理 YAML 陷阱（`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）
 - **稳定行视图**：Loader entry id 每次挂载随机，patch 定位必须用 include 树行 id（`EntryOptions.id`，官方语义稳定）
 - **Agent 工具**：`src/tools.ts` —— 依赖注入避免循环依赖；host 提供 tools 服务时注册
+- **安装守卫**：`src/guard.ts` —— `tools.guard` 拒绝裸 `dsh plugin`/pnpm 变更命令（只读 verb 放行），拒绝原因直接给模型指路 `plugin_*` 工具与 `dshpm`；`systemPrompt.section`（order 300）常驻提示同一条规则
+- **CLI**：`src/cli.ts` —— 复用 `installProtected`/`installWithSource`/`removeProtected`（ctx 可空：无宿主进程时跳过 live 应用，文件级操作与 Web UI 完全一致）；`dshpm list/analyze` 直接读 profile 文件
 - **Client**：`src/client/` —— 注册 `settings.plugins.tab`（all 遮蔽官方只读列表 + manager）+ `settings.section`（marketplace）；同源 fetch 调 REST
 - **通信**：官方 webServer 路由 + 同源 fetch（不走 Typert Remote）
 
 ## 已知限制
 
-- **禁用被依赖的条目可能导致 profile 启动失败**（官方 fail-loud 设计）；恢复方法：手动编辑该 profile 的 `cordis.patch.yml` 删除 managed 块
-- 安装来自 git 的 bundle 需要用户在终端放行 `pnpm allowBuilds`（命令输出会回显）
-- 随机行（无显式 id 的挂载行）不可经此启停——它们的 id 每次挂载变化，无法被 patch 定位
-- **git 子包安装**：多包仓库用 `#路径:<dir>` 约定指定子目录（`#ref` 是 git ref）
-- **质量门可能误伤**：未声明运行时依赖的插件会被拦截回滚（保守策略）；若插件确实由 Loader/host 提供该模块，需在插件 manifest 声明或加入白名单
-- **更新检测边界**：本地目录安装（非 git）无上游可比，报告"不可检测"；git URL 源需要 manifest 记录安装 commit（gitHead）才能比较
-- **健康检查为静态+尽力而为**：服务冲突依赖源码正则扫描，动态注册（字符串拼接的服务名）检测不到；peer 版本比较为简化 semver（`^`/`~`/`>=`/`<=`/`>`/`<`/精确/星号）
-- 市场条目来源于 awesome 目录，个别仓库可能已删除/私有（安装时报 `Repository not found`）
-- **nvm 用户注意**：子进程命令（dsh/npm/pnpm/git）解析按「运行中 node 目录 → PATH → $NVM_DIR」兜底，并把命中的工具目录注入子进程与终端窗口的 PATH——即使宿主进程不在 nvm 激活的 shell 中启动（桌面启动器/服务/nohup）也能工作；仅当 dsh 完全未安装时才需要从 nvm 激活的终端启动
+- 禁用被依赖的条目可能导致 profile 启动失败（官方 fail-loud 设计）；恢复：手动删除该 profile `cordis.patch.yml` 里的 managed 块
+- 安装来自 git 的 bundle 需在终端放行 `pnpm allowBuilds`（命令输出会回显）
+- 随机行（无显式 id 的挂载行）不可经此启停（id 每次挂载变化）
+- git 子包安装：多包仓库用 `#路径:<dir>` 约定指定子目录
+- 质量门可能误伤未声明运行时依赖的插件（保守策略，可加白名单）
+- 官方包只能 peerDependencies（普通依赖会装出第二份拷贝并劫持官方 loader 行，`undefined.prepare` 类故障）
+- 安装守卫只拦 agent 工具调用，拦不住用户在终端手工执行裸 `dsh plugin`
+- 更新检测边界：本地目录安装（非 git）报告"不可检测"；git URL 源需 manifest 记录安装 commit（gitHead）
+- 健康检查为静态+尽力而为：同名注册冲突依赖源码正则扫描（动态拼接的名字检测不到）；语义冲突（两个插件做相反的事）无同名可查，不在检测范围
+- 手动安装的插件不会自动挂载：管理器显示「未挂载」并提供「挂载」/ `dshpm mount`，不擅自改变 profile 行为
+- 市场条目来源于 awesome 目录，个别仓库可能已删除/私有
+- 市场代理：host 读 `HTTP_PROXY`/`HTTPS_PROXY`；系统代理/规则模式加速器对 Node 进程无效（undici 不读系统代理）——把代理写进环境变量或改 TUN/全局模式
+- GitHub API 未认证限流 60/h：富化遇 403/429 即停止（降级用上次快照元数据），列表不受影响
+- nvm 用户注意：子进程命令按「运行中 node 目录 → PATH → $NVM_DIR」兜底并注入 PATH——宿主进程不在 nvm 激活的 shell 中启动也能工作；仅当 dsh 未安装时才需从 nvm 激活终端
 
 ## 开发
 
