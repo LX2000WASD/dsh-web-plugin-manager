@@ -197,7 +197,11 @@ function resolveCommand(name: string): ResolvedCommand {
     return { command: name, dir: null }
   }
   try {
-    const output = execFileSync('where', [name], {
+    // Console code page 936 (GBK CJK systems) makes `where` emit GBK bytes;
+    // decoding them as UTF-8 mangles non-ASCII usernames into a non-existent
+    // path. Switch the console to UTF-8 first (same chcp pattern as resolveExec).
+    const comspec = process.env.ComSpec ?? process.env.comspec ?? 'cmd.exe'
+    const output = execFileSync(comspec, ['/d', '/s', '/c', 'chcp 65001 >nul & where ' + name], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
@@ -258,7 +262,12 @@ function commandEnv(dir: string | null, base?: NodeJS.ProcessEnv): NodeJS.Proces
   // always find node.
   if (process.platform === 'win32') parts.push(dirname(process.execPath))
   if (dir !== null) parts.push(dir)
-  const path = env.PATH ?? ''
+  // Windows env blocks name the key `Path` (Explorer-started processes) and a
+  // plain-object spread keeps that casing — reading only env.PATH would drop
+  // System32 etc. and break every spawned .cmd shim (chcp not recognized).
+  const path = env.PATH ?? env.Path ?? env.path ?? ''
+  delete env.Path
+  delete env.path
   env.PATH = [...parts, path].filter(p => p.length > 0).join(delimiter)
   return env
 }
@@ -828,11 +837,16 @@ export class PluginManagerService extends Service {
     }
     const current = readPatch(dir)
     const rowId = slugify(packageName)
+    // A managed disable block we wrote when this plugin was disabled is not a
+    // user row: drop it first, or readManagedIds misjudges it as user-owned
+    // and re-mounting after a disable dies with id collision.
+    const cleaned = removeDisableBlock(current, rowId)
+    const base = cleaned !== current ? cleaned : current
     // Never clobber an existing row (user-written or another plugin's) that
     // already owns this id — the loader refuses duplicate ids and the whole
     // tree fails.
-    const existing = readInsertRows(current).find(row => row.id === rowId && row.name !== packageName)
-    const userOwns = readManagedIds(current).has(rowId)
+    const existing = readInsertRows(base).find(row => row.id === rowId && row.name !== packageName)
+    const userOwns = readManagedIds(base).has(rowId)
     if (existing !== undefined || userOwns) {
       return {
         ok: false,
@@ -841,8 +855,8 @@ export class PluginManagerService extends Service {
           + ' (id collision — mount under a different id or remove the other row)'
       }
     }
-    const next = addInsertRow(current, rowId, packageName)
-    if (next === current) return { ok: false, message: packageName + ' is already mounted' }
+    const next = addInsertRow(base, rowId, packageName)
+    if (next === base) return { ok: false, message: packageName + ' is already mounted' }
     const live = profile === hostProfileName()
       ? await applyLiveOps(this.ctx, [{ kind: 'append', value: { insert: [{ id: rowId, name: packageName }] } }])
       : { ok: false, message: 'profile not running' }
@@ -2280,11 +2294,16 @@ export async function installProtected(ctx: Context | null, profile: string, spe
   try {
     const dir = profileDir(profile)
     const current = readPatch(dir)
+    // A managed disable block we wrote earlier (a previous disable) is not a
+    // user row: drop it first, or readManagedIds misjudges it as user-owned
+    // and every re-install/mount of this package dies with id collision.
+    const cleaned = removeDisableBlock(current, rowId)
+    const base = cleaned !== current ? cleaned : current
     // An id collision with an existing row (user-written or another
     // plugin's) would make the loader refuse the whole tree — fail this
     // install instead of corrupting the patch.
-    const idOwner = readInsertRows(current).find(row => row.id === rowId && row.name !== installed)
-    const userOwnsId = readManagedIds(current).has(rowId)
+    const idOwner = readInsertRows(base).find(row => row.id === rowId && row.name !== installed)
+    const userOwnsId = readManagedIds(base).has(rowId)
     if (idOwner !== undefined || userOwnsId) {
       await runDshPlugin(profile, 'remove', [installed], process.cwd())
       restoreInBoxBundles(profile, before)
@@ -2298,11 +2317,11 @@ export async function installProtected(ctx: Context | null, profile: string, spe
         installed: [],
       }
     }
-    const next = addInsertRow(current, rowId, installed)
-    const live = next !== current && ctx !== null && profile === hostProfileName()
+    const next = addInsertRow(base, rowId, installed)
+    const live = next !== base && ctx !== null && profile === hostProfileName()
       ? await applyLiveOps(ctx, [{ kind: 'append', value: { insert: [{ id: rowId, name: installed }] } }])
       : { ok: false, message: 'profile not running' }
-    if (next !== current) writePatch(patchPath(dir), next)
+    if (next !== base) writePatch(patchPath(dir), next)
     if (!live.ok && /ERR_MODULE_NOT_FOUND|Cannot find package|failed to import/i.test(live.message ?? '')) {
       // The mount failed because the module cannot be imported. Leaving the
       // insert row in the patch would fail the WHOLE profile at the next
@@ -2760,7 +2779,11 @@ async function openInTerminal(command: string): Promise<TerminalOpen> {
     const dshShim = resolveCommand('dsh')
     const env = { ...process.env }
     if (dshShim.command !== 'dsh' && dshShim.command !== 'dsh.cmd') {
-      env.PATH = dirname(dshShim.command) + (env.PATH !== undefined && env.PATH.length > 0 ? delimiter + env.PATH : '')
+      // Same Path/PATH casing tolerance as commandEnv (Explorer-started hosts).
+      const path = env.PATH ?? env.Path ?? env.path ?? ''
+      delete env.Path
+      delete env.path
+      env.PATH = dirname(dshShim.command) + (path.length > 0 ? delimiter + path : '')
     }
     spawn('cmd', ['/c', 'start', '', 'cmd', '/k', command], { stdio: 'ignore', windowsHide: true, env }).unref()
     return { opened: true, terminal: 'cmd', command }
@@ -3582,7 +3605,13 @@ function resolveInstalledName(profile: string, source: string): string | null {
   const manifest = readManifest(profileDir(profile)) as { dependencies?: Record<string, string> }
   const deps = manifest.dependencies ?? {}
   if (typeof deps[source] === 'string') return source
-  const hit = Object.keys(deps).find(key => deps[key] === source || deps[key]?.includes(source))
+  // Windows: the caller's source is a backslash path (clone cache) while pnpm
+  // writes forward slashes (link:C:/Users/...) — compare both forms or the
+  // match fails and the quality gate + insert-row mount are silently skipped.
+  const normalized = source.replace(/\\/g, '/')
+  const hit = Object.keys(deps).find(key =>
+    deps[key] === source || deps[key]?.includes(source)
+    || (normalized !== source && (deps[key] === normalized || deps[key]?.includes(normalized))))
   return hit ?? null
 }
 
@@ -3943,6 +3972,12 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const rowId = typeof body['rowId'] === 'string' ? body['rowId'] : ''
           sendJson(res, 200, { ok: true, value: await service.removeInsert(profile, rowId) })
+          return
+        }
+        case 'mount': {
+          const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          const packageName = typeof body['packageName'] === 'string' ? body['packageName'] : ''
+          sendJson(res, 200, { ok: true, value: await service.mount(profile, packageName) })
           return
         }
         case 'checkUpdates': {
