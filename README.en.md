@@ -115,5 +115,7 @@ pnpm test        # pure-function unit tests (node --test against the dist output
 ## Related
 
 - Source & issues: [github.com/LX2000WASD/dsh-web-plugin-manager](https://github.com/LX2000WASD/dsh-web-plugin-manager)
-- Marketplace data: [awesome-dsh-plugins](https://github.com/AdamPlatin123/awesome-dsh-plugins)
+- Marketplace index data: [DSH-Plugins-Marketplace](https://github.com/bradeGithub/DSH-Plugins-Marketplace) (topic:dsh-plugin full index, third-party maintained)
+- Curated data: [awesome-dsh-plugins](https://github.com/AdamPlatin123/awesome-dsh-plugins)
+- dsh.so verification & security data: [dsh.so](https://www.dsh.so) (independent plugin verification L1–L5 and automated security scans, third-party maintained; overlaid as badges only, never an install source)
 - License: MIT

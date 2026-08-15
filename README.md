@@ -115,5 +115,7 @@ pnpm test        # 纯函数单测（node --test 跑 dist 产物）
 ## 相关
 
 - 源码与 Issue：[github.com/LX2000WASD/dsh-web-plugin-manager](https://github.com/LX2000WASD/dsh-web-plugin-manager)
-- 市场数据源：[awesome-dsh-plugins](https://github.com/AdamPlatin123/awesome-dsh-plugins)
+- 市场索引数据：[DSH-Plugins-Marketplace](https://github.com/bradeGithub/DSH-Plugins-Marketplace)（topic:dsh-plugin 全量索引，第三方维护）
+- 精选数据：[awesome-dsh-plugins](https://github.com/AdamPlatin123/awesome-dsh-plugins)
+- dsh.so 验证与安全数据：[dsh.so](https://www.dsh.so)（插件独立验证 L1–L5 与自动化安全扫描，第三方维护；仅叠加徽标，不作安装源）
 - 许可证：MIT
