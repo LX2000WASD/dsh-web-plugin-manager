@@ -23,11 +23,24 @@ pnpm install && pnpm run build
 dsh plugin --profile <name> add .
 ```
 
-> ⚠️ 不带 `@latest` 的 `add` 是 pnpm 语义：**若 profile 里已声明过旧版本（如 `^0.1.2`），会保留旧 specifier 不升级**；`dsh plugin update`（=`pnpm update`）也只在该范围内重解析——**跨版本升级请用 `add ...@latest` 或 `dshpm update`**。
->
-> 若 `@latest` 仍解析到旧版（"already up to date" 或升级后还是旧号）：先查 `pnpm config get registry` 是否为镜像源（npmmirror 等 dist-tag 同步滞后，且 pnpm 有元数据缓存），用 `pnpm add dsh-web-plugin-manager@latest --registry=https://registry.npmjs.org` 绕过；**显式指定版本号（`@0.3.5`）永远可靠**。
-
 重启 profile 后，Web UI 的 **设置** 会出现 **插件管理** 标签页与 **市场** 一级菜单。
+
+## 更新
+
+```sh
+# 命令方式（推荐）：升级到最新版（重写 specifier，质量门 + 失败自动回滚到旧版本）
+dshpm update dsh-web-plugin-manager --profile NAME
+# 等价命令（pnpm 语义）
+dsh plugin --profile NAME add dsh-web-plugin-manager@latest
+```
+
+**UI 自更新**：打开 **设置 → 插件管理**，「检查更新」会列出全部已装插件（**含管理器自身**），有新版时点对应卡片上的「更新」即可——管理器可以一键更新自己，失败自动装回上一版本；更新后需重启 profile 生效。
+
+**注意**：
+
+- **add 不带版本号不会升级**：profile 里已声明旧版本（如 `^0.1.2`）时，`dsh plugin add`（即 `pnpm add`）保留原 specifier 不升；`dsh plugin update`（即 `pnpm update`）也只在已声明的范围内重解析。跨版本升级必须用 `add ...@latest` 或 `dshpm update`。
+- **@latest 解析到旧版时**：先查 `pnpm config get registry` 是否为镜像源（npmmirror 等 dist-tag 同步滞后 + pnpm 元数据缓存），用 `pnpm add dsh-web-plugin-manager@latest --registry=https://registry.npmjs.org` 强制走官方源；**显式指定版本号（如 `@0.3.8`）永远可靠**。
+- **pnpm 11 用户**：pnpm 11 默认 `minimumReleaseAge: 1440`（24 小时）——发布不足 24 小时的版本会被扣住，导致「当天发版当天点更新装不上」或解析到旧版。在 profile 的 `pnpm-workspace.yaml` 中加 `minimumReleaseAge: 0`（或 `minimumReleaseAgeExclude` 白名单）即可；dsh 不会覆盖该文件，改动会保留。
 
 ## CLI（dshpm）
 

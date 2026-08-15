@@ -29,9 +29,9 @@
 
 import { execFile, execFileSync, spawn } from 'node:child_process'
 import { connect, createServer } from 'node:net'
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, delimiter, dirname, join } from 'node:path'
+import { basename, delimiter, dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -1059,7 +1059,22 @@ function isGitCloneSpec(source: string): boolean {
 }
 
 /** The installed git commit of a package manifest (gitHead), when recorded. */
-function installedGitHead(dir: string, name: string): string | undefined {
+async function installedGitHead(dir: string, name: string): Promise<string | undefined> {
+  // pnpm never writes gitHead (that is an npm convention): for plugins
+  // installed from the git cache the installed package is a link INTO the
+  // cache clone, so the clone's HEAD IS the installed commit. Read it
+  // directly; fall back to package.json gitHead for npm-style git installs.
+  try {
+    const resolved = realpathSync(join(dir, 'node_modules', name))
+    const cacheRoot = join(dshHome(), 'plugin-manager-src') + sep
+    if (resolved.startsWith(cacheRoot)) {
+      const head = await execFileTimeout('git', ['-C', resolved, 'rev-parse', 'HEAD'], 10_000)
+      if (head.ok) {
+        const first = head.output.trim().split(/\r?\n/)[0]
+        if (first !== undefined && first.length > 0) return first
+      }
+    }
+  } catch { /* not a cache link: fall through to package.json gitHead */ }
   try {
     const manifest = JSON.parse(
       readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8'),
@@ -1071,11 +1086,8 @@ function installedGitHead(dir: string, name: string): string | undefined {
 }
 
 /** Latest dist-tag version of an npm package, or undefined when unreachable. */
-async function npmLatestVersion(name: string): Promise<string | undefined> {
-  const result = await execFileTimeout('npm', ['view', name, 'version'], 15_000)
-  if (!result.ok) return undefined
-  const latest = result.output.trim().split(/\r?\n/).find(line => line.length > 0)
-  return latest
+function npmLatestVersion(name: string): Promise<string | undefined> {
+  return npmRegistryLatest(name)
 }
 
 /** Remote HEAD commit of a git URL, or undefined when unreachable. */
@@ -1163,7 +1175,7 @@ async function checkPackageUpdate(dir: string, name: string, source: string): Pr
   }
   if (isGitSourceSpec(source)) {
     const remote = await gitRemoteHead(gitUrlFromSpec(source))
-    const gitHead = installedGitHead(dir, name)
+    const gitHead = await installedGitHead(dir, name)
     if (remote === undefined || gitHead === undefined) {
       return {
         name,
@@ -1286,14 +1298,13 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
 }
 
 /**
- * Whether a package name exists on the npm registry. Uses the registry's
- * /latest endpoint (a tiny document) instead of `npm view` (which pulls the
- * full packument and routinely exceeds short timeouts on slow networks),
- * through the proxy-aware marketplaceFetch (15s cap) with one retry.
- * Registry resolved from the npm config so mirrors and private registries
- * work.
+ * Latest dist-tag version of an npm package. Uses the registry's /latest
+ * endpoint (a tiny document) instead of `npm view` (which pulls the full
+ * packument and routinely exceeds short timeouts on slow networks), through
+ * the proxy-aware marketplaceFetch (15s cap) with one retry. Registry
+ * resolved from the npm config so mirrors and private registries work.
  */
-async function probeNpmPublished(packageName: string): Promise<string | undefined> {
+async function npmRegistryLatest(packageName: string): Promise<string | undefined> {
   let registry = 'https://registry.npmjs.org/'
   try {
     const tool = resolveCommand('npm')
@@ -1316,7 +1327,7 @@ async function probeNpmPublished(packageName: string): Promise<string | undefine
       })
       if (response.ok) {
         const doc = await response.json() as { version?: string }
-        return typeof doc.version === 'string' ? packageName : undefined
+        return typeof doc.version === 'string' ? doc.version : undefined
       }
       return undefined // 404 / 4xx: not published (no retry for definitive answers)
     } catch {
@@ -1324,6 +1335,11 @@ async function probeNpmPublished(packageName: string): Promise<string | undefine
     }
   }
   return undefined
+}
+
+/** Whether a package name exists on the npm registry. */
+async function probeNpmPublished(packageName: string): Promise<string | undefined> {
+  return (await npmRegistryLatest(packageName)) !== undefined ? packageName : undefined
 }
 
 /** Bare-package root of a specifier (subpath imports resolve through it). */
