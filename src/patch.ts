@@ -364,13 +364,16 @@ function joinDocument(base: readonly string[], block: readonly string[]): string
 }
 
 /**
- * Normalize kept lines after a removal: drop empty-doc/blank lines, collapse
- * blank runs, and restore the official `[]` template when no patch row remains
- * (a comments-only file parses as null and HMR reload fails).
+ * Normalize kept lines after a removal: restore the official `[]` template
+ * when no patch row remains (a comments-only file parses as null and HMR
+ * reload fails). Blank lines are PRESERVED — user block scalars (`|`, `>`)
+ * may contain meaningful blank lines, and dropping them silently changed
+ * user configuration values (audit M11). Only leftover `[]` template rows
+ * are dropped (an empty array mixed with rows would not parse).
  */
 function normalizeDocument(lines: readonly string[]): string {
-  const significant = lines.filter(l => l.trim() !== '[]' && l.trim() !== '')
-  const text = significant.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n'
+  const significant = lines.filter(l => l.trim() !== '[]')
+  const text = significant.join('\n').trimEnd() + '\n'
   const hasRow = text.split('\n').some(
     l => /^- id:/.test(l) || /^- insert:/.test(l) || /^insert:/.test(l),
   )

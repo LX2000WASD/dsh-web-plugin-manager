@@ -168,33 +168,29 @@ async function cmdRemove(profile: string, name: string): Promise<number> {
     process.stdout.write('profile not found: ' + profile + '\n')
     return 1
   }
-  // Managed insert row first (non-bundle plugin): file-level removal; a
-  // running profile's patch watcher applies it, other profiles on start.
-  const content = readPatch(dir)
-  const rows = readInsertRows(content)
-  const row = rows.find(r => r.id === name || r.name === name)
-  let removedRow = false
-  if (row !== undefined && row.managed) {
-    const { content: next, removed } = removeInsertRow(content, row.id)
-    if (removed) {
-      writePatch(patchPath(dir), next)
-      removedRow = true
-    }
-  }
   // A non-bundle plugin is BOTH an insert row and a profile dependency:
-  // remove the package as well (manifest entry + node_modules) when the
-  // name is declared, through the official CLI.
+  // remove the package FIRST — removeProtected cleans up its managed insert
+  // rows itself. Removing the row before the package left a lost row when
+  // the package removal failed (audit M5: row gone, package still installed).
   const deps = (readManifest(dir)['dependencies'] ?? {}) as Record<string, string>
   if (name in deps) {
     const result = await removeProtected(null, profile, name)
     process.stdout.write(result.output + '\n')
     if (!result.ok) return 1
-    if (removedRow) process.stdout.write('removed insert row ' + row!.id + ' and package ' + name + '\n')
     return 0
   }
-  if (removedRow) {
-    process.stdout.write('removed insert row ' + row!.id + ' (file updated; applied by the running profile via HMR, or on next start)\n')
-    return 0
+  // Standalone managed insert row (no dependency): file-level removal; a
+  // running profile's patch watcher applies it, other profiles on start.
+  const content = readPatch(dir)
+  const rows = readInsertRows(content)
+  const row = rows.find(r => r.id === name || r.name === name)
+  if (row !== undefined && row.managed) {
+    const { content: next, removed } = removeInsertRow(content, row.id)
+    if (removed) {
+      writePatch(patchPath(dir), next)
+      process.stdout.write('removed insert row ' + row.id + ' (file updated; applied by the running profile via HMR, or on next start)\n')
+      return 0
+    }
   }
   process.stdout.write(JSON.stringify(name) + ' is not a managed insert row nor a profile dependency\n')
   return 1
