@@ -8,16 +8,17 @@ import React, { useEffect, useMemo, useRef, useState, type ReactNode } from 'rea
 import { Button, IconChevronDownOutline14, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
-  AnalyzeIssue, AnalyzeResult, CommandResult, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
+  AnalyzeIssue, AnalyzeResult, CommandResult, EnvQuestion, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
+import { EnvQuestionForm } from './EnvQuestionForm.tsx'
 import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
 export interface PluginManagerTabInjected {
   readonly profiles: () => Promise<ProfileInfo[]>
   readonly list: (profile: string) => Promise<PluginManagerSnapshot>
-  readonly install: (profile: string, spec: string) => Promise<CommandResult>
+  readonly install: (profile: string, spec: string, answers?: Record<string, string>) => Promise<CommandResult>
   readonly remove: (profile: string, name: string) => Promise<CommandResult>
   readonly removeInsert: (profile: string, rowId: string) => Promise<MutationResult>
   readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
@@ -160,6 +161,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const [busy, setBusy] = useState<string | null>(null)
   const [spec, setSpec] = useState('')
   const [output, setOutput] = useState<string>('')
+  // C2: the install bar paused waiting for env vars (git-source plugins).
+  const [envQuestions, setEnvQuestions] = useState<readonly EnvQuestion[] | null>(null)
   const [updates, setUpdates] = useState<Record<string, UpdateInfo>>({})
   const [checking, setChecking] = useState(false)
   const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null)
@@ -281,10 +284,41 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     setBusy('install')
     try {
       const result = await install(selected, trimmed)
+      if (result.awaiting !== undefined) {
+        // C2: paused for env vars — keep the spec, show the inline form.
+        setEnvQuestions(result.awaiting.questions)
+        setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output)
+        return
+      }
       const mounted = result.installed !== undefined && result.installed.length > 0
         ? '\n✓ ' + t('installMounted')
         : ''
       setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output + mounted)
+      setEnvQuestions(null)
+      setSpec('')
+      load(selected)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** C2: user submitted the env-var answers — continue the same install. */
+  const onEnvContinue = async (answers: Record<string, string>): Promise<void> => {
+    const trimmed = spec.trim()
+    if (selected.length === 0 || trimmed.length === 0) return
+    setBusy('install')
+    try {
+      const result = await install(selected, trimmed, answers)
+      if (result.awaiting !== undefined) {
+        setEnvQuestions(result.awaiting.questions)
+        setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output)
+        return
+      }
+      const mounted = result.installed !== undefined && result.installed.length > 0
+        ? '\n✓ ' + t('installMounted')
+        : ''
+      setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output + mounted)
+      setEnvQuestions(null)
       setSpec('')
       load(selected)
     } finally {
@@ -405,15 +439,24 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
               type="text"
               value={spec}
               placeholder={t('installPlaceholder')}
-              disabled={busy !== null}
+              disabled={busy !== null || envQuestions !== null}
               onChange={(event: React.ChangeEvent<HTMLInputElement>) => setSpec(event.currentTarget.value)}
               onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') void onInstall() }}
               style={{ flex: 1 }}
             />
-            <Button variant="primary" disabled={busy !== null || spec.trim().length === 0} onClick={() => void onInstall()}>
+            <Button variant="primary" disabled={busy !== null || envQuestions !== null || spec.trim().length === 0} onClick={() => void onInstall()}>
               {busy === 'install' ? t('installing') : t('installButton')}
             </Button>
           </div>
+          {envQuestions !== null && (
+            <EnvQuestionForm
+              questions={envQuestions}
+              busy={busy === 'install'}
+              t={t}
+              onContinue={(answers) => void onEnvContinue(answers)}
+              onCancel={() => setEnvQuestions(null)}
+            />
+          )}
 
           {analysis !== null && (
             <div style={styles.analysisPanel}>

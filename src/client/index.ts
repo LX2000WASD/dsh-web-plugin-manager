@@ -85,7 +85,7 @@ export function apply(ctx: ClientContext): void {
   const managerInjected = (): PluginManagerTabInjected => ({
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
     list: (profile) => call<PluginManagerSnapshot>('list', { profile }),
-    install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
+    install: (profile, spec, answers) => call<CommandResult>('install', { profile, spec, answers }),
     remove: (profile, name) => call<CommandResult>('remove', { profile, name }),
     removeInsert: (profile, rowId) => call<MutationResult>('removeInsert', { profile, rowId }),
     copyPlugins: (from, to, names) => call<CommandResult>('copyPlugins', { from, to, names }),
@@ -146,7 +146,7 @@ export function apply(ctx: ClientContext): void {
   const kindsInjected = (): PluginKindsTabInjected => ({
     kinds: () => call<KindListView>('listKinds', {}),
     uninstall: (repo) => call<CommandResult>('uninstallKind', { profile: '', repo }),
-    reinstall: (repo) => call<CommandResult>('install', { profile: '', spec: 'https://github.com/' + repo }),
+    reinstall: (repo) => call<CommandResult>('install', { profile: '', spec: 'https://github.com/' + repo, answers: undefined }),
   })
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -161,7 +161,7 @@ export function apply(ctx: ClientContext): void {
   // Marketplace: a first-level settings entry (after the official Plugins).
   const marketplaceInjected = (): PluginMarketplaceTabInjected => ({
     marketplace: (refresh, profile) => call<MarketplaceResult>('marketplace', { refresh, profile }),
-    install: (profile, spec) => call<CommandResult>('install', { profile, spec }),
+    install: (profile, spec, answers) => call<CommandResult>('install', { profile, spec, answers }),
     update: (profile, name) => call<CommandResult>('update', { profile, name }),
     unblock: (repo) => call<MutationResult>('unblockRepo', { repo }),
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),

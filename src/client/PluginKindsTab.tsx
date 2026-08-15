@@ -136,7 +136,10 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
   const onReinstall = (record: KindRecordView): void => {
     setBusy(record.repo)
     void injected.current.reinstall(record.repo).then((result) => {
-      setOutput('$ re-pull ' + record.repo + '\n' + result.output)
+      const pausedNote = result.awaiting !== undefined
+        ? '\n\n' + t('envFormPausedElsewhere')
+        : ''
+      setOutput('$ re-pull ' + record.repo + '\n' + result.output + pausedNote)
       reload()
     }).finally(() => setBusy(null))
   }

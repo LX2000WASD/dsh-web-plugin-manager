@@ -13,15 +13,16 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, IconSearchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { CommandResult, MarketplaceItem, MarketplaceResult, MutationResult, ProfileInfo } from '../types.ts'
+import type { CommandResult, EnvQuestion, MarketplaceItem, MarketplaceResult, MutationResult, ProfileInfo } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
+import { EnvQuestionForm } from './EnvQuestionForm.tsx'
 import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
 export interface PluginMarketplaceTabInjected {
   readonly marketplace: (refresh: boolean, profile: string) => Promise<MarketplaceResult>
   readonly profiles: () => Promise<ProfileInfo[]>
-  readonly install: (profile: string, spec: string) => Promise<CommandResult>
+  readonly install: (profile: string, spec: string, answers?: Record<string, string>) => Promise<CommandResult>
   readonly update: (profile: string, name: string) => Promise<CommandResult>
   readonly unblock: (repo: string) => Promise<MutationResult>
 }
@@ -185,6 +186,8 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
   const [output, setOutput] = useState('')
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [targetProfile, setTargetProfile] = useState('web')
+  // C2: an install paused waiting for env vars, keyed by the card name.
+  const [awaiting, setAwaiting] = useState<{ readonly name: string; readonly questions: readonly EnvQuestion[] } | null>(null)
   const [cols, setCols] = useState<1 | 2>(() => {
     try { return localStorage.getItem(COLS_KEY) === '1' ? 1 : 2 } catch { return 2 }
   })
@@ -234,6 +237,11 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
     setBusy(item.name)
     void action.then((result) => {
       setOutput('$ ' + label + ' ' + item.displayName + '\n' + result.output)
+      if (result.awaiting !== undefined) {
+        // C2: paused for env vars — show the inline form, keep the listing.
+        setAwaiting({ name: item.name, questions: result.awaiting.questions })
+        return
+      }
       // Re-fetch so installed/update flags reflect the change.
       fetchMarketplace(false, targetProfile)
     }).finally(() => {
@@ -243,6 +251,11 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
 
   const onInstall = (item: MarketplaceItem): void => {
     runCommand(item, injected.current.install(targetProfile, item.url), 'install')
+  }
+
+  /** C2: user submitted the env-var answers — re-run the install with them. */
+  const onEnvContinue = (item: MarketplaceItem, answers: Record<string, string>): void => {
+    runCommand(item, injected.current.install(targetProfile, item.url, answers), 'install')
   }
 
   /** Update path: npm-published plugins update through the managed update op
@@ -429,7 +442,12 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
                             </span>
                           )
                         ) : (
-                          <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => onInstall(item)}>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busy !== null || (awaiting !== null && awaiting.name === item.name)}
+                            onClick={() => onInstall(item)}
+                          >
                             {busy === item.name ? t('installing') : t('installButton')}
                           </Button>
                         )}
@@ -483,6 +501,17 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
                         {item.createdAt.length > 0 ? ' · ' + t('createdAt') + ' ' + shortDate(item.createdAt) : ''}
                       </span>
                     </div>
+                    {awaiting !== null && awaiting.name === item.name && (
+                      <div style={{ padding: '0 14px 10px' }}>
+                        <EnvQuestionForm
+                          questions={awaiting.questions}
+                          busy={busy === item.name}
+                          t={t}
+                          onContinue={(answers) => onEnvContinue(item, answers)}
+                          onCancel={() => setAwaiting(null)}
+                        />
+                      </div>
+                    )}
                   </li>
                 )
               })}

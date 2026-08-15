@@ -203,6 +203,14 @@ export const zh = {
   backupUpToDate: '备份内容均已安装，无需恢复。',
   exporting: '导出中…',
   restoring: '恢复中…',
+  envFormTitle: '该插件需要以下环境变量（留空=跳过）',
+  envFormHint: '仅将这些变量注入安装进程，宿主其他环境变量不可见。',
+  envFormValuePlaceholder: '变量值（留空=跳过）',
+  envFormSkip: '跳过',
+  envFormContinue: '继续安装',
+  envFormCancel: '取消',
+  envFormBusy: '安装中…',
+  envFormPausedElsewhere: '该仓库需要环境变量（见上方列表）。请到「管理」页安装栏或市场卡片重新安装并提供变量。',
 } satisfies Record<string, string>
 
 /** Plugin manager locale key union. */
@@ -409,4 +417,12 @@ export const en = {
   backupUpToDate: 'Everything in the backup is already installed.',
   exporting: 'Exporting…',
   restoring: 'Restoring…',
+  envFormTitle: 'This repository requests the following environment variables (leave empty to skip)',
+  envFormHint: 'Only these variables are injected into the install process; other host env vars stay hidden.',
+  envFormValuePlaceholder: 'Value (empty = skip)',
+  envFormSkip: 'Skip',
+  envFormContinue: 'Continue install',
+  envFormCancel: 'Cancel',
+  envFormBusy: 'Installing…',
+  envFormPausedElsewhere: 'This repository needs environment variables (listed above). Reinstall it from the Manage tab or the marketplace and provide them.',
 } satisfies Record<PluginManagerLocaleKey, string>
