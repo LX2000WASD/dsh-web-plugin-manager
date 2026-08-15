@@ -229,6 +229,14 @@ export interface StartResult {
   readonly message: string
 }
 
+/** One install-time question (C2 awaiting-input): an env var the repository needs. */
+export interface EnvQuestion {
+  /** Variable name (also the answers key). */
+  readonly id: string
+  readonly header: string
+  readonly question: string
+}
+
 /** Result of an install/remove subprocess run. */
 export interface CommandResult {
   readonly ok: boolean
@@ -236,6 +244,11 @@ export interface CommandResult {
   readonly output: string
   /** Real package names resolved from the profile manifest after install. */
   readonly installed?: readonly string[]
+  /**
+   * C2: install paused waiting for env vars (git-source cordis plugins).
+   * The caller re-submits the same spec with answers to continue.
+   */
+  readonly awaiting?: { readonly spec: string; readonly questions: readonly EnvQuestion[] }
 }
 
 /** One package's update-check result. */

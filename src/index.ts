@@ -62,6 +62,8 @@ import {
   type DshSoEntry, type RegistryRepo,
 } from './registry.ts'
 import { registerTools } from './tools.ts'
+import { buildFilteredEnv, scanRequirements } from './scan.ts'
+import { createInstallSession, dropInstallSession, filterAnswers, getInstallSession } from './installSession.ts'
 
 export type * from './types.ts'
 
@@ -267,6 +269,7 @@ function runDshPlugin(
   verb: string,
   args: readonly string[],
   cwd: string,
+  env?: NodeJS.ProcessEnv,
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const tool = resolveCommand('dsh')
@@ -274,7 +277,7 @@ function runDshPlugin(
     execFile(
       exec.command,
       exec.args,
-      { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: commandEnv(tool.dir), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) },
+      { cwd, timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, env: commandEnv(tool.dir, env), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) },
       (error, stdout, stderr) => {
         const output = [stdout, stderr].filter(Boolean).join('\n')
         if (error === null) {
@@ -965,8 +968,8 @@ export class PluginManagerService extends Service {
    * declaration) is then mounted as a managed insert row — config HMR applies
    * it live, no restart.
    */
-  async install(profile: string, spec: string): Promise<CommandResult> {
-    return installWithSource(this.ctx, profile, spec)
+  async install(profile: string, spec: string, answers?: Record<string, string>): Promise<CommandResult> {
+    return installWithSource(this.ctx, profile, spec, answers)
   }
 
   /**
@@ -1908,11 +1911,11 @@ function enqueueMutation<T>(task: () => Promise<T>): Promise<T> {
  * registry — with npm-first when the cloned package is published. ctx null
  * = out-of-process caller (the dshpm CLI). Serialized by the mutation mutex.
  */
-export function installWithSource(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
-  return enqueueMutation(() => installWithSourceInner(ctx, profile, spec))
+export function installWithSource(ctx: Context | null, profile: string, spec: string, answers?: Record<string, string>): Promise<CommandResult> {
+  return enqueueMutation(() => installWithSourceInner(ctx, profile, spec, answers))
 }
 
-async function installWithSourceInner(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
+async function installWithSourceInner(ctx: Context | null, profile: string, spec: string, answers?: Record<string, string>): Promise<CommandResult> {
   // npm-first BEFORE cloning for plain GitHub URLs (the marketplace shape:
   // repo name == npm name). A pinned ref / subdir requests a specific git
   // state, so those still clone. On slow networks the registry /latest
@@ -1938,6 +1941,10 @@ async function installWithSourceInner(ctx: Context | null, profile: string, spec
   // guidance and added to the marketplace blocklist; cordis plugins continue
   // through the existing npm-first + quality-gate path below.
   const repoKey = normalizeRepoRef(spec) ?? spec
+  // C2: env injection for git-source installs — host credentials are NOT
+  // passed to third-party lifecycle scripts (prepare/build); the user's
+  // scanned answers (whitelist-validated below) are merged on top.
+  let envAnswers: Record<string, string> | undefined
   if (existsSync(prepared.spec)) {
     const kind = detectRepoType(prepared.spec)
     if (kind === 'skill' || kind === 'agent-preset') {
@@ -1988,14 +1995,50 @@ async function installWithSourceInner(ctx: Context | null, profile: string, spec
           + '\n  cd ' + prepared.spec + ' && bash install.sh',
       }
     }
-    // cordis-plugin: continue to the npm-first + quality-gate path below.
+    // cordis-plugin: continue to the npm-first + quality-gate path below,
+    // after the C2 env-requirement scan (git-source installs only).
+    const scanned = await scanRequirements(prepared.spec)
+    if (scanned.length > 0) {
+      const session = getInstallSession(spec)
+      const supplied = answers !== undefined && Object.keys(answers).length > 0
+      if (supplied) {
+        // Materials provided: whitelist-validate against the scan, then
+        // continue with them injected into the pnpm subprocess env. The
+        // whitelist comes from the session when present (Web flow), else
+        // from this scan (out-of-process dshpm CLI: sessions are in-process
+        // memory, and an explicit --env is the user's own consent).
+        envAnswers = filterAnswers(session !== undefined ? session.scanned : scanned, answers)
+        if (session !== undefined) dropInstallSession(spec)
+      } else {
+        // No session or no materials yet: (re)create the session, keep the
+        // clone, and pause the install asking for the missing variables.
+        createInstallSession(spec, prepared.spec, scanned)
+        return {
+          ok: false,
+          exitCode: null,
+          output: '[plugin-manager] install paused: this repository requests the following environment variable(s) at install time: '
+            + scanned.join(', ')
+            + '. Re-submit the install with answers (an empty value skips the variable).',
+          awaiting: {
+            spec,
+            questions: scanned.map(v => ({
+              id: v,
+              header: 'Environment variable: ' + v,
+              question: 'The repository requests ' + v + ' during install/build. Leave empty to skip.',
+            })),
+          },
+        }
+      }
+    }
   }
   // npm-first: when the cloned package is published on the registry, prefer
   // the npm install (faster, no local link); fall back to the git clone.
+  // The git fallback runs with a filtered env (see gitSourceEnv); the npm
+  // path keeps the host env so private-registry tokens (.npmrc auth) work.
   const npmName = prepared.packageName !== undefined ? await probeNpmPublished(prepared.packageName) : undefined
   const result = npmName !== undefined
     ? await installProtected(ctx, profile, npmName)
-    : await installProtected(ctx, profile, prepared.spec)
+    : await installProtected(ctx, profile, prepared.spec, gitSourceEnv(envAnswers))
   const note = npmName !== undefined
     ? 'installed from npm (' + npmName + '; the repository also publishes it)'
     : prepared.note
@@ -2025,6 +2068,22 @@ async function installWithSourceInner(ctx: Context | null, profile: string, spec
     }
   }
   return { ...result, output }
+}
+
+/**
+ * C2: env for a git-source install — the host's full environment is NOT
+ * passed to the third-party package's lifecycle scripts (prepare/postinstall
+ * inherit the pnpm subprocess env, so a full pass-through would hand every
+ * host token/key to unaudited code). Sensitive keys are stripped; the user's
+ * scanned answers (already whitelist-validated against the repo scan) are
+ * merged on top.
+ */
+function gitSourceEnv(answers: Record<string, string> | undefined): NodeJS.ProcessEnv {
+  const env = buildFilteredEnv()
+  if (answers !== undefined) {
+    for (const [key, value] of Object.entries(answers)) env[key] = value
+  }
+  return env
 }
 
 /** First lines of a repository README (install-guidance for refused repos). */
@@ -2160,9 +2219,9 @@ function cacheDirReferencedByProfile(home: string, pkgDir: string): boolean {
  * CLI): the file-level install, quality gate, and rollback are identical,
  * only the live-mount step is skipped.
  */
-export async function installProtected(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
+export async function installProtected(ctx: Context | null, profile: string, spec: string, env?: NodeJS.ProcessEnv): Promise<CommandResult> {
   const before = readBundles(profile)
-  const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
+  const result = await runDshPlugin(profile, 'add', [spec], process.cwd(), env)
   if (!result.ok) return result
   restoreInBoxBundles(profile, before)
   const installed = resolveInstalledName(profile, spec)
@@ -3777,7 +3836,15 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'install': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const spec = typeof body['spec'] === 'string' ? body['spec'] : ''
-          sendJson(res, 200, { ok: true, value: await service.install(profile, spec) })
+          const rawAnswers = body['answers']
+          const answers = rawAnswers !== null && typeof rawAnswers === 'object' && !Array.isArray(rawAnswers)
+            ? Object.fromEntries(
+                Object.entries(rawAnswers as Record<string, unknown>).filter(
+                  (entry): entry is [string, string] => typeof entry[1] === 'string',
+                ),
+              )
+            : undefined
+          sendJson(res, 200, { ok: true, value: await service.install(profile, spec, answers) })
           return
         }
         case 'remove': {
