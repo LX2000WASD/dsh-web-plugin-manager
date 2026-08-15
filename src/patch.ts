@@ -315,7 +315,12 @@ function scanBlock(lines: readonly string[], start: number): { kind: string; id:
       if (match !== null) id = match[1]!
     } else {
       const match = /^-\s*id:\s*(.+?)\s*$/.exec(line)
-      if (match !== null) id = match[1]!
+      if (match !== null) {
+        id = match[1]!
+        // A managed disable block has no insert: marker — tag it so
+        // removeManagedBlocks can actually remove it (was silently inert).
+        kind = 'disable'
+      }
     }
   }
   return kind !== undefined && id !== undefined ? { kind, id } : undefined
