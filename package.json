@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-plugin-manager",
-  "version": "0.3.11",
+  "version": "0.4.0",
   "description": "Manage DeepSeek Harness (DSH) plugins from the Web UI: list, enable/disable, install/remove, environments, and a GitHub-awesome-driven marketplace.",
   "keywords": [
     "deepseek",
@@ -30,7 +30,8 @@
   "files": [
     "dist",
     "cordis.patch.yml",
-    "docs/feature-reference.md"
+    "docs/feature-reference.md",
+    "README.en.md"
   ],
   "bin": {
     "dshpm": "./dist/cli.js"
