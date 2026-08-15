@@ -79,7 +79,8 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
     for (const row of snap.insertRows) {
       rows.push({ id: row.id, kind: 'plugin', name: row.name, enabled: true })
     }
-    // Other live entries not covered above (user patch rows).
+    // Other live entries not covered above (user patch rows, and
+    // installed-but-unmounted dependencies).
     for (const entry of snap.entries) {
       if (rows.some(r => r.id === entry.entryId || r.name === entry.moduleName)) continue
       rows.push({
@@ -87,7 +88,7 @@ export function createPluginTools(deps: PluginToolsDeps): ReturnType<typeof defi
         kind: 'entry',
         name: entry.moduleName,
         enabled: entry.enabled,
-        phase: entry.fiberPhase ?? undefined,
+        phase: entry.fiberPhase ?? (entry.unmounted ? 'unmounted' : undefined),
       })
     }
     return rows

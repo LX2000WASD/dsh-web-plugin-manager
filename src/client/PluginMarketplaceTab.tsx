@@ -273,7 +273,18 @@ export function PluginMarketplaceTab({ marketplace, profiles, list, install, t }
               onChange={(event) => setQuery(event.currentTarget.value)}
             />
           </label>
-          {rows.length === 0 ? <p style={styles.status}>{t('noMarketItems')}</p> : (
+          {rows.length === 0 && (
+            <div>
+              <p style={styles.status}>{t('noMarketItems')}</p>
+              {!state.result.ok && state.result.message.length > 0 && (
+                <p style={styles.error} role="alert">{t('marketSourceError')}: {state.result.message}</p>
+              )}
+            </div>
+          )}
+          {state.result.ok && state.result.message.includes('unavailable') && (
+            <p style={styles.status}>{t('marketSourceNote')}: {state.result.message}</p>
+          )}
+          {rows.length > 0 && (
             <ul style={styles.cards}>
               {rows.map((item) => {
                 const installed = item.packageName !== undefined && item.packageName.length > 0

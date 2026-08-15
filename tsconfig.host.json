@@ -12,5 +12,5 @@
     "rewriteRelativeImportExtensions": true,
     "experimentalDecorators": false
   },
-  "include": ["src/index.ts", "src/analyze.ts", "src/live.ts", "src/patch.ts", "src/tools.ts", "src/types.ts"]
+  "include": ["src/index.ts", "src/analyze.ts", "src/guard.ts", "src/live.ts", "src/net.ts", "src/patch.ts", "src/tools.ts", "src/types.ts", "src/cli.ts"]
 }

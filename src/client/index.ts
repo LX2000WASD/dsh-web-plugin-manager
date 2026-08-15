@@ -76,6 +76,7 @@ export function apply(ctx: ClientContext): void {
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),
     list: (profile) => call<PluginManagerSnapshot>('list', { profile }),
     setEnabled: (profile, entryId, enabled) => call<MutationResult>('setEnabled', { profile, entryId, enabled }),
+    mount: (profile, packageName) => call<MutationResult>('mount', { profile, packageName }),
   })
   const managerInjected = (): PluginManagerTabInjected => ({
     profiles: () => call<ProfileInfo[]>('listProfiles', {}),

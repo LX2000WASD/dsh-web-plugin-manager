@@ -19,6 +19,7 @@ export interface PluginCatalogTabInjected {
   readonly profiles: () => Promise<ProfileInfo[]>
   readonly list: (profile: string) => Promise<PluginManagerSnapshot>
   readonly setEnabled: (profile: string, entryId: string, enabled: boolean) => Promise<MutationResult>
+  readonly mount: (profile: string, packageName: string) => Promise<MutationResult>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -140,7 +141,7 @@ function authorModule(moduleName: string): string {
 }
 
 /** Render the catalog (shadows the official read-only inventory). */
-export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalogTabProps): ReactNode {
+export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: PluginCatalogTabProps): ReactNode {
   const catalogId = useId()
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
@@ -155,7 +156,7 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
   // Stable identity for the once-only boot effect: injected faces may be
   // rebuilt by the slot renderer on parent re-renders, and depending on them
   // would re-run the load and grow the list on every interaction.
-  const injected = useRef({ profiles, list, setEnabled })
+  const injected = useRef({ profiles, list, setEnabled, mount })
 
   useEffect(() => {
     void injected.current.profiles().then((items) => {
@@ -199,6 +200,20 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
       const result = await injected.current.setEnabled(selected, entryId, enable)
       setExpanded(null)
       load(selected)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Mount an installed-but-unmounted dependency as a managed insert row. */
+  const onMount = async (packageName: string): Promise<void> => {
+    if (selected.length === 0) return
+    setBusy(packageName)
+    try {
+      const result = await injected.current.mount(selected, packageName)
+      setExpanded(null)
+      load(selected)
+      if (!result.ok) window.alert(result.message)
     } finally {
       setBusy(null)
     }
@@ -381,8 +396,12 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
                             title={phaseLabel(entry.fiberPhase)}
                           />
                         ) : null}
-                        <span style={{ ...styles.configTag, ...(entry.enabled ? styles.configTagOn : {}) }} data-enabled={entry.enabled ? 'true' : 'false'}>
-                          {entry.enabled ? t('enabled') : t('disabled')}
+                        <span
+                          style={{ ...styles.configTag, ...(entry.enabled && !entry.unmounted ? styles.configTagOn : {}) }}
+                          data-enabled={entry.enabled ? 'true' : 'false'}
+                          data-unmounted={entry.unmounted ? 'true' : undefined}
+                        >
+                          {entry.unmounted ? t('unmountedTag') : entry.enabled ? t('enabled') : t('disabled')}
                         </span>
                         <span
                           style={open ? { ...styles.chevron, ...styles.chevronOpen } : styles.chevron}
@@ -402,18 +421,29 @@ export function PluginCatalogTab({ profiles, list, setEnabled, t }: PluginCatalo
                           </div>
                           <div style={styles.detailsRow}>
                             <dt>{t('cordisState')}</dt>
-                            <dd>{cordisLabel(entry.fiberPhase, t)}</dd>
+                            <dd>{entry.unmounted ? t('unmountedHint') : cordisLabel(entry.fiberPhase, t)}</dd>
                           </div>
                         </dl>
                         <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'flex-end' }}>
-                          <Button
-                            size="sm"
-                            variant={entry.enabled ? 'ghost' : 'primary'}
-                            disabled={busy !== null}
-                            onClick={() => void onToggle(entry.entryId, !entry.enabled)}
-                          >
-                            {entry.enabled ? t('disableButton') : t('enableButton')}
-                          </Button>
+                          {entry.unmounted ? (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={busy !== null}
+                              onClick={() => void onMount(entry.moduleName)}
+                            >
+                              {busy === entry.moduleName ? t('mounting') : t('mountButton')}
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant={entry.enabled ? 'ghost' : 'primary'}
+                              disabled={busy !== null}
+                              onClick={() => void onToggle(entry.entryId, !entry.enabled)}
+                            >
+                              {entry.enabled ? t('disableButton') : t('enableButton')}
+                            </Button>
+                          )}
                         </div>
                       </div>
                     ) : null}

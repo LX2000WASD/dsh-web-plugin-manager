@@ -13,7 +13,12 @@
  *    patch, or failed at runtime;
  *  - conflicts: duplicate patch row ids, services registered by more than
  *    one plugin (source-scan of `new Service(ctx, 'x')` /
- *    `ctx.provide('x')`), and dependency cycles;
+ *    `ctx.provide('x')`), same-name registrations in the other named
+ *    registries (tool names, prompt-section names, web route paths — each
+ *    fails loud at runtime), dependency cycles, and official-package
+ *    duplication (an @deepseek-ai/* package present in BOTH the profile
+ *    node_modules and the installation fallback — a second copy that
+ *    hijacks the official loader row and splits module identity);
  *  - compatibility: peerDependencies (e.g. @deepseek-ai/cordis) checked
  *    against the resolved versions;
  *  - load order: a topological order of the dependency graph (for
@@ -180,12 +185,28 @@ export function scanPackageImports(
   return [...bare]
 }
 
-/** Service names registered/provided in one JS file (best-effort scan). */
-function scanServices(filePath: string): { registered: string[]; injected: string[] } {
+/**
+ * Named registrations in one JS file (best-effort scan): services provided,
+ * services injected, tool names registered, prompt-section names, and web
+ * route paths. Each named registry rejects a second contribution with the
+ * same name at runtime (fail loud), so a conflict here is a deterministic
+ * load/runtime failure, not a heuristic.
+ */
+function scanServices(filePath: string): {
+  registered: string[]
+  injected: string[]
+  tools: string[]
+  sections: string[]
+  routes: string[]
+} {
+  const empty = { registered: [], injected: [], tools: [], sections: [], routes: [] }
   try {
     const code = readFileSync(filePath, 'utf8')
     const registered = new Set<string>()
     const injected = new Set<string>()
+    const tools = new Set<string>()
+    const sections = new Set<string>()
+    const routes = new Set<string>()
     const providePattern = /(?:new\s+Service\([^)]*,\s*|ctx\.provide\(\s*|this\.provide\(\s*)['"]([^'"]+)['"]/g
     for (const match of code.matchAll(providePattern)) registered.add(match[1]!)
     const injectPattern = /(?:static\s+inject|inject)\s*=\s*\[([^\]]*)\]/g
@@ -195,9 +216,27 @@ function scanServices(filePath: string): { registered: string[]; injected: strin
         if (trimmed.length > 0) injected.add(trimmed)
       }
     }
-    return { registered: [...registered], injected: [...injected] }
+    // tools.register({ name: 'x' ... }) — also matches defineTool({...})
+    // wrapper shapes since the name key is inside the same object literal.
+    const toolPattern = /(?:ctx|this)\.tools\.register\(\s*\{[\s\S]{0,400}?name:\s*['"]([^'"]+)['"]/g
+    for (const match of code.matchAll(toolPattern)) tools.add(match[1]!)
+    // systemPrompt.section({ name: 'x', ... }) — duplicate section names
+    // within one layer throw at registration time.
+    const sectionPattern = /(?:ctx|this)\.systemPrompt\.section\(\s*\{[\s\S]{0,400}?name:\s*['"]([^'"]+)['"]/g
+    for (const match of code.matchAll(sectionPattern)) sections.add(match[1]!)
+    // webServer.register({ kind, path: 'x', handler }) — duplicate paths on
+    // the same kind shadow or reject depending on the server.
+    const routePattern = /(?:ctx|this)\.webServer\.register\(\s*\{[\s\S]{0,300}?path:\s*['"]([^'"]+)['"]/g
+    for (const match of code.matchAll(routePattern)) routes.add(match[1]!)
+    return {
+      registered: [...registered],
+      injected: [...injected],
+      tools: [...tools],
+      sections: [...sections],
+      routes: [...routes],
+    }
   } catch {
-    return { registered: [], injected: [] }
+    return empty
   }
 }
 
@@ -285,6 +324,9 @@ interface RawPackage {
   imports: string[]
   services: string[]
   injects: string[]
+  tools: string[]
+  sections: string[]
+  routes: string[]
   rowId?: string
   disabled: boolean
   entryPath: string | null
@@ -359,6 +401,17 @@ export function analyzeProfile(
   scanRoot(nodeModules)
   if (fallbackModules !== nodeModules) scanRoot(fallbackModules)
 
+  // Official-package duplication: an @deepseek-ai/* package present in BOTH
+  // layers is a second copy of an installation-owned package. The Loader
+  // resolves every row (including the official bundle rows) from the profile
+  // directory, so the profile copy shadows the installation copy; module
+  // identity (unique symbols, classes) splits between the copies and
+  // cross-package contracts break at runtime (e.g. "Cannot read properties
+  // of undefined (reading 'prepare')"). Plain third-party libraries are
+  // identity-irrelevant, so only the official scope is checked.
+  const profileLayerNames = scanNodeModulesNames(nodeModules)
+  const fallbackLayerNames = scanNodeModulesNames(fallbackModules)
+
   // Build the analyzed package list from the profile's own dependencies.
   const packages: RawPackage[] = []
   const manifest = readManifest(profileDir) as { dependencies?: Record<string, string> }
@@ -383,7 +436,9 @@ export function analyzeProfile(
     const isBundle = (dsh?.bundle as Record<string, unknown> | undefined)?.patch !== undefined
       || bundles.includes(name)
     const entryPath = providerDir !== undefined ? packageEntry(providerDir, pkgManifest) : null
-    const services = entryPath !== null ? scanServices(entryPath) : { registered: [], injected: [] }
+    const services = entryPath !== null
+      ? scanServices(entryPath)
+      : { registered: [], injected: [], tools: [], sections: [], routes: [] }
     packages.push({
       name,
       isBundle,
@@ -391,6 +446,9 @@ export function analyzeProfile(
       imports: entryPath !== null ? scanImports(entryPath) : [],
       services: services.registered,
       injects: services.injected,
+      tools: services.tools,
+      sections: services.sections,
+      routes: services.routes,
       rowId: bundles.includes(name) ? name : (insertIds.has(slugify(name)) ? slugify(name) : undefined),
       disabled: disabledNames.has(name),
       entryPath,
@@ -405,14 +463,37 @@ export function analyzeProfile(
   // (link installs keep their deps at their real location) — a declared
   // import is a resolved intent, not a missing dependency.
   const declaredByPackage = new Map<string, Set<string>>()
+  const regularDepsByPackage = new Map<string, Set<string>>()
   for (const pkg of packages) {
     const providerDir = providerDirs.get(pkg.name)
     const pkgManifest = providerDir !== undefined ? providerManifests.get(pkg.name) ?? {} : readManifest(join(nodeModules, pkg.name))
-    const declared = new Set<string>([
-      ...Object.keys((pkgManifest['dependencies'] ?? {}) as Record<string, unknown>),
+    const regularDeps = new Set<string>(Object.keys((pkgManifest['dependencies'] ?? {}) as Record<string, unknown>))
+    regularDepsByPackage.set(pkg.name, regularDeps)
+    declaredByPackage.set(pkg.name, new Set([
+      ...regularDeps,
       ...Object.keys((pkgManifest['peerDependencies'] ?? {}) as Record<string, unknown>),
-    ])
-    declaredByPackage.set(pkg.name, declared)
+    ]))
+  }
+
+  // Official-package duplication findings (see the layer scan above).
+  for (const name of profileLayerNames) {
+    if (!name.startsWith('@deepseek-ai/')) continue
+    if (!fallbackLayerNames.has(name)) continue
+    const culprits = [...regularDepsByPackage.entries()]
+      .filter(([, deps]) => deps.has(name))
+      .map(([owner]) => owner)
+    const cause = culprits.length > 0
+      ? 'installed as a regular dependency of ' + culprits.join(', ')
+      : 'added to the profile manually or as a transitive dependency'
+    issues.push({
+      kind: 'official-duplicate',
+      from: culprits[0],
+      to: name,
+      message: name + ' exists in BOTH the profile node_modules and the installation fallback (' + cause + '). '
+        + 'The loader resolves the official row to the profile copy; module identity splits between the two copies '
+        + "and runtime contracts break (e.g. Cannot read properties of undefined (reading 'prepare')). "
+        + 'Move the declaration to peerDependencies and remove the duplicate copy from the profile.',
+    })
   }
   for (const pkg of packages) {
     if (pkg.entryPath === null) continue
@@ -498,6 +579,35 @@ export function analyzeProfile(
         kind: 'service-conflict',
         message: 'service ' + service + ' is registered by ' + owners.join(' and ') + ' (later registrations shadow earlier ones)',
       })
+    }
+  }
+
+  // Named-registry conflicts beyond services: tool names, prompt-section
+  // names, and web route paths. Each named registry rejects a second
+  // contribution with the same name at runtime (fail loud), so these are
+  // deterministic failures — the same conflict family as service-conflict.
+  const conflictSets: Array<{ kind: 'tool-conflict' | 'section-conflict' | 'route-conflict'; label: string; entries: readonly string[][] }> = [
+    { kind: 'tool-conflict', label: 'tool', entries: packages.map(pkg => pkg.tools) },
+    { kind: 'section-conflict', label: 'prompt section', entries: packages.map(pkg => pkg.sections) },
+    { kind: 'route-conflict', label: 'web route', entries: packages.map(pkg => pkg.routes) },
+  ]
+  for (const { kind, label, entries } of conflictSets) {
+    const owners = new Map<string, string[]>()
+    packages.forEach((pkg, index) => {
+      for (const name of entries[index] ?? []) {
+        const list = owners.get(name) ?? []
+        list.push(pkg.name)
+        owners.set(name, list)
+      }
+    })
+    for (const [name, packageOwners] of owners) {
+      if (packageOwners.length > 1) {
+        issues.push({
+          kind,
+          message: label + ' ' + name + ' is registered by ' + packageOwners.join(' and ')
+            + ' (the second registration fails loud at runtime)',
+        })
+      }
     }
   }
 
@@ -590,6 +700,31 @@ function topoSort(adjacency: Map<string, string[]>, all: readonly string[]): str
 /** Turn a package name into a safe row id (mirrors src/index.ts slugify). */
 function slugify(name: string): string {
   return name.replace(/^@/, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase()
+}
+
+/**
+ * Package names physically present in one node_modules root (name or
+ * @scope/name; scoped subpaths flatten to the package name). This is the
+ * LAYER view, not the merged provider view: the profile's own node_modules
+ * and the shared installation fallback are compared against each other, so
+ * a name present in both is a duplicate installation.
+ */
+export function scanNodeModulesNames(root: string): Set<string> {
+  const names = new Set<string>()
+  try {
+    for (const entry of readdirSafe(root)) {
+      if (entry.name.startsWith('.')) continue
+      if (entry.name.startsWith('@')) {
+        for (const scoped of readdirSafe(join(root, entry.name))) {
+          if (scoped.name.startsWith('.')) continue
+          names.add(entry.name + '/' + scoped.name)
+        }
+      } else {
+        names.add(entry.name)
+      }
+    }
+  } catch { /* node_modules missing: the layer is empty */ }
+  return names
 }
 
 /** Read directory entries defensively (symlinks included). */

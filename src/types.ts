@@ -35,6 +35,13 @@ export interface RuntimeEntry {
   readonly installed: boolean
   /** Whether the user patch layer explicitly manages this row (deviates from defaults). */
   readonly modified: boolean
+  /**
+   * Whether this is an installed dependency with NO mount row at all (a
+   * manual install through the official CLI or pnpm — the official CLI
+   * never writes insert rows). Such a plugin is not loaded and needs a
+   * mount action before it can be enabled/disabled.
+   */
+  readonly unmounted: boolean
 }
 
 /** One installable/installed package's management view. */
@@ -173,6 +180,12 @@ export interface AnalyzePackage {
   readonly services: readonly string[]
   /** Services the entry injects (best-effort scan of inject declarations). */
   readonly injects: readonly string[]
+  /** Tool names the entry registers (best-effort scan of tools.register). */
+  readonly tools: readonly string[]
+  /** Prompt-section names the entry registers (best-effort scan of systemPrompt.section). */
+  readonly sections: readonly string[]
+  /** Web route paths the entry registers (best-effort scan of webServer.register). */
+  readonly routes: readonly string[]
   /** Row id that mounts this package, when known. */
   readonly rowId?: string
   /** Whether the package's row is disabled in the patch. */
@@ -196,6 +209,10 @@ export interface AnalyzeIssue {
     | 'duplicate-row-id'
     | 'peer-mismatch'
     | 'service-conflict'
+    | 'tool-conflict'
+    | 'section-conflict'
+    | 'route-conflict'
+    | 'official-duplicate'
     | 'pending-dependency'
     | 'load-failure'
   readonly message: string

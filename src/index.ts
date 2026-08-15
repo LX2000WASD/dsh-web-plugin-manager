@@ -47,9 +47,11 @@ import {
   hasManagedDisable, readInsertRows, readManagedIds, removeDisableBlock,
   removeInsertRow, writePatch,
 } from './patch.ts'
-import { analyzeProfile, scanImports, scanPackageImports } from './analyze.ts'
+import { analyzeProfile, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
 import type { AnalyzeIssue, AnalyzeResult } from './types.ts'
 import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
+import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
+import { marketplaceFetch } from './net.ts'
 import { registerTools } from './tools.ts'
 
 export type * from './types.ts'
@@ -447,6 +449,7 @@ export class PluginManagerService extends Service {
   async marketplace(refresh: boolean): Promise<MarketplaceResult> {
     const cacheDir = join(dshHome(), 'plugin-manager-cache')
     const cachePath = join(cacheDir, 'marketplace.json')
+    const failurePath = join(cacheDir, 'marketplace-failure.json')
     mkdirSync(cacheDir, { recursive: true })
     const readCache = (): { fetchedAt?: string; items: MarketplaceItem[] } => {
       try {
@@ -465,6 +468,23 @@ export class PluginManagerService extends Service {
         fetchedAt: new Date().toISOString(),
         items,
       }, undefined, 2) + '\n')
+      // A successful fetch clears the recorded failure reason.
+      rmSync(failurePath, { force: true })
+    }
+    const readFailure = (): { fetchedAt?: string; message?: string } => {
+      try {
+        const parsed = JSON.parse(readFileSync(failurePath, 'utf8')) as { fetchedAt?: unknown; message?: unknown }
+        return {
+          fetchedAt: typeof parsed.fetchedAt === 'string' ? parsed.fetchedAt : '',
+          message: typeof parsed.message === 'string' ? parsed.message : undefined,
+        }
+      } catch { /* no/broken failure record */ }
+      return {}
+    }
+    const writeFailure = (message: string): void => {
+      try {
+        writeFileSync(failurePath, JSON.stringify({ fetchedAt: new Date().toISOString(), message }, undefined, 2) + '\n')
+      } catch { /* failure recording is best-effort */ }
     }
     // Serve the cache unless it is missing, stale (>24h), or refresh is forced.
     if (!refresh) {
@@ -477,6 +497,20 @@ export class PluginManagerService extends Service {
           cachedAt: cached.fetchedAt,
           fromCache: true,
           message: 'served from cache',
+        }
+      }
+      // Recent total failure: serve the recorded reason instead of re-running
+      // the full GitHub round-trip (the failure is environmental and will
+      // not clear within minutes).
+      const failure = readFailure()
+      const failureAt = Date.parse(failure.fetchedAt ?? '')
+      if (failure.message !== undefined && !Number.isNaN(failureAt)
+        && Date.now() - failureAt < MARKETPLACE_FAILURE_TTL) {
+        return {
+          ok: false,
+          items: [],
+          fromCache: false,
+          message: failure.message + ' (negative cache — retry automatically in a few minutes)',
         }
       }
     }
@@ -522,7 +556,11 @@ export class PluginManagerService extends Service {
         message: 'sources unavailable; served from cache: ' + (catalogError ?? markdownError ?? 'unknown'),
       }
     }
-    return { ok: false, items: [], fromCache: false, message: catalogError ?? markdownError ?? 'no sources' }
+    // Total failure with nothing to serve: record the reason so the next
+    // visits within the negative-cache TTL fail fast with a visible message.
+    const failure = catalogError ?? markdownError ?? 'no sources'
+    writeFailure(failure)
+    return { ok: false, items: [], fromCache: false, message: failure }
   }
 
   /** Snapshot one profile: live entries + installed packages + bundle status. */
@@ -574,6 +612,25 @@ export class PluginManagerService extends Service {
       })
       : offlineEntries(bundles, insertRows)
 
+    // Installed-but-unmounted dependencies: a manual install through the
+    // official CLI or pnpm writes the dependency but no mount row (the
+    // official CLI only mounts bundle-layer packages), so the plugin is
+    // invisible to the loader and to this view. Synthesize an entry so it
+    // shows up and can be mounted from the UI (mount()).
+    const coveredNames = new Set(entries.map(entry => entry.moduleName))
+    const unmounted: RuntimeEntry[] = packages
+      .filter(pkg => !pkg.isBundle && !coveredNames.has(pkg.name) && pkg.name !== OUR_PACKAGE_NAME)
+      .map(pkg => ({
+        entryId: slugify(pkg.name),
+        moduleName: pkg.name,
+        enabled: true,
+        fiberPhase: null,
+        installed: true,
+        modified: false,
+        unmounted: true,
+      }))
+    const allEntries = [...entries, ...unmounted]
+
     return {
       profile: {
         name: profile,
@@ -584,9 +641,57 @@ export class PluginManagerService extends Service {
         isOfficial: isOfficialProfile(profile),
         running: scanRuns().get(profile) ?? null,
       },
-      entries,
+      entries: allEntries,
       packages,
       insertRows,
+    }
+  }
+
+  /**
+   * Mount an installed-but-unmounted dependency as a managed insert row:
+   * the manual-install fix. The official CLI writes only the dependency
+   * (non-bundle plugins get no row, so they never load); this writes the
+   * same managed insert row the install flow would, applied live when the
+   * profile is running.
+   */
+  async mount(profile: string, packageName: string): Promise<MutationResult> {
+    const dir = profileDir(profile)
+    if (!existsSync(dir)) return { ok: false, message: `profile not found: ` + profile }
+    const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
+    const deps = manifest.dependencies ?? {}
+    if (!(packageName in deps)) {
+      return { ok: false, message: packageName + ' is not a profile dependency (install it first)' }
+    }
+    const bundles = readBundles(profile)
+    if (bundles.includes(packageName)) {
+      return { ok: false, message: packageName + ' is a bundle-layer plugin — it loads on restart, no mount row needed' }
+    }
+    const current = readPatch(dir)
+    const rowId = slugify(packageName)
+    // Never clobber an existing row (user-written or another plugin's) that
+    // already owns this id — the loader refuses duplicate ids and the whole
+    // tree fails.
+    const existing = readInsertRows(current).find(row => row.id === rowId && row.name !== packageName)
+    const userOwns = readManagedIds(current).has(rowId)
+    if (existing !== undefined || userOwns) {
+      return {
+        ok: false,
+        message: 'row id ' + rowId + ' is already used'
+          + (existing !== undefined ? ' by ' + existing.name : ' by a user row')
+          + ' (id collision — mount under a different id or remove the other row)'
+      }
+    }
+    const next = addInsertRow(current, rowId, packageName)
+    if (next === current) return { ok: false, message: packageName + ' is already mounted' }
+    const live = profile === hostProfileName()
+      ? await applyLiveOps(this.ctx, [{ kind: 'append', value: { insert: [{ id: rowId, name: packageName }] } }])
+      : { ok: false, message: 'profile not running' }
+    writePatch(patchPath(dir), next)
+    return {
+      ok: true,
+      message: live.ok
+        ? 'mounted ' + packageName + ' as insert row ' + rowId + ' (applied live)'
+        : 'mounted ' + packageName + ' as insert row ' + rowId + ' (file updated; ' + (live.message ?? 'restart to apply') + ')'
     }
   }
 
@@ -700,29 +805,7 @@ export class PluginManagerService extends Service {
    * it live, no restart.
    */
   async install(profile: string, spec: string): Promise<CommandResult> {
-    // Git sources (not published on npm, workspace subpackages) are cloned
-    // into a cache directory and installed from there — the "official path"
-    // for repositories that never reached the registry.
-    const prepared = prepareInstallSource(spec)
-    if (prepared.error !== undefined || prepared.spec === undefined) {
-      return { ok: false, exitCode: 1, output: '[plugin-manager] ' + (prepared.error ?? 'no install source') }
-    }
-    // npm-first: when the cloned package is published on the registry, prefer
-    // the npm install (faster, no local link); fall back to the git clone.
-    const npmName = prepared.packageName !== undefined ? probeNpmPublished(prepared.packageName) : undefined
-    const result = npmName !== undefined
-      ? await installSpec(this.ctx, profile, npmName)
-      : await installSpec(this.ctx, profile, prepared.spec)
-    const note = npmName !== undefined
-      ? 'installed from npm (' + npmName + '; the repository also publishes it)'
-      : prepared.note
-    if (note !== undefined) {
-      return {
-        ...result,
-        output: result.output + '\n[plugin-manager] ' + note,
-      }
-    }
-    return result
+    return installWithSource(this.ctx, profile, spec)
   }
 
   /**
@@ -739,7 +822,7 @@ export class PluginManagerService extends Service {
     let allOk = true
     for (const name of names) {
       const source = typeof deps[name] === 'string' && deps[name] !== '' ? deps[name] : name
-      const result = await installSpec(this.ctx, toProfile, source)
+      const result = await installProtected(this.ctx, toProfile, source)
       outputs.push("# " + name + " -> " + toProfile + ": " + (result.ok ? "ok" : "FAILED") + "\n" + result.output.trim())
       if (!result.ok) allOk = false
     }
@@ -754,13 +837,7 @@ export class PluginManagerService extends Service {
 
   /** Remove an installed package via dsh plugin (preserving in-box bundles). */
   async remove(profile: string, name: string): Promise<CommandResult> {
-    const before = readBundles(profile)
-    const result = await runDshPlugin(profile, 'remove', [name], process.cwd())
-    if (result.ok) {
-      restoreInBoxBundles(profile, before)
-      cleanupInsertRows(this.ctx, profile, name)
-    }
-    return result
+    return removeProtected(this.ctx, profile, name)
   }
 
   /** Remove one managed insert row (non-bundle plugin, live unmount). */
@@ -1320,13 +1397,48 @@ function discoverWorkspacePackages(root: string): string[] {
   return found
 }
 /**
+ * Install with source preparation: git sources (not published on npm,
+ * workspace subpackages) are cloned into a cache directory and installed
+ * from there — the "official path" for repositories that never reached the
+ * registry — with npm-first when the cloned package is published. ctx null
+ * = out-of-process caller (the dshpm CLI).
+ */
+export async function installWithSource(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
+  const prepared = prepareInstallSource(spec)
+  if (prepared.error !== undefined || prepared.spec === undefined) {
+    return { ok: false, exitCode: 1, output: '[plugin-manager] ' + (prepared.error ?? 'no install source') }
+  }
+  // npm-first: when the cloned package is published on the registry, prefer
+  // the npm install (faster, no local link); fall back to the git clone.
+  const npmName = prepared.packageName !== undefined ? probeNpmPublished(prepared.packageName) : undefined
+  const result = npmName !== undefined
+    ? await installProtected(ctx, profile, npmName)
+    : await installProtected(ctx, profile, prepared.spec)
+  const note = npmName !== undefined
+    ? 'installed from npm (' + npmName + '; the repository also publishes it)'
+    : prepared.note
+  if (note !== undefined) {
+    return {
+      ...result,
+      output: result.output + '\n[plugin-manager] ' + note,
+    }
+  }
+  return result
+}
+
+/**
  * Shared install path: pnpm add through the official CLI, resolve the real
  * package name, mount non-bundle plugins as managed insert rows, restore
- * in-box bundles, and run a quality check (undeclared runtime imports are
- * the main reason third-party plugins take the instance down at boot —
- * auto-rollback on failure).
+ * in-box bundles, and run a quality check (undeclared runtime imports and
+ * official packages declared as regular dependencies are the main reasons
+ * third-party plugins break a profile — auto-rollback on failure).
+ *
+ * ctx is the live host context when a profile instance is running (live
+ * apply of insert rows) and null for out-of-process callers (the dshpm
+ * CLI): the file-level install, quality gate, and rollback are identical,
+ * only the live-mount step is skipped.
  */
-async function installSpec(ctx: Context, profile: string, spec: string): Promise<CommandResult> {
+export async function installProtected(ctx: Context | null, profile: string, spec: string): Promise<CommandResult> {
   const before = readBundles(profile)
   const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
   if (!result.ok) return result
@@ -1384,8 +1496,26 @@ async function installSpec(ctx: Context, profile: string, spec: string): Promise
   try {
     const dir = profileDir(profile)
     const current = readPatch(dir)
+    // An id collision with an existing row (user-written or another
+    // plugin's) would make the loader refuse the whole tree — fail this
+    // install instead of corrupting the patch.
+    const idOwner = readInsertRows(current).find(row => row.id === rowId && row.name !== installed)
+    const userOwnsId = readManagedIds(current).has(rowId)
+    if (idOwner !== undefined || userOwnsId) {
+      await runDshPlugin(profile, 'remove', [installed], process.cwd())
+      restoreInBoxBundles(profile, before)
+      return {
+        ok: false,
+        exitCode: 1,
+        output: result.output
+          + "\n[plugin-manager] row id " + rowId + " is already used"
+          + (idOwner !== undefined ? " by " + idOwner.name : " by a user row")
+          + " (id collision) — rolled back the install. Rename the conflicting package or remove the other row first.",
+        installed: [],
+      }
+    }
     const next = addInsertRow(current, rowId, installed)
-    const live = next !== current && profile === hostProfileName()
+    const live = next !== current && ctx !== null && profile === hostProfileName()
       ? await applyLiveOps(ctx, [{ kind: 'append', value: { insert: [{ id: rowId, name: installed }] } }])
       : { ok: false, message: 'profile not running' }
     if (next !== current) writePatch(patchPath(dir), next)
@@ -1416,6 +1546,22 @@ async function installSpec(ctx: Context, profile: string, spec: string): Promise
       output: result.output + "\n[plugin-manager] install ok but insert row failed: " + (error instanceof Error ? error.message : String(error)),
     }
   }
+}
+
+/**
+ * Shared remove path: pnpm remove through the official CLI, preserving
+ * in-box bundles and cleaning up the managed insert rows of the removed
+ * package. ctx null = out-of-process caller (the dshpm CLI); the file
+ * removal is identical, only the live unmount is skipped.
+ */
+export async function removeProtected(ctx: Context | null, profile: string, name: string): Promise<CommandResult> {
+  const before = readBundles(profile)
+  const result = await runDshPlugin(profile, 'remove', [name], process.cwd())
+  if (result.ok) {
+    restoreInBoxBundles(profile, before)
+    cleanupInsertRows(ctx, profile, name)
+  }
+  return result
 }
 
 /**
@@ -1483,6 +1629,24 @@ function qualityIssues(profile: string, packageName: string): string[] {
   const entry = packageEntry(pkgDir, manifest)
   if (entry === null) return ["no resolvable entry file (exports/main/index.js)"]
   const issues: string[] = []
+  // Official packages as REGULAR dependencies are the one install pattern
+  // that passes every import check and still breaks the profile at runtime:
+  // pnpm installs a second copy into the profile's node_modules, the Loader
+  // resolves the official bundle row to that copy (nearest-wins from the
+  // profile directory), and module identity splits between the copies
+  // (unique symbols / classes) — tool calls then fail with errors like
+  // "Cannot read properties of undefined (reading 'prepare')". The correct
+  // contract is a peerDependency: autoInstallPeers:false leaves peers to the
+  // shared installation fallback, so every plugin shares one instance.
+  const officialClosure = officialFallbackNames(profile)
+  for (const dep of Object.keys((manifest['dependencies'] ?? {}) as Record<string, unknown>)) {
+    if (dep.startsWith('@deepseek-ai/') && officialClosure.has(dep)) {
+      issues.push("declares official package " + dep + " as a REGULAR dependency: pnpm installs a second copy into "
+        + "the profile and the loader resolves the official row to it, splitting module identity (runtime failures "
+        + "like 'Cannot read properties of undefined (reading \'prepare\')'). Declare it as a peerDependency instead "
+        + "(the profile falls through to the installation's shared copy), or drop the declaration.")
+    }
+  }
   // Scan the WHOLE load chain (entry + every file reachable through relative
   // imports): an undeclared import one hop down fails at boot exactly like
   // one in the entry.
@@ -1517,6 +1681,17 @@ function qualityIssues(profile: string, packageName: string): string[] {
     }
   }
   return issues
+}
+
+/**
+ * Package names the dsh installation provides: the shared fallback
+ * profiles/node_modules closure (healProfilesModuleFallback's symlink
+ * farm). A profile-local copy of any of these — installed through a regular
+ * dependency — duplicates an installation-owned module; see the
+ * quality-gate check above.
+ */
+function officialFallbackNames(profile: string): Set<string> {
+  return scanNodeModulesNames(join(dirname(profileDir(profile)), 'node_modules'))
 }
 
 /** Row module names in a bundle's own cordis.patch.yml (best-effort parse). */
@@ -1776,6 +1951,14 @@ function probePort(port: number): Promise<boolean> {
 const MARKETPLACE_TTL = 24 * 60 * 60 * 1000
 const MARKETPLACE_CACHE_VERSION = 2
 
+/**
+ * Negative-cache TTL: after a total source failure the failure reason is
+ * served from disk instead of re-running the full GitHub round-trip on
+ * every page visit (the reason is typically environmental — proxy or
+ * network — and will not change within minutes).
+ */
+const MARKETPLACE_FAILURE_TTL = 5 * 60 * 1000
+
 /** The maintained awesome-dsh-plugins catalog (structured source of truth). */
 const CATALOG_OWNER = 'AdamPlatin123'
 const CATALOG_REPO = 'awesome-dsh-plugins'
@@ -1811,7 +1994,7 @@ function catalogStatus(entry: CatalogEntry): string {
  * empty array only when nothing usable could be read.
  */
 async function fetchCatalogItems(): Promise<MarketplaceItem[]> {
-  const listingResponse = await fetch(CATALOG_API + '/contents/catalog/plugins?per_page=100', { headers: GITHUB_UA })
+  const listingResponse = await marketplaceFetch(CATALOG_API + '/contents/catalog/plugins?per_page=100', { headers: GITHUB_UA })
   if (!listingResponse.ok) throw new Error('catalog listing HTTP ' + listingResponse.status)
   const listing = await listingResponse.json() as Array<{ name?: unknown; download_url?: unknown }>
   const files = listing.filter((entry): entry is { name: string; download_url: string } =>
@@ -1821,7 +2004,7 @@ async function fetchCatalogItems(): Promise<MarketplaceItem[]> {
   // Tombstoned ids are blocked from reappearing (policy.readd_policy).
   const tombstoned = new Set<string>()
   try {
-    const tombResponse = await fetch(CATALOG_RAW + '/catalog/tombstones.json', { headers: GITHUB_UA })
+    const tombResponse = await marketplaceFetch(CATALOG_RAW + '/catalog/tombstones.json', { headers: GITHUB_UA })
     if (tombResponse.ok) {
       const tomb = await tombResponse.json() as { entries?: unknown }
       if (Array.isArray(tomb.entries)) {
@@ -1836,7 +2019,7 @@ async function fetchCatalogItems(): Promise<MarketplaceItem[]> {
   const seen = new Map<string, MarketplaceItem>()
   for (const file of files) {
     try {
-      const response = await fetch(file.download_url, { headers: GITHUB_UA })
+      const response = await marketplaceFetch(file.download_url, { headers: GITHUB_UA })
       if (!response.ok) continue
       const entry = await response.json() as CatalogEntry
       const id = typeof entry.id === 'string' ? entry.id : ''
@@ -1884,7 +2067,7 @@ async function fetchCatalogItems(): Promise<MarketplaceItem[]> {
  * category section and deduplicating by repository (✅ wins over 待测).
  */
 async function fetchMarkdownItems(): Promise<MarketplaceItem[]> {
-  const mdResponse = await fetch(CATALOG_RAW + '/PLUGINS.md', { headers: GITHUB_UA })
+  const mdResponse = await marketplaceFetch(CATALOG_RAW + '/PLUGINS.md', { headers: GITHUB_UA })
   if (!mdResponse.ok) throw new Error('catalog fetch HTTP ' + mdResponse.status)
   const markdown = await mdResponse.text()
   const rows: Array<{ fullName: string; description: string; status: string; category: string }> = []
@@ -1974,7 +2157,7 @@ async function enrichRepos(items: MarketplaceItem[], prior: Map<string, Marketpl
       continue
     }
     try {
-      const response = await fetch('https://api.github.com/repos/' + item.name, { headers: GITHUB_UA })
+      const response = await marketplaceFetch('https://api.github.com/repos/' + item.name, { headers: GITHUB_UA })
       if (response.status === 403 || response.status === 429) {
         rateLimited = true
         const prev = prior.get(item.name)
@@ -2087,6 +2270,7 @@ function offlineEntries(bundles: readonly string[], insertRows: readonly InsertR
     fiberPhase: null,
     installed: !(IN_BOX_BUNDLES as readonly string[]).includes(bundle),
     modified: false,
+    unmounted: false,
   }))
   for (const row of insertRows) {
     out.push({
@@ -2096,6 +2280,7 @@ function offlineEntries(bundles: readonly string[], insertRows: readonly InsertR
       fiberPhase: null,
       installed: true,
       modified: row.managed,
+      unmounted: false,
     })
   }
   return out
@@ -2134,6 +2319,7 @@ function includeRows(ctx: Context, installed: InstalledSets): RuntimeEntry[] {
           || installed.insertNames.has(name)
           || installed.insertIds.has(options.id),
         modified: installed.managedIds.has(options.id),
+        unmounted: false,
       }
       const current = seen.get(options.id)
       if (current === undefined || authority(candidate) > authority(current)) {
@@ -2218,7 +2404,7 @@ function slugify(name: string): string {
  * (the package directory is gone) — the bug that took the instance down
  * during V2 testing.
  */
-function cleanupInsertRows(ctx: Context, profile: string, packageName: string): void {
+function cleanupInsertRows(ctx: Context | null, profile: string, packageName: string): void {
   try {
     const dir = profileDir(profile)
     const current = readPatch(dir)
@@ -2233,7 +2419,7 @@ function cleanupInsertRows(ctx: Context, profile: string, packageName: string): 
         ops.push({ kind: 'remove-first', value: { insert: [{ id: row.id, name: row.name }] } })
       }
     }
-    if (ops.length > 0 && profile === hostProfileName()) void applyLiveOps(ctx, ops)
+    if (ops.length > 0 && ctx !== null && profile === hostProfileName()) void applyLiveOps(ctx, ops)
     if (next !== current) writePatch(patchPath(dir), next)
   } catch {
     /* patch cleanup is best-effort */
@@ -2527,7 +2713,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers
@@ -2564,13 +2750,25 @@ export function apply(ctx: Context, config: PluginManagerConfig): void {
       return () => { for (const dispose of disposers) dispose() }
     }, 'dsh-web-plugin-manager: routes')
   })
-  // V2-E: agent tools, when the host provides the tools service (web
-  // profiles do; headless may not — inject simply never fires).
+  // V2-E: agent tools + install guard, when the host provides the tools
+  // service (web profiles do; headless may not — inject simply never fires).
+  // The guard denies raw dsh plugin/pnpm mutations from the agent so every
+  // install goes through the protected flow (quality gate + rollback).
   ctx.inject(['tools'], (toolsCtx: Context) => {
     toolsCtx.effect(() => {
       const disposers = registerTools(toolsCtx, service, config.profile)
+      const guardDisposer = registerPluginGuard(toolsCtx)
+      if (guardDisposer !== null) disposers.push(guardDisposer)
       return () => { for (const dispose of disposers) dispose() }
     }, 'dsh-web-plugin-manager: tools')
+  })
+  // V2-E: the install-rule prompt section, so the model prefers the
+  // protected surface before it attempts the raw path.
+  ctx.inject(['systemPrompt'], (promptCtx: Context) => {
+    promptCtx.effect(() => {
+      const sectionDisposer = registerPluginRulePrompt(promptCtx)
+      return () => { if (sectionDisposer !== null) sectionDisposer() }
+    }, 'dsh-web-plugin-manager: prompt rule')
   })
 }
 
