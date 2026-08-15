@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-plugin-manager",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Manage DeepSeek Harness (DSH) plugins from the Web UI: list, enable/disable, install/remove, environments, and a GitHub-awesome-driven marketplace.",
   "keywords": [
     "deepseek",
@@ -60,7 +60,8 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "js-yaml": "^4.3.1"
   },
   "dependencies": {
     "undici": "^7.29.0"
@@ -76,6 +77,7 @@
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6",
+    "js-yaml": "^4.3.1",
     "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
     "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.6",
     "@types/node": "^22.0.0",
