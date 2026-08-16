@@ -92,7 +92,7 @@ git 源插件需要安装期环境变量时，CLI 会打印缺失变量清单并
 - 随机行（无显式 id 的挂载行）不可经此启停（id 每次挂载变化）
 - git 子包安装：多包仓库用 `#路径:<dir>` 约定指定子目录（子目录必须位于克隆缓存内）
 - 质量门可能误伤未声明运行时依赖的插件（保守策略，可加白名单）
-- 官方包只能 peerDependencies（普通依赖会装出第二份拷贝并劫持官方 loader 行）
+- 官方包默认只能 peerDependencies（普通依赖会装出第二份拷贝并劫持官方 loader 行）；豁免白名单：`@deepseek-ai/schemastery`（官方 cookbook 允许的运行时 validator，模块身份不敏感，官方 dsh-llm-deepseek 即按 dependencies 声明）
 - 安装守卫只拦 agent 工具调用，拦不住用户在终端手工执行裸 `dsh plugin`
 - 更新检测边界：本地目录安装（非 git）报告"不可检测"；git URL 源需 manifest 记录安装 commit（gitHead）；用户本地 git 工作区只做只读比较（不 fetch），离线时报告"无法判定"而非"无更新"
 - 健康检查为静态+尽力而为：同名注册冲突依赖源码正则扫描（动态拼接的名字检测不到）；语义冲突无同名可查，不在检测范围

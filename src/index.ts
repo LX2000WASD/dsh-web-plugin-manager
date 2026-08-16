@@ -47,7 +47,7 @@ import {
   hasManagedDisable, readInsertRows, readManagedIds, removeDisableBlock,
   removeInsertRow, writePatch,
 } from './patch.ts'
-import { analyzeProfile, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
+import { analyzeProfile, OFFICIAL_DEP_ALLOWED, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
 import type { AnalyzeIssue, AnalyzeResult } from './types.ts'
 import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
@@ -1026,8 +1026,8 @@ export class PluginManagerService extends Service {
    * declaration) is then mounted as a managed insert row — config HMR applies
    * it live, no restart.
    */
-  async install(profile: string, spec: string, answers?: Record<string, string>): Promise<CommandResult> {
-    return installWithSource(this.ctx, profile, spec, answers)
+  async install(profile: string, spec: string, answers?: Record<string, string>, locale?: 'zh' | 'en'): Promise<CommandResult> {
+    return installWithSource(this.ctx, profile, spec, answers, locale)
   }
 
   /**
@@ -1528,8 +1528,8 @@ export class PluginManagerService extends Service {
    *    pnpm re-resolves the remote;
    *  - local non-git directories cannot be updated (no upstream to pull).
    */
-  async update(profile: string, name: string): Promise<CommandResult> {
-    return updateProtected(profile, name)
+  async update(profile: string, name: string, locale?: 'zh' | 'en'): Promise<CommandResult> {
+    return updateProtected(profile, name, locale)
   }
 
   /**
@@ -2091,11 +2091,11 @@ function enqueueMutation<T>(task: () => Promise<T>): Promise<T> {
  * registry — with npm-first when the cloned package is published. ctx null
  * = out-of-process caller (the dshpm CLI). Serialized by the mutation mutex.
  */
-export function installWithSource(ctx: Context | null, profile: string, spec: string, answers?: Record<string, string>): Promise<CommandResult> {
-  return enqueueMutation(() => installWithSourceInner(ctx, profile, spec, answers))
+export function installWithSource(ctx: Context | null, profile: string, spec: string, answers?: Record<string, string>, locale?: 'zh' | 'en'): Promise<CommandResult> {
+  return enqueueMutation(() => installWithSourceInner(ctx, profile, spec, answers, locale))
 }
 
-async function installWithSourceInner(ctx: Context | null, profile: string, spec: string, answers?: Record<string, string>): Promise<CommandResult> {
+async function installWithSourceInner(ctx: Context | null, profile: string, spec: string, answers?: Record<string, string>, locale?: 'zh' | 'en'): Promise<CommandResult> {
   // npm-first BEFORE cloning for plain GitHub URLs (the marketplace shape:
   // repo name == npm name). A pinned ref / subdir requests a specific git
   // state, so those still clone. On slow networks the registry /latest
@@ -2235,8 +2235,9 @@ async function installWithSourceInner(ctx: Context | null, profile: string, spec
     : result.output
   if (!result.ok) {
     // Append a readable failure classification when the raw output matches a
-    // known npm/pnpm failure signature.
-    const hintOutput = withFailureHint(output)
+    // known npm/pnpm failure signature (browser language on the Web UI,
+    // process locale on the CLI).
+    const hintOutput = withFailureHint(output, locale)
     // A failed install leaves a clone behind only if it is unreferenced:
     // git sources often lack committed build artifacts (dist/lib), which
     // the quality gate catches as an unresolvable entry file — clean the
@@ -2360,37 +2361,64 @@ function entryWarning(profile: string, packageName: string): string {
   }
 }
 
+/** Locale of the host process (CLI and terminal output); default English. */
+function hostLocale(): 'zh' | 'en' {
+  const lang = (process.env.LANG ?? process.env.LC_ALL ?? process.env.LC_MESSAGES ?? '').trim()
+  return /^zh/i.test(lang) ? 'zh' : 'en'
+}
+
 /**
- * Classify common npm/pnpm failure signatures into a readable troubleshooting
- * hint (bilingual not needed — the CLI and UI both show raw output).
+ * Locale from an Accept-Language request header (browser sends it on
+ * same-origin fetch): zh* wins, anything else falls back to the host locale.
  */
-function classifyInstallFailure(text: string): string | null {
-  const rules: Array<[RegExp, string]> = [
+function acceptLanguageLocale(header: string | undefined): 'zh' | 'en' {
+  if (header === undefined || header.length === 0) return hostLocale()
+  for (const part of header.split(',')) {
+    const lang = part.trim().split(';')[0]?.toLowerCase() ?? ''
+    if (lang === 'zh' || lang.startsWith('zh-')) return 'zh'
+  }
+  return 'en'
+}
+
+/**
+ * Classify common npm/pnpm failure signatures into a readable
+ * troubleshooting hint (bilingual — the Web UI picks the browser language,
+ * the CLI picks the process locale).
+ */
+function classifyInstallFailure(text: string): { zh: string; en: string } | null {
+  const rules: Array<[RegExp, string, string]> = [
     [/ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|premature close|network request failed/i,
-      '网络错误：无法连接 npm registry / GitHub，请检查网络或代理后重试。'],
+      '网络错误：无法连接 npm registry / GitHub，请检查网络或代理后重试。',
+      'Network error: cannot reach the npm registry / GitHub — check your network or proxy and retry.'],
     [/EINTEGRITY|integrity checksum failed/i,
-      '依赖完整性校验失败（常见于网络缓存损坏）：删除依赖目录后重试，或清 npm 缓存（npm cache clean --force）。'],
+      '依赖完整性校验失败（常见于网络缓存损坏）：删除依赖目录后重试，或清 npm 缓存（npm cache clean --force）。',
+      'Dependency integrity check failed (often a corrupted network cache): delete the dependency directory and retry, or clear the npm cache (npm cache clean --force).'],
     [/ETARGET|No matching version|404 Not Found|E404|ENOVERSIONS/i,
-      '依赖版本不存在：某个依赖或其版本在 registry 找不到（私有包、版本号错误或未发布）。'],
+      '依赖版本不存在：某个依赖或其版本在 registry 找不到（私有包、版本号错误或未发布）。',
+      'Dependency version not found: a dependency or its version is missing from the registry (private package, wrong version, or not published).'],
     [/gyp ERR|node-gyp|python(3)?(\s|\.exe)? not found|not found: python/i,
-      '原生模块编译失败：node-gyp 需要 Python 与 C++ 构建工具链，请先安装（Windows: Visual Studio Build Tools）。'],
+      '原生模块编译失败：node-gyp 需要 Python 与 C++ 构建工具链，请先安装（Windows: Visual Studio Build Tools）。',
+      'Native module build failed: node-gyp needs Python and a C++ toolchain (Windows: Visual Studio Build Tools).'],
     [/MODULE_NOT_FOUND|Cannot find module/i,
-      '缺少模块：包或依赖不完整——可能是源码型仓库未构建，或本地链接依赖被剥离后仍被引用。'],
+      '缺少模块：包或依赖不完整——可能是源码型仓库未构建，或本地链接依赖被剥离后仍被引用。',
+      'Missing module: the package or its dependencies are incomplete — the repo may be source-only without a build step, or a local link dependency was pruned while still referenced.'],
     [/ERR_PNPM|Command failed/i,
-      '构建/包管理命令失败：请查看上方日志输出定位具体步骤。'],
+      '构建/包管理命令失败：请查看上方日志输出定位具体步骤。',
+      'Build/package-manager command failed: check the log output above to locate the failing step.'],
     [/EACCES|EPERM|EBUSY/i,
-      '权限/占用错误：目标目录被占用或没有写入权限（Windows 常见：杀毒软件锁文件）。'],
+      '权限/占用错误：目标目录被占用或没有写入权限（Windows 常见：杀毒软件锁文件）。',
+      'Permission/lock error: the target directory is in use or not writable (on Windows antivirus software often locks files).'],
   ]
-  for (const [re, hint] of rules) {
-    if (re.test(text)) return hint
+  for (const [re, zh, en] of rules) {
+    if (re.test(text)) return { zh, en }
   }
   return null
 }
 
 /** Append the failure classification (if any) to a command output. */
-function withFailureHint(output: string): string {
+function withFailureHint(output: string, locale: 'zh' | 'en' = hostLocale()): string {
   const hint = classifyInstallFailure(output)
-  return hint !== null ? output + '\n[plugin-manager] ' + hint : output
+  return hint !== null ? output + '\n[plugin-manager] ' + hint[locale] : output
 }
 
 /** Whether any profile manifest references the given install path (link:). */
@@ -2658,11 +2686,11 @@ async function liveUnmountPackage(ctx: Context, packageName: string): Promise<vo
  * usable from the dshpm CLI without a live host. Serialized by the
  * mutation mutex.
  */
-export function updateProtected(profile: string, name: string): Promise<CommandResult> {
-  return enqueueMutation(() => updateProtectedInner(profile, name))
+export function updateProtected(profile: string, name: string, locale?: 'zh' | 'en'): Promise<CommandResult> {
+  return enqueueMutation(() => updateProtectedInner(profile, name, locale))
 }
 
-async function updateProtectedInner(profile: string, name: string): Promise<CommandResult> {
+async function updateProtectedInner(profile: string, name: string, locale?: 'zh' | 'en'): Promise<CommandResult> {
   const dir = profileDir(profile)
   if (!existsSync(dir)) return { ok: false, exitCode: 1, output: 'profile not found: ' + profile }
   const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
@@ -2735,7 +2763,7 @@ async function updateProtectedInner(profile: string, name: string): Promise<Comm
   // would otherwise disappear from the profile).
   const previousVersion = readPackageInfo(dir, name).version
   const result = await runDshPlugin(profile, 'add', [spec], process.cwd())
-  if (!result.ok) return { ...result, output: withFailureHint(result.output) }
+  if (!result.ok) return { ...result, output: withFailureHint(result.output, locale) }
   restoreInBoxBundles(profile, before)
   const installed = resolveInstalledName(profile, name)
   if (installed === null) return { ...result, installed: [name] }
@@ -2860,7 +2888,7 @@ function qualityIssues(profile: string, packageName: string): string[] {
   // shared installation fallback, so every plugin shares one instance.
   const officialClosure = officialFallbackNames(profile)
   for (const dep of Object.keys((manifest['dependencies'] ?? {}) as Record<string, unknown>)) {
-    if (dep.startsWith('@deepseek-ai/') && officialClosure.has(dep)) {
+    if (dep.startsWith('@deepseek-ai/') && officialClosure.has(dep) && !OFFICIAL_DEP_ALLOWED.has(dep)) {
       issues.push("declares official package " + dep + " as a REGULAR dependency: pnpm installs a second copy into "
         + "the profile and the loader resolves the official row to it, splitting module identity (runtime failures "
         + "like 'Cannot read properties of undefined (reading \'prepare\')'). Declare it as a peerDependency instead "
@@ -4293,7 +4321,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
                 ),
               )
             : undefined
-          sendJson(res, 200, { ok: true, value: await service.install(profile, spec, answers) })
+          sendJson(res, 200, { ok: true, value: await service.install(profile, spec, answers, acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))) })
           return
         }
         case 'remove': {
@@ -4425,7 +4453,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'update': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          sendJson(res, 200, { ok: true, value: await service.update(profile, name) })
+          sendJson(res, 200, { ok: true, value: await service.update(profile, name, acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))) })
           return
         }
         default:

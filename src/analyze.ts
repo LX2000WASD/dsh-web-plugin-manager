@@ -34,6 +34,19 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, extname, join, resolve } from 'node:path'
 import type { AnalyzeEdge, AnalyzeIssue, AnalyzePackage, AnalyzeResult } from './types.ts'
 
+/**
+ * Official (@deepseek-ai/*) packages that are SAFE as regular dependencies:
+ * runtime libraries whose module identity is not singleton-sensitive, so a
+ * profile copy cannot split identity with the installation's shared copy.
+ * schemastery qualifies: its validation errors are duck-typed through
+ * `Symbol.for('ValidationError')` (global symbol, shared across copies) and
+ * its schemas are pure closures — the official @deepseek-ai/dsh-llm-deepseek
+ * declares it as a regular dependency for the same reason. Every other
+ * fallback package (cordis, dsh-tools, dsh-llm, dsh-client-*, loader rows,
+ * service singletons) stays peer-only.
+ */
+export const OFFICIAL_DEP_ALLOWED = new Set(['@deepseek-ai/schemastery'])
+
 /** Specifiers the loader provides without any plugin declaring them. */
 const LOADER_PROVIDED = new Set([
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
@@ -497,6 +510,7 @@ export function analyzeProfile(
   for (const name of profileLayerNames) {
     if (!name.startsWith('@deepseek-ai/')) continue
     if (!fallbackLayerNames.has(name)) continue
+    if (OFFICIAL_DEP_ALLOWED.has(name)) continue
     const culprits = [...regularDepsByPackage.entries()]
       .filter(([, deps]) => deps.has(name))
       .map(([owner]) => owner)

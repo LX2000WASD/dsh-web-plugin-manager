@@ -30,7 +30,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - 白名单：`@deepseek-ai/dsh-client-*` / `cordis-plugin-*` 前缀族 + cordis / react 等 loader 提供项
 - 覆盖副作用导入、re-export、动态 import、minified 形态；`import type` 不误报
 - 声明了但未安装的依赖同样拦截；bundle 插件 `cordis.patch.yml` 行名逐一校验
-- **官方包只能 peerDependencies**：普通 `dependencies` 命中安装兜底闭包的 `@deepseek-ai/*` 一律拦截回滚——普通依赖会在 profile 内装出第二份官方拷贝，loader 最近优先解析劫持官方行，模块身份（unique symbol/class）分裂导致 `Cannot read properties of undefined (reading 'prepare')` 类运行时故障；写 `peerDependencies` 即可（`autoInstallPeers: false` 下经共享兜底目录解析，全 profile 共享一份）
+- **官方包只能 peerDependencies**：普通 `dependencies` 命中安装兜底闭包的 `@deepseek-ai/*` 一律拦截回滚——普通依赖会在 profile 内装出第二份官方拷贝，loader 最近优先解析劫持官方行，模块身份（unique symbol/class）分裂导致 `Cannot read properties of undefined (reading 'prepare')` 类运行时故障；写 `peerDependencies` 即可（`autoInstallPeers: false` 下经共享兜底目录解析，全 profile 共享一份）。豁免名单 `OFFICIAL_DEP_ALLOWED`（analyze.ts）：`@deepseek-ai/schemastery`——官方 cookbook 允许的运行时 validator，`ValidationError` 用 `Symbol.for` 全局符号 duck-typed、schema 为纯函数闭包，双拷贝不分裂身份（官方 @deepseek-ai/dsh-llm-deepseek 即按 dependencies 声明）
 
 ## 更新
 
