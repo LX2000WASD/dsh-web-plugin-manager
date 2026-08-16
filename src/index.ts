@@ -2773,6 +2773,19 @@ export function updateProtected(profile: string, name: string, locale?: 'zh' | '
   return enqueueMutation(() => updateProtectedInner(profile, name, locale))
 }
 
+/**
+ * 构造 update 的安装 spec。
+ * - git 源：原样返回（git-cache 拉取后按目录重装）。
+ * - npm 源：显式钉住 latest 版本号。pnpm add <name>@latest 在 manifest
+ *   已声明该包范围时不会真正升级（pnpm 保留现有解析，输出 "Already up
+ *   to date"），显式 <name>@<version> 才会重写 specifier 并升级；取不到
+ *   版本号时退回 @latest（与旧行为一致）。
+ */
+export function updateSpec(source: string, name: string, latest: string | undefined): string {
+  if (isGitSourceSpec(source)) return source
+  return latest === undefined ? name + '@latest' : name + '@' + latest
+}
+
 async function updateProtectedInner(profile: string, name: string, locale?: 'zh' | 'en'): Promise<CommandResult> {
   const dir = profileDir(profile)
   if (!existsSync(dir)) return { ok: false, exitCode: 1, output: 'profile not found: ' + profile }
@@ -2840,7 +2853,10 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
     }
   }
   // npm or git-URL source: re-add through the official CLI.
-  const spec = isGitSourceSpec(source) ? source : name + '@latest'
+  // 显式钉住最新版本号：pnpm add <name>@latest 在 manifest 已声明该包范围时
+  // 会保留现有解析（输出 "Already up to date"），导致 update 永远升不上去；
+  // 显式 <name>@<version> 才会真正升级（见 updateSpec）。
+  const spec = updateSpec(source, name, await npmLatestVersion(name))
   // Previous version captured for the rollback: a failed self-update must
   // restore the old code, never uninstall the package (the manager itself
   // would otherwise disappear from the profile).
