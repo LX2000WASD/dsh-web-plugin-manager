@@ -91,6 +91,22 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - 市场卸载：管理页「技能与预设」区块（记录列表 + 卸载 + git 源重新拉取）；`dshpm uninstall-kind <owner/repo>`；skill/预设删目录含路径越界防护，cordis 按记录逐个走受保护 remove
 - 屏蔽名单：安装时检测为非三类的仓库写入 `blocked-repos.json`，市场所有列表路径（缓存/新拉/兜底）统一过滤，响应带 `blocked`/`blockedRepos`；市场页提供「解除屏蔽」
 
+## 插件拥有的 Agent 预设（归属管理）
+
+- **背景**：预设目录名是 preset id，不是所属插件——插件（如 dsh-agent-rp）自带的伴随预设是插件自己复制进 `<dshHome>/.agent-presets` 的，卸载插件后预设成为孤儿（选择器残留、选中报错）。归属标记回答「这个目录是谁的、还是原版吗」。
+- **标准标记**（本管理器安装预设时写入）：`.dsh-preset-owner.json` = `{format: 0, owners: [包名], digest: sha256(agent.cordis.yml[+preset.yml])}`，不覆盖已有标记。
+- **兼容读取**（生态既有惯例，只读不写）：gamelike-plugin-manage 的 `.plugin-manage-owner.json`（owners 数组）、dsh-agent-rp 的 `.dsh-agent-rp-owner.json`（owner 字符串 + format + digest，严格校验 format）。标准标记损坏 → 视为无归属（不删）；兼容标记损坏/format 不符 → 单个跳过。
+- **卸载清理**（remove / uninstall-kind / plugin_uninstall）：只删「唯一 owner == 被卸载插件 且 digest 匹配（用户未修改）」的预设；用户改过的跳过并报告；多 owner 预设（归属重叠）不处理；system 信任预设绝不碰；删除优先走宿主 `agentPresets.remove()`（处理 settings.default 与 standing 会话），宿主不可用（CLI）降级直删（rmRetry + 路径守卫）。**预设是全局的：其他 profile 仍安装该插件时不清理**。
+- **禁用归档 / 启用恢复**（setEnabled）：禁用插件把其拥有的预设目录移出 user root（`<dshHome>/plugin-manager-cache/preset-archive/`，含用户修改版，零数据损失，选择器即时消失）；重新启用自动移回（同名冲突保留新预设并提示）。禁用**从不删除**——宿主 broken 判定只查 YAML 语法、不反映「引用的插件被禁用」，且临时禁用不应毁数据。
+- **已知限制**：CLI 直删路径不清宿主 settings.default（无 ctx）；skill 无此问题（SKILL.md 不引用插件代码，残留无害）。
+
+
+- 类型检测分层：根/嵌套 `agent.cordis.yml` → 预设（官方单文件判定，preset.yml 仅显示元数据）；根 package.json 声明 DSH 能力 → cordis 插件；根 `SKILL.md` → skill；嵌套预设/插件/技能根；其余（含含 install.sh 的仓库——**永不自动执行第三方脚本**）→ 非三类，拒绝安装并加入市场屏蔽名单
+- skill 安装到官方根 `<dshHome>/skills`（frontmatter name 优先，技能集合仓库逐个装，跳过点目录/node_modules/vendored）；**chokidar watch 默认开启 → 安装/删除即热加载**；预设安装到 `<dshHome>/.agent-presets`（目录名即 preset id，官方每次会话发现重读）；预设的管理（复制/删除/默认）由官方设置页完成
+- 安装记录 `installed-kinds.json`（市场安装的来源/类型/位置/时间，串行队列读写）；市场已安装判定与卡片类型徽标（skill/预设/插件）来自记录
+- 市场卸载：管理页「技能与预设」区块（记录列表 + 卸载 + git 源重新拉取）；`dshpm uninstall-kind <owner/repo>`；skill/预设删目录含路径越界防护，cordis 按记录逐个走受保护 remove
+- 屏蔽名单：安装时检测为非三类的仓库写入 `blocked-repos.json`，市场所有列表路径（缓存/新拉/兜底）统一过滤，响应带 `blocked`/`blockedRepos`；市场页提供「解除屏蔽」
+
 ## CLI（dshpm）
 
 - bin 随插件安装进入 profile 的 node_modules；也可 `node <profile>/node_modules/dsh-web-plugin-manager/dist/cli.js` 直接调用；`--home` 指定 DSH_HOME

@@ -63,7 +63,7 @@ git 源插件需要安装期环境变量时，CLI 会打印缺失变量清单并
 | 能力 | 说明 |
 |---|---|
 | 查看 | 合并展示层栈/依赖/挂载行/运行条目；手动安装未挂载的依赖显示"未挂载"并可一键挂载 |
-| 实时启停/卸载 | managed 块编辑 patch，经 loader 直接应用，实时生效、重启后持久；删除已装插件（含 bundle）同步实时卸载其运行条目与遗留 managed 块，客户端启动表立即清除（删除后刷新不再加载已删的 bundle 脚本） |
+| 实时启停/卸载 | managed 块编辑 patch，经 loader 直接应用，实时生效、重启后持久；删除已装插件（含 bundle）同步实时卸载其运行条目与遗留 managed 块，客户端启动表立即清除（删除后刷新不再加载已删的 bundle 脚本）；禁用/卸载插件时按归属标记管理其自带 agent 预设（卸载清原版、用户改过的保留并报告；禁用零损失归档、重新启用自动恢复；归属标记 `.dsh-preset-owner.json` 中立标准 + 兼容 gamelike/dsh-agent-rp 既有标记，经宿主 agentPresets 服务删除） |
 | 安装 | 官方 dsh plugin CLI + 质量门 + 自动回滚；非 bundle 自动写挂载行并实时加载；git 源自动 clone、已发布 npm 优先；多类型安装：skill（SKILL.md→`~/.dsh/skills`，热加载）与 agent 预设（agent.cordis.yml→`~/.dsh/.agent-presets`，官方发现机制直接可见）直装+记录；非插件/skill/预设仓库拒绝并加入市场屏蔽名单；git 源安装前扫描仓库所需环境变量（TOKEN/KEY/SECRET 形态），缺则暂停询问、行内填写后继续，answers 仅按扫描白名单注入（防 PATH/HOME 注入），宿主敏感键不传给第三方脚本 |
 | 更新 | 检查更新（npm dist-tag / git HEAD / 安装 commit），更新带质量门与回滚；含管理器自身（自更新）——管理页可直接点更新升级，失败自动装回旧版本 |
 | 健康检查 | 依赖图/缺失/循环/重复行 id/同名注册冲突（服务/工具/section/路由）/peer 版本/官方包重复；运行中追加 pending 与失败诊断；A 级问题一键修复、B 级建议确认后修复 |

@@ -157,8 +157,11 @@ export function hasManagedDisable(patchPath: string, entryId: string): boolean {
 export function addDisableBlock(content: string, entryId: string): string {
   assertSafeEntryId(entryId)
   const lines = content.length === 0 ? [] : content.split('\n')
-  // Remove any existing managed block for this id first (refresh in place).
-  const without = removeManagedBlocks(lines, entryId).lines
+  // Refresh the disable block in place, but never touch an insert block for
+  // the same id — the insert row is the plugin's mount record and must
+  // survive a disable (otherwise the plugin silently stops loading after a
+  // restart).
+  const without = removeDisableBlocksOnly(lines, entryId).lines
   const block = [
     START,
     `- id: ${entryId}`,
@@ -172,8 +175,43 @@ export function addDisableBlock(content: string, entryId: string): string {
 export function removeDisableBlock(content: string, entryId: string): string {
   assertSafeEntryId(entryId)
   const lines = content.length === 0 ? [] : content.split('\n')
-  const { lines: without } = removeManagedBlocks(lines, entryId)
+  // Disable blocks only — an insert block for the same id is the plugin's
+  // mount record and must survive the enable.
+  const { lines: without } = removeDisableBlocksOnly(lines, entryId)
   return normalizeDocument(without)
+}
+
+/**
+ * Drop every managed DISABLE block targeting `entryId`, keeping insert
+ * blocks: an insert block is the plugin's persistent mount record — a
+ * disable must not erase it (the plugin would silently stop loading after a
+ * restart). The disabled state lives in the disable block on top of the
+ * still-present insert row.
+ */
+function removeDisableBlocksOnly(lines: readonly string[], entryId: string): { lines: string[]; removed: boolean } {
+  const out: string[] = []
+  let removed = false
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    if (line.trimEnd() === START) {
+      let j = i + 1
+      while (j < lines.length && lines[j]!.trimEnd() !== END) j += 1
+      if (j >= lines.length) break // unterminated marker: stop, keep the rest
+      const block = scanBlock(lines, i)
+      if (block !== undefined && block.id === entryId && block.kind === 'disable') {
+        i = j + 1 // skip only the disable block
+        removed = true
+        continue
+      }
+      out.push(...lines.slice(i, j + 1))
+      i = j + 1
+      continue
+    }
+    out.push(line)
+    i += 1
+  }
+  return { lines: out, removed }
 }
 
 /** Escaped literal for one row id inside a line-level regex. */

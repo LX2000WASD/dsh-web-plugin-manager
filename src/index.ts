@@ -56,6 +56,10 @@ import {
   loadKindRecords, looksLikeDshPlugin, normalizeRepoRef, presetsDirPath, pruneGhostRecords, removeBlockedRepo, removeKindRecord,
   renameRetry, rmRetry, saveKindRecord, skillsDirPath, slugDirName, type KindRecord,
 } from './kinds.ts'
+import {
+  agentPresetsOf, archiveOwnedPresets, cleanupOwnedPresets, formatArchiveResult, formatCleanupResult, formatRestoreResult,
+  pluginInstalledInOtherProfiles, restoreArchivedPresets,
+} from './presets.ts'
 import { marketplaceFetch } from './net.ts'
 import {
   fetchDshSoIndex, fetchRegistryRepos, fetchSearchFallback, functionalTopics, readRegistryCache, writeRegistryCache,
@@ -978,15 +982,55 @@ export class PluginManagerService extends Service {
         ? await applyLiveOps(this.ctx, ops)
         : { ok: false, message: 'profile not running' }
       if (next !== current) writePatch(patchPath(dir), next)
+      // Plugin-owned agent presets follow the plugin's liveness: disabling
+      // archives the owned presets (moved out of the picker, zero data loss),
+      // re-enabling restores them. Only the running profile's live toggle
+      // counts — a file-only edit for another profile must not move global
+      // presets (the plugin may still be live there).
+      const presetNote = await this.presetLifecycleNote(profile, entryId, enabled, live.ok)
       const state = enabled ? 'enabled' : 'disabled'
       return {
         ok: true,
         message: live.ok
-          ? `${state} ${entryId} (applied live)`
+          ? `${state} ${entryId} (applied live)` + presetNote
           : `${state} ${entryId} (file updated; ${live.message ?? 'restart to apply'})`,
       }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
+   * Archive (disable) or restore (re-enable) the plugin's owned agent
+   * presets for the running profile, returning a summary suffix for the
+   * result message. Skips when the row's package cannot be resolved, when
+   * another profile still installs the plugin (presets are global), or when
+   * the toggle was file-only. Never throws — a failure degrades to a note.
+   */
+  private async presetLifecycleNote(profile: string, entryId: string, enabled: boolean, liveOk: boolean): Promise<string> {
+    if (profile !== hostProfileName() || !liveOk) return ''
+    // Resolve the row's package name: the live tree first (bundle/insert
+    // rows carry a name), then the patch's insert rows (the persistent mount
+    // record — robust against live-tree drift after toggle cycles).
+    const liveName = liveRowStates(this.ctx).find(row => row.entryId === entryId)?.moduleName ?? ''
+    const moduleName = liveName.length > 0
+      ? liveName
+      : readInsertRows(readPatch(profileDir(profile))).find(row => row.id === entryId)?.name ?? ''
+    if (moduleName.length === 0) return ''
+    try {
+      if (enabled) {
+        const result = restoreArchivedPresets(presetsDirPath(), moduleName)
+        const note = formatRestoreResult(moduleName, result)
+        return note.length > 0 ? '\n' + note : ''
+      }
+      if (pluginInstalledInOtherProfiles(profile, moduleName)) {
+        return '\n[plugin-manager] preset archive skipped for ' + moduleName + ': still installed in another profile'
+      }
+      const result = archiveOwnedPresets(presetsDirPath(), moduleName)
+      const note = formatArchiveResult(moduleName, result)
+      return note.length > 0 ? '\n' + note : ''
+    } catch (error) {
+      return '\n[plugin-manager] preset lifecycle failed: ' + (error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -1357,9 +1401,26 @@ export class PluginManagerService extends Service {
         ? record.names
         : record.name !== null ? [record.name] : []
       let removed = 0
+      // Agent presets: prefer the host roster service — its remove() clears
+      // a settings default that pointed at the preset and keeps standing
+      // sessions intact; a direct rm of a default preset would break every
+      // new session until the default is unset (host-side semantics). The
+      // CLI has no host ctx and falls back to direct removal.
+      const hostService = record.type === 'agent-preset' ? agentPresetsOf(this.ctx) : undefined
       try {
         for (const name of names) {
           const target = join(root, name)
+          if (hostService !== undefined) {
+            try {
+              const rows = await hostService.list()
+              if (rows.some(row => row.id === name)) {
+                await hostService.remove(name)
+                log.push('removed ' + target + ' (host)')
+                removed++
+                continue
+              }
+            } catch { /* host removal failed — fall through to direct removal */ }
+          }
           if (isUnderRoot(target, root) && existsSync(target)) {
             rmSync(target, { recursive: true, force: true })
             log.push('removed ' + target)
@@ -2598,7 +2659,7 @@ async function removeProtectedInner(ctx: Context | null, profile: string, name: 
   // package's own bundle patch declares. Collected BEFORE pnpm deletes the
   // package files.
   const orphanedIds = managedRowIdsOf(profile, name)
-  const result = await runDshPlugin(profile, 'remove', [name], process.cwd())
+  let result = await runDshPlugin(profile, 'remove', [name], process.cwd())
   if (result.ok) {
     restoreInBoxBundles(profile, before)
     cleanupInsertRows(ctx, profile, name)
@@ -2613,8 +2674,30 @@ async function removeProtectedInner(ctx: Context | null, profile: string, name: 
     if (ctx !== null && profile === hostProfileName()) {
       await liveUnmountPackage(ctx, name)
     }
+    // Plugin-owned agent presets: after the package is gone, delete its
+    // unmodified owned presets (see src/presets.ts). Presets are global, so
+    // skip when another profile still installs the plugin.
+    result = { ...result, output: result.output + '\n' + await presetCleanupNote(ctx, profile, name) }
   }
   return result
+}
+
+/**
+ * Cleanup note appended to a removal result: deletes the removed plugin's
+ * unmodified owned agent presets through the host service when available
+ * (direct removal otherwise), reporting what was removed and what was kept
+ * and why. Never throws.
+ */
+async function presetCleanupNote(ctx: Context | null, profile: string, name: string): Promise<string> {
+  try {
+    if (pluginInstalledInOtherProfiles(profile, name)) {
+      return '[plugin-manager] preset cleanup skipped for ' + name + ': still installed in another profile'
+    }
+    const result = await cleanupOwnedPresets(ctx, presetsDirPath(), name)
+    return formatCleanupResult(name, result)
+  } catch (error) {
+    return '[plugin-manager] preset cleanup failed for ' + name + ': ' + (error instanceof Error ? error.message : String(error))
+  }
 }
 
 /**

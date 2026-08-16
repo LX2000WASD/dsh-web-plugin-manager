@@ -20,6 +20,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
+import { writeOwnerMarker } from './presets.ts'
 
 /** The kind of installable content a repository carries. */
 export type RepoKind = 'agent-preset' | 'cordis-plugin' | 'skill' | 'instructions'
@@ -289,6 +290,10 @@ export function installPreset(root: string, repoName: string, occupied?: Set<str
     const dest = join(destRoot, id)
     rmSync(dest, { recursive: true, force: true })
     cpSync(presetRoot, dest, { recursive: true, filter: copyFilter })
+    // Ownership marker: who installed this preset and the digest it shipped
+    // with, so uninstalling the owner can clean it up without touching user
+    // edits (see src/presets.ts).
+    writeOwnerMarker(dest, [repoName])
     installed.push(id)
   }
   return {
