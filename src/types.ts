@@ -245,6 +245,13 @@ export interface CommandResult {
   /** Real package names resolved from the profile manifest after install. */
   readonly installed?: readonly string[]
   /**
+   * Whether the change was applied to the live loader tree (true only when
+   * the operation targeted the running profile and the live apply succeeded).
+   * Bundle-layer plugins are never live-applied — they join the layer stack
+   * and load at the next start, so installs report live: false for them.
+   */
+  readonly live?: boolean
+  /**
    * C2: install paused waiting for env vars (git-source cordis plugins).
    * The caller re-submits the same spec with answers to continue.
    */

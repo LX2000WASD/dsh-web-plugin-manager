@@ -49,6 +49,13 @@ export type StackOp =
    * The mutate callback returns the replacement, or null to drop the row.
    */
   | { kind: 'replace-last'; id: string; mutate: (row: Record<string, unknown>) => Record<string, unknown> | null }
+  /**
+   * Remove every top-level row whose insert list mounts the named package
+   * (bundle-layer rows and managed insert rows alike). Matches by child
+   * `name`, so it survives the in-place override fields applyEntryPatches
+   * bakes into rows (disabled/config) that JSON equality would miss.
+   */
+  | { kind: 'remove-by-name'; name: string }
 
 /** Whether a value is a plain JSON-ish object (not an array). */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -167,6 +174,16 @@ export async function applyLiveOps(
         const next = op.mutate(stack[index] as Record<string, unknown>)
         if (next === null) stack.splice(index, 1)
         else stack[index] = next
+        break
+      }
+      case 'remove-by-name': {
+        for (let i = stack.length - 1; i >= 0; i -= 1) {
+          const row = stack[i]
+          if (isRecord(row) && Array.isArray(row.insert)
+            && row.insert.some(child => isRecord(child) && child.name === op.name)) {
+            stack.splice(i, 1)
+          }
+        }
         break
       }
     }

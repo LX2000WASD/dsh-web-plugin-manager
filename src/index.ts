@@ -2478,6 +2478,9 @@ export async function installProtected(ctx: Context | null, profile: string, spe
     return {
       ...result,
       installed: [installed],
+      // Bundle layers load at the next start; the client must not claim a
+      // live mount for them.
+      live: false,
       output: result.output + analysisNote + entryNote + PEER_WARNING_NOTE
         + '\n[plugin-manager] bundle plugin added to the layer stack — restart the profile to load it (the catalog will show it then).',
     }
@@ -2525,6 +2528,7 @@ export async function installProtected(ctx: Context | null, profile: string, spe
       return {
         ...result,
         installed: [installed],
+        live: false,
         output: result.output
           + "\n[plugin-manager] mount failed (" + (live.message ?? 'import error') + ")"
           + "\n[plugin-manager] insert row " + rowId + " rolled back — the profile stays bootable. Check the plugin's dependencies.",
@@ -2533,6 +2537,7 @@ export async function installProtected(ctx: Context | null, profile: string, spe
     return {
       ...result,
       installed: [installed],
+      live: live.ok,
       output: result.output
         + "\n[plugin-manager] quality check passed; mounted " + installed + " as insert row " + rowId + (live.ok ? " (applied live)" : " (file updated; " + (live.message ?? 'mounts on next restart') + ")")
         + entryNote + PEER_WARNING_NOTE,
@@ -2541,6 +2546,7 @@ export async function installProtected(ctx: Context | null, profile: string, spe
     return {
       ...result,
       installed: [installed],
+      live: false,
       output: result.output + "\n[plugin-manager] install ok but insert row failed: " + (error instanceof Error ? error.message : String(error)),
     }
   }
@@ -2559,12 +2565,90 @@ export function removeProtected(ctx: Context | null, profile: string, name: stri
 
 async function removeProtectedInner(ctx: Context | null, profile: string, name: string): Promise<CommandResult> {
   const before = readBundles(profile)
+  // Row ids the removal orphans (managed disable blocks must not survive
+  // the package): the mount id, the patch's insert-row ids, and the ids the
+  // package's own bundle patch declares. Collected BEFORE pnpm deletes the
+  // package files.
+  const orphanedIds = managedRowIdsOf(profile, name)
   const result = await runDshPlugin(profile, 'remove', [name], process.cwd())
   if (result.ok) {
     restoreInBoxBundles(profile, before)
     cleanupInsertRows(ctx, profile, name)
+    removeDisableBlocks(profile, orphanedIds)
+    // Live-unmount every loader row mounting the removed package in the
+    // running profile. pnpm remove only rewrites the manifest and deletes
+    // the package files; without an unmount the fiber stays mounted and the
+    // client boot table keeps serving its client entry — the browser then
+    // fails to load the deleted client.js on the next refresh and the whole
+    // UI dies until a restart (client-modules: bundle script ... failed to
+    // load). Disposing the fiber now lets the platform drop the entry.
+    if (ctx !== null && profile === hostProfileName()) {
+      await liveUnmountPackage(ctx, name)
+    }
   }
   return result
+}
+
+/**
+ * Collect the loader row ids a package owns in a profile: the managed mount
+ * id (slugify), every managed insert row id mounting it, and the row ids its
+ * own bundle patch inserts. Used to drop managed disable blocks whose row
+ * disappears with the package — a stale block would warn on every boot and
+ * silently disable a future plugin that reuses the same row id.
+ */
+function managedRowIdsOf(profile: string, packageName: string): string[] {
+  const ids = new Set<string>([slugify(packageName)])
+  try {
+    const dir = profileDir(profile)
+    for (const row of readInsertRows(readPatch(dir))) {
+      if (row.name === packageName) ids.add(row.id)
+    }
+  } catch { /* patch rows are optional */ }
+  try {
+    const dir = profileDir(profile)
+    const manifest = JSON.parse(
+      readFileSync(join(dir, 'node_modules', packageName, 'package.json'), 'utf8'),
+    ) as { dsh?: { bundle?: { patch?: unknown } } }
+    const rel = manifest.dsh?.bundle?.patch
+    if (typeof rel === 'string' && rel.length > 0) {
+      const patch = readFileSync(join(dir, 'node_modules', packageName, rel), 'utf8')
+      // Insert children and patched rows both declare their id the same way.
+      for (const match of patch.matchAll(/^\s*-\s+id:\s*['"]?([A-Za-z0-9._-]+)['"]?\s*$/gm)) {
+        if (match[1] !== undefined) ids.add(match[1])
+      }
+    }
+  } catch { /* a bundle patch is optional; the mount id already covers non-bundle rows */ }
+  return [...ids]
+}
+
+/**
+ * Drop managed disable blocks for the given row ids from a profile's patch
+ * file (best-effort; rows that never had a block are untouched).
+ */
+function removeDisableBlocks(profile: string, rowIds: readonly string[]): void {
+  try {
+    const dir = profileDir(profile)
+    const path = patchPath(dir)
+    let next = readPatch(dir)
+    for (const id of rowIds) {
+      const cleaned = removeDisableBlock(next, id)
+      if (cleaned !== next) next = cleaned
+    }
+    if (next !== readPatch(dir)) writePatch(path, next)
+  } catch { /* block cleanup is best-effort */ }
+}
+
+/**
+ * Unmount every loader row mounting a package from the running profile's
+ * live include stack (best-effort). Used after a package removal so its
+ * fiber disposes immediately instead of lingering until the next restart.
+ */
+async function liveUnmountPackage(ctx: Context, packageName: string): Promise<void> {
+  try {
+    await applyLiveOps(ctx, [{ kind: 'remove-by-name', name: packageName }])
+  } catch (error: unknown) {
+    console.error('[plugin-manager] live unmount failed:', error instanceof Error ? error.message : String(error))
+  }
 }
 
 /**

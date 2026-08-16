@@ -304,7 +304,10 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
         setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output)
         return
       }
-      const mounted = result.installed !== undefined && result.installed.length > 0
+      // The host reports live: true only when the plugin was actually
+      // mounted into the running loader tree. Bundle-layer plugins load at
+      // the next start — claiming a live mount for them is a lie.
+      const mounted = result.live === true
         ? '\n✓ ' + t('installMounted')
         : ''
       setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output + mounted)
@@ -330,7 +333,10 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
         setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output)
         return
       }
-      const mounted = result.installed !== undefined && result.installed.length > 0
+      // The host reports live: true only when the plugin was actually
+      // mounted into the running loader tree. Bundle-layer plugins load at
+      // the next start — claiming a live mount for them is a lie.
+      const mounted = result.live === true
         ? '\n✓ ' + t('installMounted')
         : ''
       setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output + mounted)

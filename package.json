@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-plugin-manager",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Manage DeepSeek Harness (DSH) plugins from the Web UI: list, enable/disable, install/remove, environments, and a GitHub-awesome-driven marketplace.",
   "keywords": [
     "deepseek",
