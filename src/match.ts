@@ -55,3 +55,26 @@ export function findPluginMatches(
     .slice(0, limit)
     .map(entry => entry.item)
 }
+
+/** Whether a dependency value is a git source spec (github:/git+/URL). */
+export function isGitSourceSpec(source: string): boolean {
+  const spec = source.trim()
+  if (spec.startsWith('github:') || spec.startsWith('git+') || spec.startsWith('git@')) return true
+  const urlRe = new RegExp('^https?://')
+  const dotGitRe = new RegExp('\\.git(?:/|$)')
+  return urlRe.test(spec) && (dotGitRe.test(spec) || spec.includes('github.com/'))
+}
+
+/**
+ * 构造 update 的安装 spec。
+ * - git 源：原样返回（git-cache 拉取后按目录重装）。
+ * - npm 源：显式钉住 latest 版本号。@latest 依赖 pnpm 对 dist-tag 的解析：
+ *   pnpm 11 默认 minimumReleaseAge（发布不足 24h 的版本被扣留）或镜像源
+ *   dist-tag 同步滞后时，@latest 会解析到旧版或停在现有范围，更新升不上去；
+ *   显式 <name>@<version> 重写 specifier，不受这些因素影响。取不到版本号时
+ *   退回 @latest（与旧行为一致）。
+ */
+export function updateSpec(source: string, name: string, latest: string | undefined): string {
+  if (isGitSourceSpec(source)) return source
+  return latest === undefined ? name + '@latest' : name + '@' + latest
+}

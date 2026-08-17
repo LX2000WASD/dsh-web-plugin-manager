@@ -1,13 +1,14 @@
 /**
  * updateSpec 构造单测（node --test，跑 dist 产物）：
- *   pnpm add <name>@latest 在 manifest 已声明该包范围时不会真正升级
- *   （输出 "Already up to date"），update 必须显式钉住版本号；
- *   updateSpec 是 updateProtectedInner 的 spec 构造逻辑（src/index.ts）。
+ *   @latest 依赖 pnpm 对 dist-tag 的解析，在 pnpm 11 minimumReleaseAge
+ *   （默认 24h 扣留新版本）或镜像 dist-tag 滞后时会解析到旧版或停在现有
+ *   范围，update 显式钉住版本号即可绕过；updateSpec 是 updateProtectedInner
+ *   的 spec 构造逻辑（src/match.ts）。
  */
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { updateSpec } from '../dist/index.js'
+import { updateSpec } from '../dist/match.js'
 
 describe('updateSpec', () => {
   it('pins the explicit latest version for npm sources', () => {
