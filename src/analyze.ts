@@ -41,11 +41,18 @@ import type { AnalyzeEdge, AnalyzeIssue, AnalyzePackage, AnalyzeResult } from '.
  * schemastery qualifies: its validation errors are duck-typed through
  * `Symbol.for('ValidationError')` (global symbol, shared across copies) and
  * its schemas are pure closures — the official @deepseek-ai/dsh-llm-deepseek
- * declares it as a regular dependency for the same reason. Every other
- * fallback package (cordis, dsh-tools, dsh-llm, dsh-client-*, loader rows,
- * service singletons) stays peer-only.
+ * declares it as a regular dependency for the same reason. cosmokit
+ * qualifies too: a pure utility collection (types/time/string/array/misc)
+ * with no module-level mutable state and no identity symbols; its only
+ * globalThis use is the `is()` instanceof helper, which consults the shared
+ * global constructors and cannot split between copies. cosmokit enters the
+ * profile transitively whenever a plugin declares schemastery as a regular
+ * dependency (schemastery depends on cosmokit), so without the exemption
+ * every such plugin trips official-duplicate with schemastery as the
+ * misleading culprit. Every other fallback package (cordis, dsh-tools,
+ * dsh-llm, dsh-client-*, loader rows, service singletons) stays peer-only.
  */
-export const OFFICIAL_DEP_ALLOWED = new Set(['@deepseek-ai/schemastery'])
+export const OFFICIAL_DEP_ALLOWED = new Set(['@deepseek-ai/schemastery', '@deepseek-ai/cosmokit'])
 
 /** Specifiers the loader provides without any plugin declaring them. */
 const LOADER_PROVIDED = new Set([

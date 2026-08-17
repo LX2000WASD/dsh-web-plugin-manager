@@ -1920,6 +1920,57 @@ async function checkPackageUpdate(dir: string, name: string, source: string): Pr
 }
 
 /**
+ * Normalize a cloneable git URL into the pnpm git-protocol form
+ * (github:owner/repo for GitHub, the URL itself otherwise), keeping a #ref
+ * fragment. Git-source plugins install INTO the profile tree through this
+ * spec so their dependencies resolve; a link install would put the code in
+ * the clone cache outside the profile, where bare imports cannot reach the
+ * profile/fallback node_modules (ERR_MODULE_NOT_FOUND crash).
+ */
+export function toGitSpec(repo: string, ref?: string): string {
+  const github = /^https?:\/\/github\.com\/([^/]+)\/([^/]+?)\.git$/.exec(repo)
+    ?? /^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/.exec(repo)
+  let spec = github !== null ? 'github:' + github[1] + '/' + github[2] : repo
+  if (ref !== undefined && ref.length > 0) spec += '#' + ref
+  return spec
+}
+
+/**
+ * The pnpm git-protocol spec for a clone-cache directory, from its origin
+ * remote (github:owner/repo for GitHub remotes, the URL otherwise). Used by
+ * the update path so a cache refresh reinstalls the plugin through the git
+ * protocol instead of re-linking it (a link cannot resolve the plugin's
+ * dependencies — see prepareInstallSource).
+ */
+export async function gitSpecFromCache(local: string): Promise<string | undefined> {
+  const remote = await execFileTimeout('git', ['-C', local, 'remote', 'get-url', 'origin'], 10_000)
+  if (!remote.ok || remote.output.trim().length === 0) return undefined
+  let url = remote.output.trim()
+  if (url.startsWith('git@github.com:')) url = 'https://github.com/' + url.slice('git@github.com:'.length)
+  return toGitSpec(url)
+}
+
+/**
+ * The commit a git-protocol dependency currently resolves to, from the
+ * profile lockfile (pnpm records it as the tar.gz URL suffix). Used to roll
+ * a failed git-source update back to the previous commit.
+ */
+export function gitCommitFromLock(profile: string, packageName: string): string | undefined {
+  try {
+    const lock = readFileSync(join(profileDir(profile), 'pnpm-lock.yaml'), 'utf8')
+    for (const line of lock.split('\n')) {
+      // Scoped names appear YAML-quoted:  ' @scope/pkg@https://...tar.gz/<commit>':
+      // the closing quote sits between the commit and the colon.
+      const m = /^ {2}['"]?(.+?)['"]?@(https?:[^\s]+?tar\.gz\/([0-9a-f]{40,}))['"]?:/.exec(line)
+      if (m === null) continue
+      const key = m[1]!.replace(/^node_modules\//, '')
+      if (key === packageName || key.endsWith('/' + packageName)) return m[3]!
+    }
+  } catch { /* no lockfile: no commit to roll back to */ }
+  return undefined
+}
+
+/**
  * Prepare an install source. Git URLs (npm-unpublished repositories,
  * workspace subpackages) are cloned into $DSH_HOME/plugin-manager-src and
  * installed from there — the local-directory path the official CLI also
@@ -1927,7 +1978,7 @@ async function checkPackageUpdate(dir: string, name: string, source: string): Pr
  * git specs is a ref/branch). The cache is kept: local-directory installs
  * are pnpm links that need their source to stay in place.
  */
-function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string; packageName?: string; created?: boolean } {
+function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string; packageName?: string; created?: boolean; gitSpec?: string } {
   const trimmed = spec.trim()
   const gitUrl = /^(?:git\+)?(https?:\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
   const gitFile = /^file:(\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
@@ -1943,6 +1994,17 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
   let subdir: string | undefined
   if (frag.startsWith('路径:')) subdir = frag.slice(3)
   else if (frag.length > 0) ref = frag
+  // pnpm git-protocol spec for the cloned source (installed INTO the profile
+  // tree so the plugin's dependencies resolve). A link install puts the code
+  // in the clone cache outside the profile, where bare imports cannot reach
+  // the profile/fallback node_modules — the crash reported for git-source
+  // plugins with regular dependencies (ERR_MODULE_NOT_FOUND). Subdir and
+  // workspace-subpackage clones have no reliable git-protocol form yet and
+  // keep the link install. file: git sources are local-only and also link.
+  let gitSpec: string | undefined
+  if (subdir === undefined && gitFile === null) {
+    gitSpec = toGitSpec(repo, ref)
+  }
   try {
     const cacheRoot = join(dshHome(), 'plugin-manager-src')
     mkdirSync(cacheRoot, { recursive: true })
@@ -1975,6 +2037,7 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
             spec: pkgDir,
             packageName: manifest.name,
             created,
+            gitSpec,
             note: 'cloned ' + repo + (subdir !== undefined ? ' (' + subdir + ')' : '') + ' into ' + dest,
           }
         }
@@ -2285,12 +2348,20 @@ async function installWithSourceInner(ctx: Context | null, profile: string, spec
   // The git fallback runs with a filtered env (see gitSourceEnv); the npm
   // path keeps the host env so private-registry tokens (.npmrc auth) work.
   const npmName = prepared.packageName !== undefined ? await probeNpmPublished(prepared.packageName) : undefined
+  // Git-protocol install when the source has an equivalent (root package of
+  // a git URL): the code lands inside the profile tree and pnpm installs the
+  // plugin's dependencies, so its imports resolve. Subdir/workspace/file:
+  // sources have no git-protocol form and keep the link install (their bare
+  // imports may fail to resolve — see prepareInstallSource).
+  const gitSpec = prepared.gitSpec
   const result = npmName !== undefined
     ? await installProtected(ctx, profile, npmName)
-    : await installProtected(ctx, profile, prepared.spec, gitSourceEnv(envAnswers))
+    : await installProtected(ctx, profile, gitSpec ?? prepared.spec, gitSourceEnv(envAnswers))
   const note = npmName !== undefined
     ? 'installed from npm (' + npmName + '; the repository also publishes it)'
-    : prepared.note
+    : gitSpec !== undefined
+      ? prepared.note + ' (installed via git protocol; the clone cache is kept for updates and quality checks)'
+      : prepared.note
   const output = note !== undefined
     ? result.output + '\n[plugin-manager] ' + note
     : result.output
@@ -2808,7 +2879,13 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
     if (!updated.ok) {
       return { ok: false, exitCode: 1, output: '[plugin-manager] git update failed: ' + updated.message }
     }
-    const result = await runDshPlugin(profile, 'add', [local], process.cwd())
+    // Reinstall through the git protocol (github:owner/repo) instead of
+    // re-linking the cache: the plugin's code then lives inside the profile
+    // tree and its dependencies resolve (a link install cannot reach the
+    // profile/fallback node_modules). This also migrates legacy link
+    // installs to the protocol form.
+    const gitSpec = await gitSpecFromCache(local)
+    const result = await runDshPlugin(profile, 'add', [gitSpec ?? local], process.cwd())
     if (!result.ok) return result
     restoreInBoxBundles(profile, before)
     const issues = qualityIssues(profile, name)
@@ -2824,7 +2901,16 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
         else restoreNote = '\n[plugin-manager] WARNING: could not restore the cache (' + restored.output.trim().slice(0, 120) + ')'
       }
       await runDshPlugin(profile, 'remove', [name], process.cwd())
-      const reinstall = await runDshPlugin(profile, 'add', [local], process.cwd())
+      // Reinstall the previous commit through the git protocol (the old
+      // code passed the gate when it was installed).
+      const oldCommit = gitSpec !== undefined && oldHead.ok && oldHead.output.trim().length > 0
+        ? oldHead.output.trim()
+        : undefined
+      const reinstall = await runDshPlugin(
+        profile, 'add',
+        [oldCommit !== undefined ? gitSpec + '#' + oldCommit : (gitSpec ?? local)],
+        process.cwd(),
+      )
       restoreInBoxBundles(profile, before)
       return {
         ok: false,
@@ -2869,9 +2955,21 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
   const issues = qualityIssues(profile, installed)
   if (issues.length > 0) {
     let restored = false
-    if (previousVersion !== undefined) {
+    let rollbackLabel = ''
+    if (isGitSourceSpec(source)) {
+      // Git-protocol dependency: roll back to the previous commit (a version
+      // tag re-add would resolve from the registry and may not exist).
+      const oldCommit = gitCommitFromLock(profile, installed)
+      if (oldCommit !== undefined) {
+        const base = source.split('#')[0]!
+        const reAdd = await runDshPlugin(profile, 'add', [base + '#' + oldCommit], process.cwd())
+        restored = reAdd.ok
+        if (restored) rollbackLabel = ' (' + oldCommit.slice(0, 12) + ')'
+      }
+    } else if (previousVersion !== undefined) {
       const reAdd = await runDshPlugin(profile, 'add', [name + '@' + previousVersion], process.cwd())
       restored = reAdd.ok
+      if (restored) rollbackLabel = ' (' + previousVersion + ')'
     }
     if (!restored) await runDshPlugin(profile, 'remove', [installed], process.cwd())
     restoreInBoxBundles(profile, before)
@@ -2881,7 +2979,7 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
       output: result.output + '\n[plugin-manager] QUALITY CHECK FAILED after update:'
         + issues.map(issue => '\n  - ' + issue).join('')
         + '\n[plugin-manager] rolled back to the previous version'
-        + (restored && previousVersion !== undefined ? ' (' + previousVersion + ')' : ' — reinstall the package manually'),
+        + (restored ? rollbackLabel : ' — reinstall the package manually'),
     }
   }
   return {
