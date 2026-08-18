@@ -91,7 +91,7 @@ Detailed feature and limitation documentation: [docs/feature-reference.md](docs/
 - Installing a git bundle requires approving `pnpm allowBuilds` in a terminal (the output echoes the command)
 - Random rows (mounts without explicit ids) cannot be toggled here (ids change every mount)
 - Git sub-package installs: multi-package repos use the `#路径:<dir>` convention (the subdirectory must stay inside the clone cache)
-- The quality gate may reject plugins that omit runtime dependency declarations (conservative policy; whitelisting is possible)
+- The quality gate may reject plugins that omit runtime dependency declarations (conservative policy; whitelisting is possible); Node builtin specifiers (bare `crypto` and `node:crypto` are equivalent) are exempt — the runtime provides them unconditionally, so they are never a missing dependency
 - Official packages must be peerDependencies (a regular dependency installs a second copy and hijacks official loader rows)
 - The install guard only intercepts agent tool calls, not manual terminal commands
 - Update-check edges: local-directory installs (non-git) report "not checkable"; git-URL sources need the installed commit in the manifest (gitHead); user-owned git workspaces are compared read-only (no fetch) and report "cannot reach the remote" when offline instead of "no update"

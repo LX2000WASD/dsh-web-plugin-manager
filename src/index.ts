@@ -30,6 +30,7 @@
 import { execFile, execFileSync, spawn } from 'node:child_process'
 import { connect, createServer } from 'node:net'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { isBuiltin } from 'node:module'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -3141,6 +3142,11 @@ function readBundleRows(patchFile: string): string[] {
 
 /** Whether a bare specifier resolves inside a profile's node_modules. */
 function bareSpecifierResolves(profileDirPath: string, spec: string): boolean {
+  // Node builtins are unconditionally provided by the runtime — they resolve
+  // without any node_modules entry (defense in depth: imports are already
+  // filtered by scanImports, but bundle patch row names also flow through
+  // here).
+  if (isBuiltin(spec)) return true
   const roots = [join(profileDirPath, 'node_modules'), join(profileDirPath, '..', 'node_modules')]
   for (const root of roots) {
     try {

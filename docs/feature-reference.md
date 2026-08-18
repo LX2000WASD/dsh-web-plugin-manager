@@ -129,6 +129,6 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - 禁用被依赖的条目可能导致 profile 启动失败（官方 fail-loud 设计）；恢复：手动编辑该 profile 的 `cordis.patch.yml` 删除 managed 块
 - 安装来自 git 的 bundle 需要用户在终端放行 `pnpm allowBuilds`（命令输出会回显）
 - git 子包安装：多包仓库用 `#路径:<dir>` 约定指定子目录（`#ref` 是 git ref）
-- 质量门可能误伤：未声明运行时依赖的插件会被拦截回滚（保守策略）；若插件确实由 Loader/host 提供该模块，需在 manifest 声明或加入白名单
+- 质量门可能误伤：未声明运行时依赖的插件会被拦截回滚（保守策略）；若插件确实由 Loader/host 提供该模块，需在 manifest 声明或加入白名单；Node 内置模块说明符（裸名与 `node:` 前缀等价）已由 `isBuiltin` 统一豁免——运行时无条件提供，不构成缺失依赖（issue #9）
 - 市场条目来源于静态索引 + awesome 目录，个别仓库可能已删除/私有（安装时报 `Repository not found`）；索引项目本身是第三方维护（社区项目），其数据问题（打错 tag、非插件仓库）由精选覆盖层与安装质量门兜底
 - nvm 用户注意：子进程命令（dsh/npm/pnpm/git）解析按「运行中 node 目录 → PATH → $NVM_DIR」兜底，并把命中的工具目录注入子进程与终端窗口的 PATH——宿主进程不在 nvm 激活的 shell 中启动（桌面启动器/服务/nohup）也能工作；仅当 dsh 完全未安装时才需要从 nvm 激活的终端启动

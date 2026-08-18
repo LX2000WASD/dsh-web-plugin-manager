@@ -31,6 +31,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { isBuiltin } from 'node:module'
 import { dirname, extname, join, resolve } from 'node:path'
 import type { AnalyzeEdge, AnalyzeIssue, AnalyzePackage, AnalyzeResult } from './types.ts'
 
@@ -72,7 +73,8 @@ function isLoaderProvided(spec: string): boolean {
 }
 
 /**
- * Bare specifiers imported by one JS file (relative/node: excluded).
+ * Bare specifiers imported by one JS file (relative, absolute, and Node
+ * builtin specifiers excluded).
  *
  * Handles the forms that matter for runtime resolution:
  *  - `import ... from 'x'` (including minified `from"x"` and `from 'x'`),
@@ -81,6 +83,22 @@ function isLoaderProvided(spec: string): boolean {
  * Type-only imports (`import type ...`) are compile-time and skipped, as is
  * anything inside comments.
  */
+
+/**
+ * Specifiers that never need a provider: relative paths, absolute paths, and
+ * Node builtin modules. isBuiltin covers both the bare name ('crypto') and
+ * the 'node:'-prefixed form ('node:crypto' — they resolve identically), plus
+ * builtin subpaths ('fs/promises', 'stream/promises'); node:-only modules
+ * ('node:test', 'node:sqlite') are builtin and therefore excluded too, while
+ * their bare names correctly are not (a bare 'test' does not resolve).
+ * Builtins are unconditionally provided by the Node runtime, so they can
+ * never be the undeclared-dependency boot failure the quality gate exists to
+ * prevent.
+ */
+function isNonPackageSpec(spec: string): boolean {
+  return spec.startsWith('.') || spec.startsWith('/') || isBuiltin(spec)
+}
+
 export function scanImports(filePath: string): string[] {
   try {
     const code = stripComments(readFileSync(filePath, 'utf8'))
@@ -98,24 +116,24 @@ export function scanImports(filePath: string): string[] {
     const dynamicTemplate = /(?:import\s*\(\s*|require\s*\(\s*)`([^`$]+)`/g
     for (const match of code.matchAll(statement)) {
       const spec = match[1]!
-      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
+      if (isNonPackageSpec(spec)) continue
       if (typeOnly.has(spec)) continue
       found.add(spec)
     }
     for (const match of code.matchAll(sideEffect)) {
       const spec = match[1]!
-      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
+      if (isNonPackageSpec(spec)) continue
       if (typeOnly.has(spec)) continue
       found.add(spec)
     }
     for (const match of code.matchAll(dynamic)) {
       const spec = match[1]!
-      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
+      if (isNonPackageSpec(spec)) continue
       found.add(spec)
     }
     for (const match of code.matchAll(dynamicTemplate)) {
       const spec = match[1]!
-      if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue
+      if (isNonPackageSpec(spec)) continue
       found.add(spec)
     }
     return [...found]
