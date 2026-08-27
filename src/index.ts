@@ -2738,8 +2738,24 @@ async function removeProtectedInner(ctx: Context | null, profile: string, name: 
     // fails to load the deleted client.js on the next refresh and the whole
     // UI dies until a restart (client-modules: bundle script ... failed to
     // load). Disposing the fiber now lets the platform drop the entry.
+    // A failed / timed-out unmount is NOT silent (issue #10): the loader
+    // tree may be half-disposed (the web server is gone but the process
+    // lingers), so the removal reports live: false with an explicit
+    // restart directive instead of pretending the change was applied live.
     if (ctx !== null && profile === hostProfileName()) {
-      await liveUnmountPackage(ctx, name)
+      const unmount = await liveUnmountPackage(ctx, name)
+      result = unmount.ok
+        ? { ...result, live: true }
+        : {
+            ...result,
+            live: false,
+            output: result.output
+              + '\n[plugin-manager] live unmount did not complete ('
+              + (unmount.message ?? 'the live loader did not confirm the unmount')
+              + '). The removed entry may still be served until the next start —'
+              + ' restart the profile to fully apply the removal and to clear any'
+              + ' unstable loader state before further live changes or an automatic restart.',
+          }
     }
     // Plugin-owned agent presets: after the package is gone, delete its
     // unmodified owned presets (see src/presets.ts). Presets are global, so
@@ -2818,14 +2834,23 @@ function removeDisableBlocks(profile: string, rowIds: readonly string[]): void {
 
 /**
  * Unmount every loader row mounting a package from the running profile's
- * live include stack (best-effort). Used after a package removal so its
- * fiber disposes immediately instead of lingering until the next restart.
+ * live include stack. Used after a package removal so its fiber disposes
+ * immediately instead of lingering until the next restart.
+ *
+ * Returns the live apply outcome instead of swallowing it (issue #10): a
+ * failed or timed-out update can leave the loader tree half-disposed, and
+ * the caller must surface the "restart to fully apply" state rather than
+ * treat the removal as fully live. The wedged-restart chains themselves
+ * (a flush that never settles, a shutdown fallback that never arms) live in
+ * the host; this side at least makes the unstable state visible.
  */
-async function liveUnmountPackage(ctx: Context, packageName: string): Promise<void> {
+async function liveUnmountPackage(ctx: Context, packageName: string): Promise<{ ok: boolean; message?: string }> {
   try {
-    await applyLiveOps(ctx, [{ kind: 'remove-by-name', name: packageName }])
+    return await applyLiveOps(ctx, [{ kind: 'remove-by-name', name: packageName }])
   } catch (error: unknown) {
-    console.error('[plugin-manager] live unmount failed:', error instanceof Error ? error.message : String(error))
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[plugin-manager] live unmount failed:', message)
+    return { ok: false, message }
   }
 }
 
