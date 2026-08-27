@@ -14,6 +14,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - 变更先经 loader include 条目直接应用（`entry.update`，与平台 watchUserPatches 同通道）再写文件——绕开平台 watcher 死锁（HMR 卸载等待自身 disposables 循环等待），实时生效、零重启
 - 插件自有的 patch 文件 watcher：手动编辑持续实时生效，不依赖 HMR 生命周期
 - 5s 超时兜底；跨 profile 隔离（仅作用于运行中宿主 profile）
+- 卸载（删除插件）的实时卸载失败/超时**不再静默**：`liveUnmountPackage` 把 `applyLiveOps` 的 `{ok, message}` 透传给删除结果——失败时输出附「live unmount did not complete，请重启后完全生效」，且结果 `live: false`。半挂的 loader 树（Web 服务已关但进程不退）会让自动重启链路（`sessions.flush` 永不 settle → `scheduleExit` 不执行 → 进程退出兜底不触发）卡死，此时需手动拉起进程；根治在宿主侧 flush 超时兜底（issue #10）
 - 随机行（无显式 id 的挂载行）不可经此启停——id 每次挂载变化
 
 ## 安装
@@ -121,7 +122,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 ## 架构模块
 
 - Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）
-- 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
+- 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
 - Client：`src/client/` —— `settings.plugins.tab`（all 遮蔽官方只读列表 + manager + environments）+ `settings.section`（marketplace）；同源 fetch 调 REST（不走 Typert Remote）
 
 ## 已知限制明细

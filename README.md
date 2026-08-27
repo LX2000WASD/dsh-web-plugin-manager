@@ -101,6 +101,8 @@ git 源插件需要安装期环境变量时，CLI 会打印缺失变量清单并
 - 市场条目来源于 awesome 目录，个别仓库可能已删除/私有
 - 市场代理：host 读 `HTTP_PROXY`/`HTTPS_PROXY`；系统代理/规则模式加速器对 Node 进程无效（undici 不读系统代理）——把代理写进环境变量或改 TUN/全局模式
 - 市场索引项目（DSH-Plugins-Marketplace）为第三方维护：索引数据问题由精选覆盖层与安装质量门兜底；GitHub API 未认证限流 60/h 仅影响 catalog 独有条目的星数富化（量小，列表不受影响）
+- REST 信任围栏仅按浏览器语义放行：非 HTTP 载体（第三方桌面壳/自定义协议分发 app:// 请求）不带 Host 头时，请求须无 Origin 且非 cross-site 才被接受（本地非浏览器发起者语义，issue #11）；这类载体若连请求体都不转发（无 stream 也无 body），操作会以字段校验错误返回而不是崩溃
+- 删除 bundle 插件的实时卸载失败/超时不再静默：输出会提示「live unmount 未完成，请重启后完全生效」——半挂的 loader 树可能让 Web 服务已关但进程不退，此时自动重启链路可能卡死，需手动拉起（issue #10；根治在宿主侧 flush 超时兜底）
 - nvm 用户注意：子进程命令按"运行中 node 目录 → PATH → $NVM_DIR"兜底并注入 PATH——宿主进程不在 nvm 激活的 shell 中启动也能工作；仅当 dsh 未安装时才需从 nvm 激活终端
 
 ## 开发
