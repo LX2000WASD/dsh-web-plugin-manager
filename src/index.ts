@@ -63,6 +63,7 @@ import {
 } from './presets.ts'
 import { marketplaceFetch } from './net.ts'
 import { isGitSourceSpec, updateSpec } from './match.ts'
+import { isTrustedRequest, readJsonBody } from './rest.ts'
 import {
   fetchDshSoIndex, fetchRegistryRepos, fetchSearchFallback, functionalTopics, readRegistryCache, writeRegistryCache,
   type DshSoEntry, type RegistryRepo,
@@ -4363,88 +4364,7 @@ function readdirSafe(path: string): { name: string; isDirectory(): boolean }[] {
   }
 }
 
-/** Read a JSON request body (bounded). */
-function readJsonBody(req: NodeJS.ReadableStream & { destroy?(): void }): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    let size = 0
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length
-      if (size > 1_000_000) { reject(new Error('request body too large')); req.destroy?.() }
-      else chunks.push(chunk)
-    })
-    req.on('end', () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))
-      } catch (error: unknown) {
-        reject(error instanceof Error ? error : new Error(String(error)))
-      }
-    })
-    req.on('error', reject)
-  })
-}
-
 /** Write a JSON response. */
-/** Loopback host literals always trusted (the DSH web UI binds here). */
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
-
-/** Extra trusted Host values via env (comma-separated hostnames / IPs). */
-function extraTrustedHosts(): Set<string> {
-  const raw = process.env.DSH_PLUGIN_MANAGER_TRUSTED_HOSTS ?? ''
-  return new Set(raw.split(',').map(s => s.trim().toLowerCase()).filter(s => s.length > 0))
-}
-
-/** Hostname part of an authority value (handles IPv6 literals). */
-function hostnameOf(authority: string): string {
-  const s = authority.trim().toLowerCase()
-  if (s.startsWith('[')) {
-    const end = s.indexOf(']')
-    return end >= 0 ? s.slice(0, end + 1) : s
-  }
-  const colon = s.lastIndexOf(':')
-  return colon >= 0 ? s.slice(0, colon) : s
-}
-
-/** Port part of an authority value ('' when absent). */
-function portOf(authority: string): string {
-  const s = authority.trim()
-  if (s.startsWith('[')) {
-    const end = s.indexOf(']')
-    return end >= 0 && s.length > end + 1 && s[end + 1] === ':' ? s.slice(end + 2) : ''
-  }
-  const colon = s.lastIndexOf(':')
-  return colon >= 0 ? s.slice(colon + 1) : ''
-}
-
-/**
- * CSRF / DNS-rebinding fence for the REST surface.
- *  - Host must be loopback or an explicitly trusted host (an attacker domain
- *    resolving to 127.0.0.1 is refused — the check runs on the Host header,
- *    which the browser cannot fake cross-origin);
- *  - a cross-site fetch is refused (Sec-Fetch-Site);
- *  - when an Origin header is present, its host:port must equal the request's
- *    Host (a foreign page must not drive mutations); non-browser callers
- *    (curl, the CLI, same-process tools) carry no Origin and pass.
- */
-function isTrustedRequest(req: { headers?: Record<string, string | string[] | undefined> }): boolean {
-  const rawHost = String(req.headers?.['host'] ?? '')
-  if (rawHost.length === 0) return false
-  const host = hostnameOf(rawHost)
-  if (!LOOPBACK_HOSTS.has(host) && !extraTrustedHosts().has(host)) return false
-  const secFetch = String(req.headers?.['sec-fetch-site'] ?? '').toLowerCase()
-  if (secFetch === 'cross-site') return false
-  const origin = String(req.headers?.['origin'] ?? '')
-  if (origin.length === 0) return true
-  try {
-    const url = new URL(origin)
-    const originPort = url.port === '' ? (url.protocol === 'https:' ? '443' : '80') : url.port
-    const reqPort = portOf(rawHost) === '' ? '80' : portOf(rawHost)
-    return url.hostname.toLowerCase() === host && originPort === reqPort
-  } catch {
-    return false
-  }
-}
-
 function sendJson(res: { writeHead(status: number, headers: Record<string, string>): void; end(body?: string): void }, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(JSON.stringify(value))
