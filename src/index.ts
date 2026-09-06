@@ -1650,6 +1650,72 @@ function readdirSafe(path: string): { name: string; isDirectory(): boolean }[] {
 /** Bodies at or below this size go out uncompressed (gzip overhead > savings). */
 const GZIP_MIN_BYTES = 1024
 
+// ── Job registry for long REST operations (install/update/remove/…) ──
+
+/**
+ * A pnpm-lifecycle REST operation tracked for client polling. The POST
+ * returns the job id immediately instead of holding the HTTP request open
+ * for a 10-minute install (browser/proxy timeouts would detach the client
+ * while the server keeps working, and a retry would stack a second queued
+ * mutation). The client polls `job` until it settles.
+ */
+interface JobRecord {
+  readonly id: string
+  readonly startedAt: number
+  settled: boolean
+  result?: unknown
+  error?: string
+}
+
+/** Settled jobs stay queryable this long (a poll after that reads "expired"). */
+const JOBS_TTL_MS = 30 * 60 * 1000
+/** Upper bound on simultaneously pending jobs (stacked clicks get refused). */
+const JOBS_MAX_PENDING = 4
+const jobs = new Map<string, JobRecord>()
+let jobSeq = 0
+
+/** Drop settled jobs past the TTL (lazy, on every job touch). */
+function pruneJobs(): void {
+  const now = Date.now()
+  for (const [id, job] of jobs) {
+    if (job.settled && now - job.startedAt > JOBS_TTL_MS) jobs.delete(id)
+  }
+}
+
+/**
+ * Start a long operation as a tracked job. Bounded: more than
+ * JOBS_MAX_PENDING simultaneously pending jobs means a client is stacking
+ * clicks faster than pnpm can settle — refuse instead of queueing more.
+ */
+function startJob(run: () => Promise<unknown>): { ok: true; jobId: string } | { ok: false; message: string } {
+  pruneJobs()
+  const pending = [...jobs.values()].filter(job => !job.settled).length
+  if (pending >= JOBS_MAX_PENDING) {
+    return { ok: false, message: 'another install/update is still running ('
+      + pending + ' in flight) — wait for it to finish before starting another' }
+  }
+  const id = 'job-' + Date.now().toString(36) + '-' + (++jobSeq).toString(36)
+  const job: JobRecord = { id, startedAt: Date.now(), settled: false }
+  jobs.set(id, job)
+  void run().then(
+    (result) => { job.settled = true; job.result = result },
+    (error: unknown) => { job.settled = true; job.error = error instanceof Error ? error.message : String(error) },
+  )
+  return { ok: true, jobId: id }
+}
+
+/** Respond helper for startJob results: 200 + job id, or 429 + busy error. */
+function respondJob(
+  respond: (status: number, value: unknown) => void,
+  job: ReturnType<typeof startJob>,
+): void {
+  if (!job.ok) {
+    respond(429, { ok: false, error: { code: 'busy', message: job.message } })
+    return
+  }
+  respond(200, { ok: true, value: { jobId: job.jobId } })
+}
+
 /**
  * Write a JSON response, gzipping large bodies when the client accepts it.
  * The marketplace listing is ~1.7MB of JSON (~200KB gzipped) — the main win;
@@ -1739,19 +1805,20 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
                 ),
               )
             : undefined
-          respond(200, { ok: true, value: await service.install(profile, spec, answers, acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))) })
+          const locale = acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))
+          respondJob(respond, startJob(() => service.install(profile, spec, answers, locale)))
           return
         }
         case 'remove': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          respond(200, { ok: true, value: await service.remove(profile, name) })
+          respondJob(respond, startJob(() => service.remove(profile, name)))
           return
         }
         case 'uninstallKind': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const repo = typeof body['repo'] === 'string' ? body['repo'] : ''
-          respond(200, { ok: true, value: await service.uninstallKind(profile, repo) })
+          respondJob(respond, startJob(() => service.uninstallKind(profile, repo)))
           return
         }
         case 'listKinds': {
@@ -1780,7 +1847,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
             respond(400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
             return
           }
-          respond(200, { ok: true, value: await service.backupRestore(backup, profile) })
+          respondJob(respond, startJob(() => service.backupRestore(backup, profile)))
           return
         }
         case 'unblockRepo': {
@@ -1820,7 +1887,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           const from = typeof body['from'] === 'string' ? body['from'] : ''
           const to = typeof body['to'] === 'string' ? body['to'] : ''
           const names = Array.isArray(body['names']) ? body['names'] as string[] : []
-          respond(200, { ok: true, value: await service.copyPlugins(from, to, names) })
+          respondJob(respond, startJob(() => service.copyPlugins(from, to, names)))
           return
         }
         case 'renameProfile': {
@@ -1871,7 +1938,27 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'update': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          respond(200, { ok: true, value: await service.update(profile, name, acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))) })
+          const locale = acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))
+          respondJob(respond, startJob(() => service.update(profile, name, locale)))
+          return
+        }
+        case 'job': {
+          // Long-operation poll (install/update/remove/… return { jobId }).
+          const id = typeof body['id'] === 'string' ? body['id'] : ''
+          const job = jobs.get(id)
+          if (job === undefined) {
+            respond(200, { ok: true, value: { done: true, missing: true } })
+            return
+          }
+          if (!job.settled) {
+            respond(200, { ok: true, value: { done: false } })
+            return
+          }
+          if (job.error !== undefined) {
+            respond(200, { ok: true, value: { done: true, error: job.error } })
+            return
+          }
+          respond(200, { ok: true, value: { done: true, result: job.result } })
           return
         }
         default:
@@ -1886,7 +1973,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'backupExport', 'backupDiff', 'backupRestore', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze', 'fixIssue', 'fixAll']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'backupExport', 'backupDiff', 'backupRestore', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze', 'fixIssue', 'fixAll', 'job']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

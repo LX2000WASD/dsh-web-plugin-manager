@@ -75,7 +75,7 @@ git 源插件需要安装期环境变量时，CLI 会打印缺失变量清单并
 
 ## 架构
 
-- Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST 路由（带信任围栏：POST+JSON 强制、Host 回环/白名单校验、Origin 同源——防 CSRF/DNS-rebinding）；安装链路 installWithSource→installProtected（质量门+回滚）整体串行互斥
+- Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST 路由（带信任围栏：POST+JSON 强制、Host 回环/白名单校验、Origin 同源——防 CSRF/DNS-rebinding）；安装链路 installWithSource→installProtected（质量门+回滚）整体串行互斥；六条 pnpm 长操作（install/update/remove/backupRestore/uninstallKind/copyPlugins）REST job 化——POST 即返 jobId、客户端经 `job` op 轮询取结果（HTTP 超时不再与服务端状态脱节），在途 job 数上限背压堆叠点击
 - 基础层：`src/paths.ts` —— profile 路径/manifest/patch 读取、全局变更互斥队列、宿主 profile 识别（argv → 安装位置兜底）；`src/childproc.ts` —— 命令解析（运行中 node 目录 → PATH → $NVM_DIR 兜底）、PATH 注入子进程环境、官方 `dsh plugin` 运行器、异步 exec 工具（请求路径上零 execFileSync）
 - 保护链路：`src/installFlow.ts` —— 安装/更新/删除保护流（源准备：git clone 缓存 + npm-first 探测；质量门 + 自动回滚；更新检查 npm dist-tag / git HEAD / lockfile commit；managed 行清理），全部经全局互斥串行
 - 市场管道：`src/marketplaceMerge.ts` —— catalog/PLUGINS.md 抓取、registry 索引合并、星数富化、服务端已安装标记、dsh.so 徽标叠加、屏蔽名单过滤与同名包消解（index.ts 只保留缓存闭包与 REST 接线）

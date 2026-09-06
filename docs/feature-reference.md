@@ -117,7 +117,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 
 ## 架构模块
 
-- Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）
+- Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）；六条 pnpm 长操作（install/update/remove/backupRestore/uninstallKind/copyPlugins）job 化：POST 即返 `{jobId}`，`job` op 轮询至 settle（30min TTL，>4 个在途返回 429 busy），client 端轮询封装在注入面内——所有 tab 调用点与 busy/elapsed 状态零改动
 - 基础层：`src/paths.ts`（profile 路径/manifest/patch 读取、全局变更互斥队列、宿主 profile 识别）；`src/childproc.ts`（命令解析、PATH 注入、官方 CLI 运行器、异步 exec）；`src/profiles.ts`（进程表扫描/终端/端口/模板/in-box 保护）
 - 保护链路：`src/installFlow.ts`（安装/更新/删除保护流 + 质量门 + 回滚 + managed 行清理）；市场管道：`src/marketplaceMerge.ts`（抓取/合并/标记/叠加/消解）
 - 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理 + 共享 UA）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；模糊打分：`src/rank.ts`（client/host 共用纯函数）；版本比较：`src/match.ts`（updateSpec + compareVersions）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
