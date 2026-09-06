@@ -114,6 +114,15 @@ pnpm test        # 纯函数单测（node --test 跑 dist 产物）
 
 > 教训记录：host 必须用 tsc 构建（tsdown/rolldown 会保留原生装饰器语法，Node 不支持）；插件不能同时导出 default（类）与 named（apply）——Loader 会丢弃 apply。新增 host 源文件需加入 tsconfig.host.json 的 include。
 
+### 客户端产物的 externals 必须对齐官方平台种子表
+
+`tsdown.client.config.ts` 里的 `PLATFORM` 是**唯一允许 external 的清单**，须与官方 `packages/client/web/src/platform.ts` 的 `PLATFORM_MODULES` 逐项一致：
+
+- external 了表外的包 → 浏览器抛 `require("x") missed the module table`，**整个插件页面启动中断**（所有插件的 UI 一起消失，不只是出错的那个）
+- 内联了表内的包 → 模块身份分裂（同一个包两份实例，服务/上下文对不上）
+
+这张表**随 DSH 版本变动**：0.1.2-alpha.1 删除了 `@deepseek-ai/dsh-client-runtime`、新增了 `@deepseek-ai/dsh-client-store`。每次跟进 DSH 版本都要比对该表并重新构建产物。
+
 ## 相关
 
 - 源码与 Issue：[github.com/LX2000WASD/dsh-web-plugin-manager](https://github.com/LX2000WASD/dsh-web-plugin-manager)

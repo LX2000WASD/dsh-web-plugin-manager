@@ -114,6 +114,15 @@ pnpm test        # pure-function unit tests (node --test against the dist output
 
 > Lessons learned: the host must be built with tsc (tsdown/rolldown keep native decorator syntax, which Node rejects); the plugin must not export both a default class and named apply — the Loader drops apply. New host source files must be added to tsconfig.host.json's include list.
 
+### Client bundle externals must mirror the official platform seed table
+
+The `PLATFORM` list in `tsdown.client.config.ts` is the **only set of specifiers allowed to stay external**, and it must match the official `PLATFORM_MODULES` in `packages/client/web/src/platform.ts` entry for entry:
+
+- externalizing something off the table → the browser throws `require("x") missed the module table`, which **aborts the whole plugin page boot** (every plugin's UI disappears, not just the offending one)
+- inlining something on the table → module identity splits (two instances of one package; services and contexts stop matching)
+
+The table **changes across DSH versions**: 0.1.2-alpha.1 removed `@deepseek-ai/dsh-client-runtime` and added `@deepseek-ai/dsh-client-store`. Re-check it and rebuild the bundle on every DSH upgrade.
+
 ## Related
 
 - Source & issues: [github.com/LX2000WASD/dsh-web-plugin-manager](https://github.com/LX2000WASD/dsh-web-plugin-manager)
