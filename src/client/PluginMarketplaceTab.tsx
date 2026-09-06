@@ -16,7 +16,7 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import type { CommandResult, EnvQuestion, MarketplaceItem, MarketplaceResult, MutationResult, ProfileInfo } from '../types.ts'
 import { fuzzyScoreLowered } from '../rank.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
-import { PM_LINK_CSS, formatStars, outputStyle, shortDate } from './shared.ts'
+import { PM_LINK_CSS, formatStars, outputStyle, shortDate, useElapsedSeconds } from './shared.ts'
 import { EnvQuestionForm } from './EnvQuestionForm.tsx'
 import { PmSelect } from './PmSelect.tsx'
 
@@ -48,7 +48,7 @@ const RENDER_BATCH = 120
 const COLS_KEY = 'dshpm-market-cols'
 
 /** Official --dsw-* token styles (mirrors the other pages). */
-const styles: Record<string, React.CSSProperties> = {
+const styles = {
   section: {
     display: 'flex', flexDirection: 'column', gap: '14px',
     width: '100%', maxWidth: '760px', color: 'var(--dsw-alias-label-primary)',
@@ -143,7 +143,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-link, var(--dsw-alias-state-business-primary))',
     fontWeight: 500, textDecoration: 'none', overflowWrap: 'anywhere',
   },
-}
+} satisfies Record<string, React.CSSProperties>
 
 /** dsh.so security badge: tone by risk level (no icons — text only). */
 function securityBadge(
@@ -305,6 +305,10 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
   // Refresh-in-flight flag: a full server re-crawl is the heaviest listing
   // operation — the button must not fire it twice concurrently.
   const [refreshing, setRefreshing] = useState(false)
+  // Live seconds counter while an operation runs (a refresh re-crawl or an
+  // install can take tens of seconds — the counter tells "working" from
+  // "hung").
+  const elapsed = useElapsedSeconds(busy)
 
   const injected = useRef({ marketplace, profiles, install, update, unblock })
 
@@ -516,6 +520,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
         <Button size="sm" variant="ghost" disabled={busy !== null || refreshing} onClick={() => fetchMarketplace(true, targetProfile)}>
           {refreshing ? t('refreshing') : t('refresh')}
         </Button>
+        {elapsed > 0 && <span style={styles.filterLabel}>{elapsed}s</span>}
         <span style={styles.filterLabel}>{t('installTarget')}</span>
         <PmSelect
           ariaLabel={t('installTarget')}

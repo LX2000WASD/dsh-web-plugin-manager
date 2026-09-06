@@ -10,12 +10,14 @@ import type {
   BackupDiffResult, BackupFile, CommandResult, MutationResult, ProfileInfo, StartResult,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
-import { PM_CARD_CSS, outputStyle, useConfirm } from './shared.ts'
+import { PM_CARD_CSS, outputStyle, useConfirm, useElapsedSeconds } from './shared.ts'
 import { PmSelect } from './PmSelect.tsx'
 
-/** Registration-side Remote face provided by the section. */
+/** Registration-side Remote face provided by the section. Only the initial
+ *  profiles load takes an optional trailing AbortSignal (mount-time
+ *  cancellation); the action-triggered calls stay uncancellable. */
 export interface PluginEnvironmentsTabInjected {
-  readonly profiles: () => Promise<ProfileInfo[]>
+  readonly profiles: (signal?: AbortSignal) => Promise<ProfileInfo[]>
   readonly copyPlugins: (from: string, to: string, names: string[]) => Promise<CommandResult>
   readonly startProfile: (name: string) => Promise<StartResult>
   readonly stopProfile: (name: string) => Promise<MutationResult>
@@ -42,7 +44,7 @@ export type PluginEnvironmentsTabProps =
   & InjectFace<PluginEnvironmentsTabInjected>
 
 /** Official --dsw-* token styles (mirrors the other tabs). */
-const styles: Record<string, React.CSSProperties> = {
+const styles = {
   section: {
     display: 'flex', flexDirection: 'column', gap: '14px',
     width: '100%', maxWidth: '760px', color: 'var(--dsw-alias-label-primary)',
@@ -100,12 +102,14 @@ const styles: Record<string, React.CSSProperties> = {
   detailsActions: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-}
+} satisfies Record<string, React.CSSProperties>
 
 /** Render the environment management tab. */
 export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile, backupExport, backupDiff, backupRestore, t }: PluginEnvironmentsTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [busy, setBusy] = useState<string | null>(null)
+  // Live seconds counter while a (potentially long) backup/restore runs.
+  const elapsed = useElapsedSeconds(busy)
   const [newName, setNewName] = useState('')
   const [template, setTemplate] = useState('web')
   const [output, setOutput] = useState('')
@@ -133,13 +137,23 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
     void injected.current.profiles().then(setProfileList, () => { /* keep last list */ })
   }
 
+  // Abort handle for the mount-time initial profiles load only: the
+  // action-triggered refreshes (create/rename/remove feedback) are part of
+  // a command and must not be cancellable.
+  const loadAbort = useRef<AbortController | null>(null)
+  // Unmount must cancel the in-flight initial load.
+  useEffect(() => () => { loadAbort.current?.abort() }, [])
+
   useEffect(() => {
-    void injected.current.profiles().then((items) => {
+    loadAbort.current?.abort()
+    const controller = new AbortController()
+    loadAbort.current = controller
+    void injected.current.profiles(controller.signal).then((items) => {
       setProfileList(items)
       // Backup/restore defaults to the profile RUNNING this instance.
       const running = items.find(profile => profile.running !== null)
       if (running !== undefined) setBackupProfile(running.name)
-    }, () => { /* keep last list */ })
+    }, () => { /* keep last list; aborted loads land here too */ })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -540,6 +554,7 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
               event.currentTarget.value = ''
             }}
           />
+          {elapsed > 0 && <span style={styles.filterLabel}>{elapsed}s</span>}
           {diffResult !== null && (
             <>
               {diffResult.missing.length > 0 && (

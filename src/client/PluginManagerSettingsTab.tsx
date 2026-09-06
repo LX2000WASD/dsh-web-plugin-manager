@@ -11,14 +11,16 @@ import type {
   AnalyzeIssue, AnalyzeResult, CommandResult, EnvQuestion, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
-import { PM_CARD_CSS, PM_LINK_CSS, formatTime, outputStyle, useConfirm } from './shared.ts'
+import { PM_CARD_CSS, PM_LINK_CSS, formatTime, isAbortError, outputStyle, useConfirm, useElapsedSeconds } from './shared.ts'
 import { EnvQuestionForm } from './EnvQuestionForm.tsx'
 import { PmSelect } from './PmSelect.tsx'
 
-/** Registration-side Remote face provided by the section. */
+/** Registration-side Remote face provided by the section. Load-path methods
+ *  take an optional trailing AbortSignal so a superseded fetch can be
+ *  cancelled; mutating commands deliberately cannot be aborted. */
 export interface PluginManagerTabInjected {
-  readonly profiles: () => Promise<ProfileInfo[]>
-  readonly list: (profile: string) => Promise<PluginManagerSnapshot>
+  readonly profiles: (signal?: AbortSignal) => Promise<ProfileInfo[]>
+  readonly list: (profile: string, signal?: AbortSignal) => Promise<PluginManagerSnapshot>
   readonly install: (profile: string, spec: string, answers?: Record<string, string>) => Promise<CommandResult>
   readonly remove: (profile: string, name: string) => Promise<CommandResult>
   readonly removeInsert: (profile: string, rowId: string) => Promise<MutationResult>
@@ -44,7 +46,7 @@ type ViewState =
   | { readonly status: 'ready'; readonly snapshot?: PluginManagerSnapshot }
 
 /** Official --dsw-* token styles (mirrors the official inventory tab). */
-const styles: Record<string, React.CSSProperties> = {
+const styles = {
   section: {
     display: 'flex', flexDirection: 'column', gap: '14px',
     width: '100%', maxWidth: '760px', color: 'var(--dsw-alias-label-primary)',
@@ -139,7 +141,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-state-warn-primary)', whiteSpace: 'nowrap',
   },
   analysisIssueText: { minWidth: 0, color: 'var(--dsw-alias-label-primary)', overflowWrap: 'anywhere' },
-}
+} satisfies Record<string, React.CSSProperties>
 
 /** Render the management tab. */
 export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, fixIssue, fixAll, t }: PluginManagerTabProps): ReactNode {
@@ -163,20 +165,39 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const [fixedKeys, setFixedKeys] = useState<Set<string>>(new Set())
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
   const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, fixIssue, fixAll })
+  // Live seconds counter while an operation runs (install/update can take
+  // tens of seconds — the counter tells "working" from "hung").
+  const elapsed = useElapsedSeconds(busy)
 
   // Request sequence guard: a slow response from an earlier profile must
   // not overwrite the state of the currently selected one (audit M8).
   const loadSeq = useRef(0)
+  // Abort handle of the in-flight load: a profile switch cancels the stale
+  // fetch outright instead of letting it race (and possibly error against)
+  // the newer one. Mutating commands never share this controller — they
+  // must not be cancellable.
+  const loadAbort = useRef<AbortController | null>(null)
+  // Unmount must cancel the in-flight load; the guards drop any late
+  // response after that, but the request itself should not linger.
+  useEffect(() => () => { loadAbort.current?.abort() }, [])
   /** Returns the in-flight request so callers can chain busy handling. */
   const load = (profile: string): Promise<void> => {
     if (profile.length === 0) return Promise.resolve()
     const seq = ++loadSeq.current
+    loadAbort.current?.abort()
+    const controller = new AbortController()
+    loadAbort.current = controller
     // Keep showing the previous snapshot during refreshes so the page does
     // not collapse to the top (only the first load shows the loading state).
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
-    return injected.current.list(profile).then(
+    return injected.current.list(profile, controller.signal).then(
       (snapshot) => { if (seq === loadSeq.current) setState({ status: 'ready', snapshot }) },
-      (error: unknown) => { if (seq === loadSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }) },
+      (error: unknown) => {
+        // An aborted fetch is a cancellation, not a failure: the newer load
+        // (or the unmount) owns the UI now.
+        if (isAbortError(error)) return
+        if (seq === loadSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
+      },
     )
   }
 
@@ -188,7 +209,12 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   }
 
   useEffect(() => {
-    void injected.current.profiles().then((items) => {
+    // The boot profiles fetch joins the same abort group so an unmount (or
+    // the StrictMode double-invoke) during it stays silent.
+    loadAbort.current?.abort()
+    const controller = new AbortController()
+    loadAbort.current = controller
+    void injected.current.profiles(controller.signal).then((items) => {
       setProfileList(items)
       if (items.length > 0) {
         // Default to the profile RUNNING this instance (multiple profiles can
@@ -203,6 +229,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
         setState({ status: 'ready' })
       }
     }, (error: unknown) => {
+      if (isAbortError(error)) return
       setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -437,6 +464,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
         <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null || checking} onClick={() => void onCheckUpdates()}>
           {checking ? t('checking') : t('checkUpdates')}
         </Button>
+        {elapsed > 0 && <span style={styles.filterLabel}>{elapsed}s</span>}
       </div>
 
       {state.status === 'error' && <p style={styles.error} role="alert">{t('error')}: {state.message}</p>}

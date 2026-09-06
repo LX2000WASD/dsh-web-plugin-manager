@@ -60,12 +60,16 @@ export const inject = ['slots', 'locale']
 /** Base URL of the host REST surface. */
 const BASE = '/api2/plugin-manager'
 
-/** Call one REST op with a JSON body. */
-async function call<T>(op: string, body: Record<string, unknown>): Promise<T> {
+/** Call one REST op with a JSON body. The optional trailing signal aborts
+ *  only the transport: load paths pass one so a superseded fetch dies on
+ *  profile switch/unmount, mutating commands never do (they must not be
+ *  cancellable). */
+async function call<T>(op: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${BASE}/${op}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
   if (!response.ok) {
     throw new Error(`pluginManager.${op}: HTTP ${response.status}`)
@@ -83,14 +87,14 @@ export function apply(ctx: ClientContext): void {
 
   const t = ctx.locale.bind(NS)
   const catalogInjected = (): PluginCatalogTabInjected => ({
-    profiles: () => call<ProfileInfo[]>('listProfiles', {}),
-    list: (profile) => call<PluginManagerSnapshot>('list', { profile }),
+    profiles: (signal) => call<ProfileInfo[]>('listProfiles', {}, signal),
+    list: (profile, signal) => call<PluginManagerSnapshot>('list', { profile }, signal),
     setEnabled: (profile, entryId, enabled) => call<MutationResult>('setEnabled', { profile, entryId, enabled }),
     mount: (profile, packageName) => call<MutationResult>('mount', { profile, packageName }),
   })
   const managerInjected = (): PluginManagerTabInjected => ({
-    profiles: () => call<ProfileInfo[]>('listProfiles', {}),
-    list: (profile) => call<PluginManagerSnapshot>('list', { profile }),
+    profiles: (signal) => call<ProfileInfo[]>('listProfiles', {}, signal),
+    list: (profile, signal) => call<PluginManagerSnapshot>('list', { profile }, signal),
     install: (profile, spec, answers) => call<CommandResult>('install', { profile, spec, answers }),
     remove: (profile, name) => call<CommandResult>('remove', { profile, name }),
     removeInsert: (profile, rowId) => call<MutationResult>('removeInsert', { profile, rowId }),
@@ -124,7 +128,7 @@ export function apply(ctx: ClientContext): void {
   }, PluginManagerSettingsTab))
 
   const environmentsInjected = (): PluginEnvironmentsTabInjected => ({
-    profiles: () => call<ProfileInfo[]>('listProfiles', {}),
+    profiles: (signal) => call<ProfileInfo[]>('listProfiles', {}, signal),
     copyPlugins: (from, to, names) => call<CommandResult>('copyPlugins', { from, to, names }),
     startProfile: (name) => call<StartResult>('startProfile', { name }),
     stopProfile: (name) => call<MutationResult>('stopProfile', { name }),
@@ -150,7 +154,7 @@ export function apply(ctx: ClientContext): void {
   // and uninstall call the host install/uninstallKind ops with an empty
   // profile — the skill/preset branches never touch profile state.
   const kindsInjected = (): PluginKindsTabInjected => ({
-    kinds: () => call<KindListView>('listKinds', {}),
+    kinds: (signal) => call<KindListView>('listKinds', {}, signal),
     uninstall: (repo) => call<CommandResult>('uninstallKind', { profile: '', repo }),
     reinstall: (repo) => call<CommandResult>('install', { profile: '', spec: 'https://github.com/' + repo, answers: undefined }),
   })

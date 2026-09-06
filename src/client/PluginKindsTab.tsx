@@ -13,11 +13,13 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CommandResult, KindListView, KindRecordView } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
-import { outputStyle, shortDate, useConfirm } from './shared.ts'
+import { isAbortError, outputStyle, shortDate, useConfirm } from './shared.ts'
 
-/** Registration-side Remote face provided by the section. */
+/** Registration-side Remote face provided by the section. Load-path methods
+ *  take an optional trailing AbortSignal so a superseded fetch can be
+ *  cancelled; mutating commands deliberately cannot be aborted. */
 export interface PluginKindsTabInjected {
-  readonly kinds: () => Promise<KindListView>
+  readonly kinds: (signal?: AbortSignal) => Promise<KindListView>
   /** Uninstall a kind install (profile-less: skills/presets only). */
   readonly uninstall: (repo: string) => Promise<CommandResult>
   /** Re-pull a github-sourced kind install (re-clone + copy over). */
@@ -31,7 +33,7 @@ export type PluginKindsTabProps =
   & InjectFace<PluginKindsTabInjected>
 
 /** Official --dsw-* token styles (mirrors the other pages). */
-const styles: Record<string, React.CSSProperties> = {
+const styles = {
   section: {
     display: 'flex', flexDirection: 'column', gap: '14px',
     width: '100%', maxWidth: '760px', color: 'var(--dsw-alias-label-primary)',
@@ -81,7 +83,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   status: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)', margin: 0 },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
-}
+} satisfies Record<string, React.CSSProperties>
 
 /** Whether a record key is a github owner/repo (re-pullable) vs a local path. */
 function isGithubSource(repo: string): boolean {
@@ -100,14 +102,29 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
 
   const injected = useRef({ kinds, uninstall, reinstall })
 
+  // Abort handle of the in-flight reload: a refresh cancels the stale fetch
+  // instead of letting two listings race. Uninstall/re-pull are mutating
+  // commands and deliberately stay uncancellable.
+  const loadAbort = useRef<AbortController | null>(null)
+  // Unmount must cancel the in-flight reload; late responses after that are
+  // dropped, but the request itself should not linger.
+  useEffect(() => () => { loadAbort.current?.abort() }, [])
+
   /** Returns the in-flight request so callers can chain busy handling. */
-  const reload = (): Promise<void> =>
-    injected.current.kinds().then((view) => {
+  const reload = (): Promise<void> => {
+    loadAbort.current?.abort()
+    const controller = new AbortController()
+    loadAbort.current = controller
+    return injected.current.kinds(controller.signal).then((view) => {
       setState(view)
       setError('')
     }, (err: unknown) => {
+      // An aborted fetch is a cancellation, not a failure: the newer reload
+      // (or the unmount) owns the UI now.
+      if (isAbortError(err)) return
       setError(err instanceof Error ? err.message : String(err))
     })
+  }
 
   useEffect(() => {
     void reload()

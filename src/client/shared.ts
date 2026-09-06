@@ -104,3 +104,43 @@ export function useConfirm(resetMs = 4000): [string | null, (key: string | null)
   }, [])
   return [confirmKey, set]
 }
+
+/**
+ * True when an error is a fetch abort (a DOMException named AbortError). An
+ * aborted load is a cancellation — a newer load or the unmount owns the UI —
+ * so callers must return silently instead of rendering an error state.
+ */
+export function isAbortError(error: unknown): boolean {
+  return (error instanceof DOMException || error instanceof Error) && error.name === 'AbortError'
+}
+
+/**
+ * Seconds elapsed since `busy` left null, ticking once per second and reset
+ * to 0 when it returns to null. Install/update (and backup/restore) commands
+ * can legitimately run for tens of seconds; without a live counter the user
+ * cannot tell a normal wait from a hung request. The interval and the start
+ * timestamp live in refs; the effect owns the cleanup.
+ */
+export function useElapsedSeconds(busy: string | null): number {
+  const [elapsed, setElapsed] = useState(0)
+  const interval = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  const startedAt = useRef(0)
+  useEffect(() => {
+    if (busy === null) {
+      setElapsed(0)
+      return
+    }
+    startedAt.current = Date.now()
+    setElapsed(0)
+    interval.current = setInterval(() => {
+      // Recompute from the start timestamp each tick so the count cannot
+      // drift when timers are throttled in a background tab.
+      setElapsed(Math.floor((Date.now() - startedAt.current) / 1000))
+    }, 1000)
+    return () => {
+      if (interval.current !== undefined) clearInterval(interval.current)
+      interval.current = undefined
+    }
+  }, [busy])
+  return elapsed
+}

@@ -13,13 +13,15 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import type { MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry } from '../types.ts'
 import { fuzzyScore } from '../rank.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
-import { PM_CARD_CSS, useConfirm } from './shared.ts'
+import { PM_CARD_CSS, isAbortError, useConfirm } from './shared.ts'
 import { PmSelect } from './PmSelect.tsx'
 
-/** Registration-side Remote face provided by the section. */
+/** Registration-side Remote face provided by the section. Load-path methods
+ *  take an optional trailing AbortSignal so a superseded fetch can be
+ *  cancelled; mutating commands deliberately cannot be aborted. */
 export interface PluginCatalogTabInjected {
-  readonly profiles: () => Promise<ProfileInfo[]>
-  readonly list: (profile: string) => Promise<PluginManagerSnapshot>
+  readonly profiles: (signal?: AbortSignal) => Promise<ProfileInfo[]>
+  readonly list: (profile: string, signal?: AbortSignal) => Promise<PluginManagerSnapshot>
   readonly setEnabled: (profile: string, entryId: string, enabled: boolean) => Promise<MutationResult>
   readonly mount: (profile: string, packageName: string) => Promise<MutationResult>
 }
@@ -44,7 +46,7 @@ type ViewState =
   | { readonly status: 'ready'; readonly snapshot?: PluginManagerSnapshot }
 
 /** Official --dsw-* token styles (mirrors the official inventory tab). */
-const styles: Record<string, React.CSSProperties> = {
+const styles = {
   section: {
     display: 'flex', flexDirection: 'column', gap: '14px',
     width: '100%', maxWidth: '760px', color: 'var(--dsw-alias-label-primary)',
@@ -123,7 +125,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   filterRow: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-}
+} satisfies Record<string, React.CSSProperties>
 
 /** Compact a module specifier like the official inventory. */
 function moduleShortName(moduleName: string): string {
@@ -169,7 +171,12 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
   const injected = useRef({ profiles, list, setEnabled, mount })
 
   useEffect(() => {
-    void injected.current.profiles().then((items) => {
+    // The boot profiles fetch joins the same abort group so an unmount (or
+    // the StrictMode double-invoke) during it stays silent.
+    loadAbort.current?.abort()
+    const controller = new AbortController()
+    loadAbort.current = controller
+    void injected.current.profiles(controller.signal).then((items) => {
       setProfileList(items)
       if (items.length > 0) {
         // Default to the profile RUNNING this instance (multiple profiles can
@@ -184,6 +191,7 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
         setState({ status: 'ready' })
       }
     }, (error: unknown) => {
+      if (isAbortError(error)) return
       setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -192,16 +200,32 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
   // Request sequence guard: a slow response from an earlier profile must not
   // overwrite the state of the currently selected one (audit M8).
   const loadSeq = useRef(0)
+  // Abort handle of the in-flight load: a profile switch cancels the stale
+  // fetch outright instead of letting it race (and possibly error against)
+  // the newer one. Mutating commands never share this controller — they
+  // must not be cancellable.
+  const loadAbort = useRef<AbortController | null>(null)
+  // Unmount must cancel the in-flight load; the guards drop any late
+  // response after that, but the request itself should not linger.
+  useEffect(() => () => { loadAbort.current?.abort() }, [])
   /** Returns the in-flight request so callers can chain busy handling. */
   const load = (profile: string): Promise<void> => {
     if (profile.length === 0) return Promise.resolve()
     const seq = ++loadSeq.current
+    loadAbort.current?.abort()
+    const controller = new AbortController()
+    loadAbort.current = controller
     // Keep showing the previous snapshot during refreshes so the page does
     // not collapse to the top (only the first load shows the loading state).
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
-    return injected.current.list(profile).then(
+    return injected.current.list(profile, controller.signal).then(
       (snapshot) => { if (seq === loadSeq.current) setState({ status: 'ready', snapshot }) },
-      (error: unknown) => { if (seq === loadSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }) },
+      (error: unknown) => {
+        // An aborted fetch is a cancellation, not a failure: the newer load
+        // (or the unmount) owns the UI now.
+        if (isAbortError(error)) return
+        if (seq === loadSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
+      },
     )
   }
 
