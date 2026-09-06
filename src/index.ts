@@ -656,9 +656,10 @@ export class PluginManagerService extends Service {
 
   /**
    * Each agent preset's composition rows (the model-facing plugins a
-   * composed roster runs) — official 0.1.3 inventory parity for the
-   * shadowed catalog tab. null when the platform's agentPresets service
-   * predates compositionInventory (0.1.2) or introspection fails.
+   * composed roster runs) — official inventory parity for the shadowed
+   * catalog tab. null when the platform's agentPresets service lacks
+   * compositionInventory (structural gate — verified present on
+   * 0.1.2-rc.1) or introspection fails.
    */
   async presetCompositions(): Promise<PresetCompositionGroup[] | null> {
     const service = agentPresetsOf(this.ctx) as
@@ -1522,13 +1523,16 @@ export class PluginManagerService extends Service {
       // defense has narrowed — say so in the health check.
       try {
         const loader = (this.ctx as { get?: (name: string) => unknown }).get?.('loader') as
-          | { entries(): Iterable<{ id: string; disabled?: unknown }> }
+          | { entries(): Iterable<{ id: string; options?: { id?: unknown }; disabled?: unknown }> }
           | undefined
         if (loader !== undefined) {
           let official = false
           let officialDisabled = false
           for (const entry of loader.entries()) {
-            if (entry.id !== 'ui-settings-plugin-inventory') continue
+            // The stable row id lives on EntryOptions.id (raw entry.id is the
+            // random mount id — the same trap the patch-row targeting hit).
+            const stableId = typeof entry.options?.id === 'string' ? entry.options.id : entry.id
+            if (stableId !== 'ui-settings-plugin-inventory') continue
             official = true
             officialDisabled = entry.disabled === true
           }

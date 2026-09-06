@@ -7,7 +7,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - **四源合并**：include 树稳定行（`EntryOptions.id`，官方语义稳定，Loader 挂载 id 每次随机，patch 定位必须用它）+ `dsh.profile.bundles` 层栈 + `package.json` 依赖 + `cordis.patch.yml` insert 行
 - 非运行 profile 显示离线合成条目（官方 in-box 包 base/web-app/headless 不标记为已安装）
 - **已安装但未挂载的依赖**：官方 CLI/pnpm 手动安装的非 bundle 插件只写依赖、不写挂载行（从未被加载）——list() 合成为 `unmounted` 条目，目录页显示「未挂载」标签与「挂载」按钮，一键补写 managed insert 行（运行中 profile 实时生效）
-- **Agent 预设构成**（官方 0.1.3 inventory 对齐）：目录页在插件列表下方展示每个 agent 预设的构成行（官方 agentPresets `compositionInventory()`——0.1.2 平台无该方法时整节自动隐藏）——预设名 / 默认徽标 / 每行模块 + fiber 相位圆点 / `!!js` 条件行标记 / 启停态（含 conditional）/ 坏损原因；数据 host 全局，随目录加载并行拉取、失败静默
+- **Agent 预设构成**（官方 inventory 对齐）：目录页在插件列表下方展示每个 agent 预设的构成行（官方 agentPresets `compositionInventory()`——结构性探测，方法不存在时整节自动隐藏；已在 0.1.2-rc.1 实测可用，浏览器端到端验证渲染）——预设名 / 默认徽标 / 每行模块 + fiber 相位圆点 / `!!js` 条件行标记 / 启停态（含 conditional）/ 坏损原因；数据 host 全局，随目录加载并行拉取、失败静默
 
 ## 实时启停
 

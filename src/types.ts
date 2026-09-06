@@ -82,7 +82,9 @@ export interface PluginManagerSnapshot {
   readonly packages: readonly ManagedPackage[]
   /** Insert rows (non-bundle plugin mounts) in the profile patch file. */
   readonly insertRows: readonly InsertRow[]
-  /** Agent preset compositions (official 0.1.3 parity; absent pre-0.1.3). */
+  /** Agent preset compositions (official inventory parity; null when the platform's
+ *  agentPresets service lacks compositionInventory — structural gate, not a
+ *  version pin; verified present on 0.1.2-rc.1). */
   readonly agentPresets?: readonly PresetCompositionGroup[]
 }
 
