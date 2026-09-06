@@ -270,43 +270,58 @@ export function mergeMarketplace(catalog: readonly MarketplaceItem[], markdown: 
  * API quota is 60/h: on 403/429 enrichment stops and the remaining items
  * reuse metadata from the previous snapshot (zeros when unknown) — the list
  * itself is never dropped because of a rate limit.
+ *
+ * Bounded worker pool (2, cursor mode): a serial loop paid list-size × RTT on
+ * every fresh listing. Two workers halve that without burning the shared
+ * per-IP quota faster in bursts. Results are written by index so the output
+ * order always matches the input. The rate-limit flag is only consulted
+ * BEFORE starting a fetch: responses already in flight when the flag is set
+ * are processed normally, and every entry claimed after it is set falls back
+ * to the prior snapshot without a request.
  */
 export async function enrichRepos(items: MarketplaceItem[], prior: Map<string, MarketplaceItem>): Promise<MarketplaceItem[]> {
   let rateLimited = false
-  const out: MarketplaceItem[] = []
-  for (const item of items) {
-    if (rateLimited) {
-      const prev = prior.get(item.name)
-      out.push(prev !== undefined
-        ? { ...item, stars: prev.stars, updatedAt: prev.updatedAt, createdAt: prev.createdAt }
-        : item)
-      continue
-    }
-    try {
-      const response = await marketplaceFetch('https://api.github.com/repos/' + item.name, { headers: GITHUB_UA })
-      if (response.status === 403 || response.status === 429) {
-        rateLimited = true
-        const prev = prior.get(item.name)
-        out.push(prev !== undefined
-          ? { ...item, stars: prev.stars, updatedAt: prev.updatedAt, createdAt: prev.createdAt }
-          : item)
+  const out = new Array<MarketplaceItem>(items.length)
+  const fallback = (item: MarketplaceItem): MarketplaceItem => {
+    const prev = prior.get(item.name)
+    return prev !== undefined
+      ? { ...item, stars: prev.stars, updatedAt: prev.updatedAt, createdAt: prev.createdAt }
+      : item
+  }
+  const WORKERS = 2
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const idx = cursor++
+      const item = items[idx]!
+      if (rateLimited) {
+        out[idx] = fallback(item)
         continue
       }
-      if (response.ok) {
-        const repo = await response.json() as { stargazers_count?: unknown; updated_at?: unknown; created_at?: unknown }
-        out.push({
-          ...item,
-          stars: typeof repo.stargazers_count === 'number' ? repo.stargazers_count : 0,
-          updatedAt: typeof repo.updated_at === 'string' ? repo.updated_at : '',
-          createdAt: typeof repo.created_at === 'string' ? repo.created_at : '',
-        })
-      } else {
-        out.push(item)
+      try {
+        const response = await marketplaceFetch('https://api.github.com/repos/' + item.name, { headers: GITHUB_UA })
+        if (response.status === 403 || response.status === 429) {
+          rateLimited = true
+          out[idx] = fallback(item)
+          continue
+        }
+        if (response.ok) {
+          const repo = await response.json() as { stargazers_count?: unknown; updated_at?: unknown; created_at?: unknown }
+          out[idx] = {
+            ...item,
+            stars: typeof repo.stargazers_count === 'number' ? repo.stargazers_count : 0,
+            updatedAt: typeof repo.updated_at === 'string' ? repo.updated_at : '',
+            createdAt: typeof repo.created_at === 'string' ? repo.created_at : '',
+          }
+        } else {
+          out[idx] = item
+        }
+      } catch {
+        out[idx] = item
       }
-    } catch {
-      out.push(item)
     }
   }
+  await Promise.all(Array.from({ length: Math.min(WORKERS, items.length) }, () => worker()))
   return out
 }
 
@@ -401,8 +416,43 @@ export interface InstalledIndex {
   readonly presets: ReadonlySet<string>
 }
 
+/**
+ * Process-level cache for buildInstalledIndex: flagMarketplaceItems runs on
+ * every marketplace request path (including profile switches, which only
+ * recompute installed flags) and each rebuild costs one readFileSync +
+ * JSON.parse per dependency. A short TTL collapses request-path jitter
+ * (a page load fires several listings) into one build; installs/removes/
+ * updates invalidate explicitly at their single choke point in installFlow,
+ * so an external change is visible at most one TTL later — 5s is
+ * imperceptible for a marketplace listing.
+ */
+const INSTALLED_INDEX_TTL = 5_000
+const installedIndexCache = new Map<string, { at: number; index: InstalledIndex | null }>()
+
+/**
+ * Drop the cached installed index for one profile (every profile when no
+ * name is given). Called by installFlow after a successful install/remove/
+ * update so the next marketplace request rebuilds immediately instead of
+ * serving a stale installed/updateAvailable flag for up to the TTL.
+ * Enabling/disabling (setEnabled) does not change installed-ness and must
+ * NOT invalidate.
+ */
+export function invalidateInstalledIndex(profile?: string): void {
+  if (profile === undefined) installedIndexCache.clear()
+  else installedIndexCache.delete(profile)
+}
+
 /** Build the installed index for one profile; null when the profile is unusable. */
 export function buildInstalledIndex(profile: string): InstalledIndex | null {
+  const cached = installedIndexCache.get(profile)
+  if (cached !== undefined && Date.now() - cached.at < INSTALLED_INDEX_TTL) return cached.index
+  const index = buildInstalledIndexUncached(profile)
+  installedIndexCache.set(profile, { at: Date.now(), index })
+  return index
+}
+
+/** Uncached build (the original per-dependency read walk; see the cache above). */
+function buildInstalledIndexUncached(profile: string): InstalledIndex | null {
   if (profile.length === 0 || !isSafeProfileName(profile)) return null
   const dir = profileDir(profile)
   if (!existsSync(dir)) return null

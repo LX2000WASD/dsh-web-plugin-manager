@@ -34,6 +34,7 @@ import { isBuiltin } from 'node:module'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gzipSync } from 'node:zlib'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -82,7 +83,7 @@ import { commandEnv, execFileTimeout, resolveCommand, resolveExec, runDshPlugin 
 import {
   findFreePort, hasBinary, IN_BOX_BUNDLES, openInTerminal, PATCH_TEMPLATE, pidAlive,
   PNPM_WORKSPACE_TEMPLATE, probePort, restoreInBoxBundles,
-  scanRuns, scanRunsCached, type RunInfo, type TerminalOpen,
+  scanRunsCached, type RunInfo, type TerminalOpen,
 } from './profiles.ts'
 import {
   beginMarketplaceRefresh, blockedMeta, buildInstalledIndex, dedupeMarketplace, dirNameSet,
@@ -239,7 +240,11 @@ export class PluginManagerService extends Service {
     // Refuse a double start: an already-running instance (possibly started
     // outside this page, e.g. `dsh web` on its default port) must not be
     // shadowed by a second instance — and stopping either would be ambiguous.
-    const running = scanRuns().get(name)
+    // Cached scan (3s TTL): this guard does not need a fresh process table —
+    // a full scan stalls the event loop for seconds on Windows (powershell
+    // CIM query), and an externally started instance becomes visible at most
+    // one TTL later.
+    const running = scanRunsCached().get(name)
     if (running !== undefined) {
       return {
         ok: false,
@@ -825,7 +830,11 @@ export class PluginManagerService extends Service {
 
   /** Stop a running instance of a custom profile (never the current one). */
   async stopProfile(name: string): Promise<MutationResult> {
-    const run = scanRuns().get(name)
+    // Cached scan (3s TTL) for the initial lookup: correctness of the stop
+    // comes from the pidAlive polling loop below, not from scan freshness —
+    // a full process-table scan here would stall the event loop for seconds
+    // on Windows before the kill is even attempted.
+    const run = scanRunsCached().get(name)
     if (run === undefined) return { ok: false, message: name + ' is not running' }
     if (isHostProfile(name)) return { ok: false, message: 'cannot stop the current instance (' + name + ')' }
     try {
@@ -1638,10 +1647,37 @@ function readdirSafe(path: string): { name: string; isDirectory(): boolean }[] {
   }
 }
 
-/** Write a JSON response. */
-function sendJson(res: { writeHead(status: number, headers: Record<string, string>): void; end(body?: string): void }, status: number, value: unknown): void {
+/** Bodies at or below this size go out uncompressed (gzip overhead > savings). */
+const GZIP_MIN_BYTES = 1024
+
+/**
+ * Write a JSON response, gzipping large bodies when the client accepts it.
+ * The marketplace listing is ~1.7MB of JSON (~200KB gzipped) — the main win;
+ * gzipSync keeps the writer one-shot (no stream plumbing) at a tens-of-ms
+ * CPU cost that only large payloads pay. Vary: Accept-Encoding keeps
+ * intermediate caches from serving the gzipped body to a client that did not
+ * ask for it.
+ */
+function sendJson(
+  res: { writeHead(status: number, headers: Record<string, string>): void; end(body?: string | Uint8Array): void },
+  status: number,
+  value: unknown,
+  acceptEncoding?: string,
+): void {
+  const body = JSON.stringify(value)
+  if (acceptEncoding !== undefined
+    && acceptEncoding.toLowerCase().includes('gzip')
+    && Buffer.byteLength(body, 'utf8') > GZIP_MIN_BYTES) {
+    res.writeHead(status, {
+      'content-type': 'application/json',
+      'content-encoding': 'gzip',
+      'vary': 'Accept-Encoding',
+    })
+    res.end(gzipSync(Buffer.from(body, 'utf8')))
+    return
+  }
   res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(value))
+  res.end(body)
 }
 
 /** Mount the REST surface. Returns the route disposers (may be empty). */
@@ -1649,7 +1685,11 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   const webServer = ctx.get('webServer') as { register(route: WebRoute): () => void } | undefined
   if (webServer === undefined) return []
 
-  const handler = (op: string) => async (req: NodeJS.ReadableStream & { url?: string }, res: { writeHead(status: number, headers: Record<string, string>): void; end(body?: string): void }): Promise<void> => {
+  const handler = (op: string) => async (req: NodeJS.ReadableStream & { url?: string }, res: { writeHead(status: number, headers: Record<string, string>): void; end(body?: string | Uint8Array): void }): Promise<void> => {
+    // The client's accept-encoding, threaded into every respond() below so
+    // large JSON payloads (the marketplace listing) go out gzipped.
+    const acceptEncoding = String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-encoding'] ?? '')
+    const respond = (status: number, value: unknown): void => sendJson(res, status, value, acceptEncoding)
     try {
       // Trust fence (CSRF / DNS-rebinding), mirroring the official /api
       // trust model: POST + application/json only, and the Host must be
@@ -1658,34 +1698,34 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
       // api-request-trust.ts fence.
       const method = (req as { method?: string }).method ?? ''
       if (method !== 'POST') {
-        sendJson(res, 405, { ok: false, error: { code: 'method-not-allowed', message: 'POST only' } })
+        respond(405, { ok: false, error: { code: 'method-not-allowed', message: 'POST only' } })
         return
       }
       const contentType = String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['content-type'] ?? '').toLowerCase()
       if (!contentType.includes('application/json')) {
-        sendJson(res, 415, { ok: false, error: { code: 'unsupported-media-type', message: 'application/json required' } })
+        respond(415, { ok: false, error: { code: 'unsupported-media-type', message: 'application/json required' } })
         return
       }
       if (!isTrustedRequest(req as { headers?: Record<string, string | string[] | undefined> })) {
-        sendJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'untrusted request' } })
+        respond(403, { ok: false, error: { code: 'forbidden', message: 'untrusted request' } })
         return
       }
       const body = (await readJsonBody(req)) as Record<string, unknown>
       switch (op) {
         case 'listProfiles': {
-          sendJson(res, 200, { ok: true, value: service.listProfiles() })
+          respond(200, { ok: true, value: service.listProfiles() })
           return
         }
         case 'list': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
-          sendJson(res, 200, { ok: true, value: service.list(profile) })
+          respond(200, { ok: true, value: service.list(profile) })
           return
         }
         case 'setEnabled': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const entryId = typeof body['entryId'] === 'string' ? body['entryId'] : ''
           const enabled = body['enabled'] === true
-          sendJson(res, 200, { ok: true, value: await service.setEnabled(profile, entryId, enabled) })
+          respond(200, { ok: true, value: await service.setEnabled(profile, entryId, enabled) })
           return
         }
         case 'install': {
@@ -1699,146 +1739,146 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
                 ),
               )
             : undefined
-          sendJson(res, 200, { ok: true, value: await service.install(profile, spec, answers, acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))) })
+          respond(200, { ok: true, value: await service.install(profile, spec, answers, acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))) })
           return
         }
         case 'remove': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          sendJson(res, 200, { ok: true, value: await service.remove(profile, name) })
+          respond(200, { ok: true, value: await service.remove(profile, name) })
           return
         }
         case 'uninstallKind': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const repo = typeof body['repo'] === 'string' ? body['repo'] : ''
-          sendJson(res, 200, { ok: true, value: await service.uninstallKind(profile, repo) })
+          respond(200, { ok: true, value: await service.uninstallKind(profile, repo) })
           return
         }
         case 'listKinds': {
-          sendJson(res, 200, { ok: true, value: await service.listKinds() })
+          respond(200, { ok: true, value: await service.listKinds() })
           return
         }
         case 'backupExport': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
-          sendJson(res, 200, { ok: true, value: await service.backupExport(profile) })
+          respond(200, { ok: true, value: await service.backupExport(profile) })
           return
         }
         case 'backupDiff': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const backup = body['backup'] as BackupFile | undefined
           if (backup === undefined || typeof backup !== 'object' || !Array.isArray(backup.profiles)) {
-            sendJson(res, 400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
+            respond(400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
             return
           }
-          sendJson(res, 200, { ok: true, value: await service.backupDiff(backup, profile) })
+          respond(200, { ok: true, value: await service.backupDiff(backup, profile) })
           return
         }
         case 'backupRestore': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const backup = body['backup'] as BackupFile | undefined
           if (backup === undefined || typeof backup !== 'object' || !Array.isArray(backup.profiles)) {
-            sendJson(res, 400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
+            respond(400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
             return
           }
-          sendJson(res, 200, { ok: true, value: await service.backupRestore(backup, profile) })
+          respond(200, { ok: true, value: await service.backupRestore(backup, profile) })
           return
         }
         case 'unblockRepo': {
           const repo = typeof body['repo'] === 'string' ? body['repo'] : ''
           const key = normalizeRepoRef(repo)
           if (key === null) {
-            sendJson(res, 200, { ok: true, value: { ok: false, message: 'invalid repo: ' + repo } })
+            respond(200, { ok: true, value: { ok: false, message: 'invalid repo: ' + repo } })
             return
           }
           await removeBlockedRepo(key)
-          sendJson(res, 200, { ok: true, value: { ok: true, message: 'unblocked ' + key } })
+          respond(200, { ok: true, value: { ok: true, message: 'unblocked ' + key } })
           return
         }
         case 'createProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
           const template = typeof body['template'] === 'string' ? body['template'] : 'web'
-          sendJson(res, 200, { ok: true, value: await service.createProfile(name, template) })
+          respond(200, { ok: true, value: await service.createProfile(name, template) })
           return
         }
         case 'stopProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          sendJson(res, 200, { ok: true, value: await service.stopProfile(name) })
+          respond(200, { ok: true, value: await service.stopProfile(name) })
           return
         }
         case 'marketplace': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const refresh = body['refresh'] === true
-          sendJson(res, 200, { ok: true, value: await service.marketplace(profile, refresh) })
+          respond(200, { ok: true, value: await service.marketplace(profile, refresh) })
           return
         }
         case 'startProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          sendJson(res, 200, { ok: true, value: await service.startProfile(name) })
+          respond(200, { ok: true, value: await service.startProfile(name) })
           return
         }
         case 'copyPlugins': {
           const from = typeof body['from'] === 'string' ? body['from'] : ''
           const to = typeof body['to'] === 'string' ? body['to'] : ''
           const names = Array.isArray(body['names']) ? body['names'] as string[] : []
-          sendJson(res, 200, { ok: true, value: await service.copyPlugins(from, to, names) })
+          respond(200, { ok: true, value: await service.copyPlugins(from, to, names) })
           return
         }
         case 'renameProfile': {
           const oldName = typeof body['oldName'] === 'string' ? body['oldName'] : ''
           const newName = typeof body['newName'] === 'string' ? body['newName'] : ''
-          sendJson(res, 200, { ok: true, value: service.renameProfile(oldName, newName) })
+          respond(200, { ok: true, value: service.renameProfile(oldName, newName) })
           return
         }
         case 'removeProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          sendJson(res, 200, { ok: true, value: service.removeProfile(name) })
+          respond(200, { ok: true, value: service.removeProfile(name) })
           return
         }
         case 'removeInsert': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const rowId = typeof body['rowId'] === 'string' ? body['rowId'] : ''
-          sendJson(res, 200, { ok: true, value: await service.removeInsert(profile, rowId) })
+          respond(200, { ok: true, value: await service.removeInsert(profile, rowId) })
           return
         }
         case 'mount': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const packageName = typeof body['packageName'] === 'string' ? body['packageName'] : ''
-          sendJson(res, 200, { ok: true, value: await service.mount(profile, packageName) })
+          respond(200, { ok: true, value: await service.mount(profile, packageName) })
           return
         }
         case 'checkUpdates': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
-          sendJson(res, 200, { ok: true, value: await service.checkUpdates(profile) })
+          respond(200, { ok: true, value: await service.checkUpdates(profile) })
           return
         }
         case 'analyze': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
-          sendJson(res, 200, { ok: true, value: service.analyze(profile) })
+          respond(200, { ok: true, value: service.analyze(profile) })
           return
         }
         case 'fixIssue': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const action = typeof body['action'] === 'string' ? body['action'] : ''
           const target = typeof body['target'] === 'string' ? body['target'] : ''
-          sendJson(res, 200, { ok: true, value: await service.fixIssue(profile, action, target) })
+          respond(200, { ok: true, value: await service.fixIssue(profile, action, target) })
           return
         }
         case 'fixAll': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
-          sendJson(res, 200, { ok: true, value: await service.fixAll(profile) })
+          respond(200, { ok: true, value: await service.fixAll(profile) })
           return
         }
         case 'update': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          sendJson(res, 200, { ok: true, value: await service.update(profile, name, acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))) })
+          respond(200, { ok: true, value: await service.update(profile, name, acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))) })
           return
         }
         default:
-          sendJson(res, 404, { ok: false, error: { code: 'unknown-op', message: op } })
+          respond(404, { ok: false, error: { code: 'unknown-op', message: op } })
       }
     } catch (error: unknown) {
-      sendJson(res, 400, {
+      respond(400, {
         ok: false,
         error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) },
       })

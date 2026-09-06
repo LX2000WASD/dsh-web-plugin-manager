@@ -30,6 +30,7 @@ import { cleanupOwnedPresets, formatCleanupResult, pluginInstalledInOtherProfile
 import { GITHUB_UA, marketplaceFetch } from './net.ts'
 import { buildFilteredEnv, scanRequirements } from './scan.ts'
 import { createInstallSession, dropInstallSession, filterAnswers, getInstallSession } from './installSession.ts'
+import { invalidateInstalledIndex } from './marketplaceMerge.ts'
 import type { CommandResult, UpdateInfo } from './types.ts'
 
 /** Whether a directory is a git repository (cheap probe). */
@@ -962,6 +963,13 @@ export async function installProtected(ctx: Context | null, profile: string, spe
     }
   }
 
+  // Every return below leaves the package installed (bundle layer, live
+  // mount, or a failed mount that keeps the dependency): drop the cached
+  // installed index so the next marketplace request sees the new package
+  // immediately. The quality-gate path above rolled back to the previous
+  // state and returns before reaching this line.
+  invalidateInstalledIndex(profile)
+
   const isBundle = exportsBundlePatch(profile, installed)
   // Post-install entry verification: warn when the load entries are missing
   // (source-only repos), so "installed but not working" is caught up front.
@@ -1079,6 +1087,9 @@ export async function removeProtectedInner(ctx: Context | null, profile: string,
   const orphanedIds = managedRowIdsOf(profile, name)
   let result = await runDshPlugin(profile, 'remove', [name], process.cwd())
   if (result.ok) {
+    // The package is gone: drop the cached installed index so the next
+    // marketplace request stops flagging it as installed immediately.
+    invalidateInstalledIndex(profile)
     restoreInBoxBundles(profile, before)
     await cleanupInsertRows(ctx, profile, name)
     removeDisableBlocks(profile, orphanedIds)
@@ -1284,6 +1295,10 @@ export async function updateProtectedInner(profile: string, name: string, locale
             : '\n[plugin-manager] WARNING: re-installing the previous version failed: ' + reinstall.output.trim().slice(0, 200)),
       }
     }
+    // Successful update: the installed version changed — drop the cached
+    // installed index so the next marketplace request re-derives
+    // installed/updateAvailable from the new commit.
+    invalidateInstalledIndex(profile)
     return {
       ok: true,
       exitCode: 0,
@@ -1343,6 +1358,10 @@ export async function updateProtectedInner(profile: string, name: string, locale
         + (restored ? rollbackLabel : ' — reinstall the package manually'),
     }
   }
+  // Successful update: the installed version changed — drop the cached
+  // installed index so the next marketplace request re-derives
+  // installed/updateAvailable from the new version.
+  invalidateInstalledIndex(profile)
   return {
     ok: true,
     exitCode: 0,
