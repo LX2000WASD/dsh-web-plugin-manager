@@ -11,6 +11,7 @@ import type {
   AnalyzeIssue, AnalyzeResult, CommandResult, EnvQuestion, MutationResult, PluginManagerSnapshot, ProfileInfo, UpdateCheckResult, UpdateInfo,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
+import { PM_CARD_CSS, PM_LINK_CSS, formatTime, outputStyle, useConfirm } from './shared.ts'
 import { EnvQuestionForm } from './EnvQuestionForm.tsx'
 import { PmSelect } from './PmSelect.tsx'
 
@@ -38,7 +39,9 @@ export type PluginManagerTabProps =
 type ViewState =
   | { readonly status: 'loading' }
   | { readonly status: 'error'; readonly message: string }
-  | { readonly status: 'ready'; readonly snapshot: PluginManagerSnapshot }
+  // snapshot stays optional: a profile list with no entries renders the
+  // ready-empty state (no `undefined as unknown` casts).
+  | { readonly status: 'ready'; readonly snapshot?: PluginManagerSnapshot }
 
 /** Official --dsw-* token styles (mirrors the official inventory tab). */
 const styles: Record<string, React.CSSProperties> = {
@@ -108,13 +111,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-link, var(--dsw-alias-state-business-primary))',
     fontWeight: 500, textDecoration: 'none', overflowWrap: 'anywhere',
   },
-  output: {
-    maxHeight: '200px', overflow: 'auto', whiteSpace: 'pre-wrap',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
-    padding: '10px 14px', background: 'var(--dsw-alias-bg-module-platform)',
-    fontFamily: 'var(--ds-font-family-code)', fontSize: '12px', lineHeight: '18px',
-    color: 'var(--dsw-alias-label-primary)', margin: 0,
-  },
   status: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)', margin: 0 },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
   select: {
@@ -145,15 +141,6 @@ const styles: Record<string, React.CSSProperties> = {
   analysisIssueText: { minWidth: 0, color: 'var(--dsw-alias-label-primary)', overflowWrap: 'anywhere' },
 }
 
-/** Format an ISO timestamp for display (local time). */
-function formatTime(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return iso
-  const pad = (value: number): string => String(value).padStart(2, '0')
-  return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
-    + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes())
-}
-
 /** Render the management tab. */
 export function PluginManagerSettingsTab({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, fixIssue, fixAll, t }: PluginManagerTabProps): ReactNode {
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
@@ -171,7 +158,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   // Health-check fix flow: which issue is fixing / awaiting B-level confirm /
   // already fixed in this session (cleared by the next analyze).
   const [fixing, setFixing] = useState<string | null>(null)
-  const [confirmKey, setConfirmKey] = useState<string | null>(null)
+  // 行内二次确认（fix/remove/uninstall，键空间互不相交），4 秒无操作自动复位。
+  const [confirmKey, setConfirmKey] = useConfirm()
   const [fixedKeys, setFixedKeys] = useState<Set<string>>(new Set())
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
   const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, fixIssue, fixAll })
@@ -179,16 +167,24 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   // Request sequence guard: a slow response from an earlier profile must
   // not overwrite the state of the currently selected one (audit M8).
   const loadSeq = useRef(0)
-  const load = (profile: string): void => {
-    if (profile.length === 0) return
+  /** Returns the in-flight request so callers can chain busy handling. */
+  const load = (profile: string): Promise<void> => {
+    if (profile.length === 0) return Promise.resolve()
     const seq = ++loadSeq.current
     // Keep showing the previous snapshot during refreshes so the page does
     // not collapse to the top (only the first load shows the loading state).
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
-    void injected.current.list(profile).then(
+    return injected.current.list(profile).then(
       (snapshot) => { if (seq === loadSeq.current) setState({ status: 'ready', snapshot }) },
       (error: unknown) => { if (seq === loadSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }) },
     )
+  }
+
+  /** Refresh button: guarded against repeated clicks, with feedback. */
+  const onRefresh = (): void => {
+    if (selected.length === 0) return
+    setBusy('refresh')
+    void load(selected).finally(() => setBusy(null))
   }
 
   useEffect(() => {
@@ -204,7 +200,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
         setSelected(current.name)
         load(current.name)
       } else {
-        setState({ status: 'ready', snapshot: undefined as unknown as PluginManagerSnapshot })
+        setState({ status: 'ready' })
       }
     }, (error: unknown) => {
       setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
@@ -294,12 +290,14 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     [analysis],
   )
 
-  const onInstall = async (): Promise<void> => {
+  /** Shared install flow (was duplicated verbatim in onInstall/onEnvContinue
+   *  — including the live-mount comment, which had already started to drift). */
+  const runInstall = async (answers?: Record<string, string>): Promise<void> => {
     const trimmed = spec.trim()
     if (selected.length === 0 || trimmed.length === 0) return
     setBusy('install')
     try {
-      const result = await install(selected, trimmed)
+      const result = answers === undefined ? await install(selected, trimmed) : await install(selected, trimmed, answers)
       if (result.awaiting !== undefined) {
         // C2: paused for env vars — keep the spec, show the inline form.
         setEnvQuestions(result.awaiting.questions)
@@ -323,34 +321,10 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     }
   }
 
+  const onInstall = (): Promise<void> => runInstall()
+
   /** C2: user submitted the env-var answers — continue the same install. */
-  const onEnvContinue = async (answers: Record<string, string>): Promise<void> => {
-    const trimmed = spec.trim()
-    if (selected.length === 0 || trimmed.length === 0) return
-    setBusy('install')
-    try {
-      const result = await install(selected, trimmed, answers)
-      if (result.awaiting !== undefined) {
-        setEnvQuestions(result.awaiting.questions)
-        setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output)
-        return
-      }
-      // The host reports live: true only when the plugin was actually
-      // mounted into the running loader tree. Bundle-layer plugins load at
-      // the next start — claiming a live mount for them is a lie.
-      const mounted = result.live === true
-        ? '\n✓ ' + t('installMounted')
-        : ''
-      setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n' + result.output + mounted)
-      setEnvQuestions(null)
-      setSpec('')
-      load(selected)
-    } catch (error: unknown) {
-      setOutput('$ dsh plugin --profile ' + selected + ' add ' + trimmed + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
-    } finally {
-      setBusy(null)
-    }
-  }
+  const onEnvContinue = (answers: Record<string, string>): Promise<void> => runInstall(answers)
 
   const onRemove = async (name: string): Promise<void> => {
     // 行内二次确认（键前缀与 fix 流程互不相交）：第一次点击只点亮确认态。
@@ -436,33 +410,14 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 
   return (
     <div style={styles.section}>
-      <style>{`
-.pm-card {
-  min-width: 0; overflow: hidden;
-  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-3);
-}
-.pm-card[data-open='true'] { border-color: var(--dsw-alias-border-l1); }
+      <style>{PM_CARD_CSS + `
 .pm-card[data-updatable='true'] {
   border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 55%, transparent);
 }
 .pm-card[data-updatable='true'][data-open='true'] {
   border-color: var(--dsw-alias-state-success-secondary);
 }
-/* 链接语言对齐官方（0.1.3 alias-link）：hover/focus 点状下划线。
-   颜色令牌带 fallback——0.1.2 平台还没有 --dsw-alias-link。 */
-.pm-link {
-  color: var(--dsw-alias-link, var(--dsw-alias-state-business-primary));
-}
-.pm-link:hover, .pm-link:focus-visible {
-  text-decoration: underline dotted var(--dsw-alias-link, var(--dsw-alias-state-business-primary));
-  text-underline-offset: 3px;
-}
-.pm-card-content:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: -2px;
-}
-`}</style>
+` + PM_LINK_CSS}</style>
       <div style={styles.toolbar}>
         <span style={styles.filterLabel}>{t('profileLabel')}</span>
         <PmSelect
@@ -472,8 +427,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
           options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
           onChange={onSelect}
         />
-        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => load(selected)}>
-          {t('refresh')}
+        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={onRefresh}>
+          {busy === 'refresh' ? t('refreshing') : t('refresh')}
         </Button>
         <span style={{ marginLeft: 'auto' }} />
         <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null || analyzing} onClick={() => void onAnalyze()}>
@@ -505,6 +460,10 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
           </div>
           {envQuestions !== null && (
             <EnvQuestionForm
+              // key per spec: consecutive installs of different packages must
+              // not inherit each other's answers (the spec input is frozen
+              // while the form is open, so the key is stable within a pause).
+              key={spec}
               questions={envQuestions}
               busy={busy === 'install'}
               t={t}
@@ -738,7 +697,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                   {outputOpen ? '▾ ' : '▸ '}{t('commandOutput')}
                 </button>
               </div>
-              {outputOpen && <pre style={styles.output}>{output}</pre>}
+              {outputOpen && <pre style={outputStyle}>{output}</pre>}
             </div>
           )}
         </>

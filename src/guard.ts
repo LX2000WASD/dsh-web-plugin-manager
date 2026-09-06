@@ -101,8 +101,10 @@ export function registerPluginGuard(
 
 /**
  * The system prompt section stating the protected plugin-management
- * surface. Order 300 sits after the tool-guidance band (100-199), so the
- * rule reads as an operational constraint, not tool documentation.
+ * surface. Order 300 sits in the gap between the official bands PERSONA (0)
+ * and PLAN_POLICY (500) — an operational constraint ahead of policy text.
+ * (An earlier comment cited a "tool-guidance band 100-199"; the official
+ * SECTION_ORDERS table has no such band.)
  */
 export const PLUGIN_RULE_SECTION = {
   name: 'plugin-manager:install-rule',

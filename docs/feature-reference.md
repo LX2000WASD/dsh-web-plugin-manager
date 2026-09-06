@@ -62,6 +62,8 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 
 - 设置 → 插件 → 环境：启动/停止（终端或后台）、复制/转移插件（按记录源重装）、创建/重命名/删除 profile
 - 官方 profile（web/headless）只读，不可管理
+- **备份导出/导入/恢复**：导出为 JSON（profiles 依赖 + kinds 安装记录）；导入后对目标环境 diff（缺失/已装/缺失 profile/不可恢复四类），「恢复缺失项」向目标环境批量重装缺失项（整批一个 mutation，与并发安装/启停互斥）——恢复前行内二次确认，切换目标环境自动重算 diff（缺失清单永远与实际恢复目标一致）；需要环境变量的 git 源在恢复输出中给出缺失变量清单并指路手动安装
+- 重命名为行内输入（无 window.prompt），启动失败/弹窗被拦截时 URL 落到命令输出区
 
 ## 市场
 
@@ -73,7 +75,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - **模糊搜索与相关性排序**（`src/rank.ts`）：搜索框按"有序子序列"对齐打分（vendor 自官方 0.1.3-alpha.1 ui-primitives `rankByName` 算法并做长名适配）——`plgmgr` 能命中 `plugin-manager`，`trmnl` 能命中 `dsh-terminal-panel`；打分规则：分隔符边界（`-`/`_` 后）加分、连续命中强加分、间隔按间距扣分、首字符起始位有界扣分（官方的全局 -index 惩罚在长仓库名上会累计成大负分，已适配）、总分下限 1（名称命中恒不低于描述兜底）；搜索态按相关性排序（同分星数破平），清空搜索恢复所选排序；打分经 `useDeferredValue` 在低优先级渲染中重算，3000+ 条不阻塞键击；目录页（查看 tab）同一算法做过滤
 - 卡片动作：未安装 → 安装；已装无新版 → 绿色「已安装 vX」；已装有新版 → 橙色「更新」（npm 包走受保护 update 链路重写 specifier + 质量门 + 回滚，git-only 源重装）；星数排序时已安装置顶
 - 卡片布局：标题省略号不挤占按钮区；短 meta 行（星数缩写 2.5K / 来源 npm包|git仓库 / 类型占位）；TAG 行（审核状态 + 功能分类本地化）；单/双列切换（localStorage 记忆）；**增量渲染**——首屏 120 条 + 触底加载更多 + `content-visibility: auto`（~3000 条列表不卡顿，无需服务端分页）
-- **缓存**：进程内存镜像（listing 与 profile 无关，切 profile 只重算已安装标记，零磁盘 IO）+ 磁盘 24h 缓存 + 失败负缓存 5min + registry 原始索引缓存；`refresh=1` 是唯一强制网络路径
+- **缓存**：进程内存镜像（listing 与 profile 无关，切 profile 只重算已安装标记，零磁盘 IO）+ 磁盘 24h 缓存 + 失败负缓存 5min + registry 原始索引缓存；`refresh=1` 是唯一强制网络路径。刷新路径四源**并行**抓取（registry 索引 / catalog / PLUGINS.md / dsh.so，耗时=最慢源而非四者之和），catalog 条目 8 并发池下载；npm registry 地址进程级只解析一次（`npm_config_registry` 优先，避免每次版本检查重复 spawn）
 - **网络健壮性**：每请求 15s 超时（AbortSignal.timeout）；支持 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`（undici ProxyAgent——Node 全局 fetch 会丢弃 dispatcher 选项，市场请求必须走 undici 自身 fetch）；失败原因负缓存 5 分钟（`marketplace-failure.json`，避免每次进页重跑全量 GitHub 往返）；索引全挂且无缓存时空列表直接显示失败原因
 - GitHub API 未认证限流 60/h：仅 catalog 独有条目的星数富化会打 API（量小）；403/429 停止富化（星数降级用上次快照元数据），列表本身不受影响；raw 兜底源可达时列表保持非空
 - 系统代理/规则模式加速器对 Node 进程无效（undici 不读系统代理）——市场为空且此类加速器用户，把代理地址写进环境变量，或改 TUN/全局模式
@@ -102,13 +104,6 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - **禁用归档 / 启用恢复**（setEnabled）：禁用插件把其拥有的预设目录移出 user root（`<dshHome>/plugin-manager-cache/preset-archive/`，含用户修改版，零数据损失，选择器即时消失）；重新启用自动移回（同名冲突保留新预设并提示）。禁用**从不删除**——宿主 broken 判定只查 YAML 语法、不反映「引用的插件被禁用」，且临时禁用不应毁数据。
 - **已知限制**：CLI 直删路径不清宿主 settings.default（无 ctx）；skill 无此问题（SKILL.md 不引用插件代码，残留无害）。
 
-
-- 类型检测分层：根/嵌套 `agent.cordis.yml` → 预设（官方单文件判定，preset.yml 仅显示元数据）；根 package.json 声明 DSH 能力 → cordis 插件；根 `SKILL.md` → skill；嵌套预设/插件/技能根；其余（含含 install.sh 的仓库——**永不自动执行第三方脚本**）→ 非三类，拒绝安装并加入市场屏蔽名单
-- skill 安装到官方根 `<dshHome>/skills`（frontmatter name 优先，技能集合仓库逐个装，跳过点目录/node_modules/vendored）；**chokidar watch 默认开启 → 安装/删除即热加载**；预设安装到 `<dshHome>/.agent-presets`（目录名即 preset id，官方每次会话发现重读）；预设的管理（复制/删除/默认）由官方设置页完成
-- 安装记录 `installed-kinds.json`（市场安装的来源/类型/位置/时间，串行队列读写）；市场已安装判定与卡片类型徽标（skill/预设/插件）来自记录
-- 市场卸载：管理页「技能与预设」区块（记录列表 + 卸载 + git 源重新拉取）；`dshpm uninstall-kind <owner/repo>`；skill/预设删目录含路径越界防护，cordis 按记录逐个走受保护 remove
-- 屏蔽名单：安装时检测为非三类的仓库写入 `blocked-repos.json`，市场所有列表路径（缓存/新拉/兜底）统一过滤，响应带 `blocked`/`blockedRepos`；市场页提供「解除屏蔽」
-
 ## CLI（dshpm）
 
 - bin 随插件安装进入 profile 的 node_modules；也可 `node <profile>/node_modules/dsh-web-plugin-manager/dist/cli.js` 直接调用；`--home` 指定 DSH_HOME
@@ -124,7 +119,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 
 - Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）
 - 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；模糊打分：`src/rank.ts`（client/host 共用纯函数）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
-- Client：`src/client/` —— `settings.plugins.tab`（all 遮蔽官方只读列表 + manager + environments）+ `settings.section`（marketplace）；同源 fetch 调 REST（不走 Typert Remote）；危险操作（停用/删除/卸载/删除环境）一律行内二次确认（首击点亮确认态、再击执行，无 window.confirm 弹窗）；链接样式对齐官方 0.1.3 链接语言（`--dsw-alias-link` 令牌带 0.1.2 fallback + hover 点状下划线）
+- Client：`src/client/` —— `settings.plugins.tab`（all 遮蔽官方只读列表 + manager + environments）+ `settings.section`（marketplace）；同源 fetch 调 REST（不走 Typert Remote）；危险操作（停用/删除/卸载/删除环境/备份恢复）一律行内二次确认（首击点亮确认态、再击执行，**4 秒无操作自动复位**，无 window.confirm 弹窗）；错误一律行内呈现（无 alert/prompt，catalog 有独立错误行、其余进命令输出区）；共享样式/格式化/确认 hook 收口在 `src/client/shared.ts`；链接样式对齐官方 0.1.3 链接语言（`--dsw-alias-link` 令牌带 0.1.2 fallback + hover 点状下划线）
 - Client 构建约束（`tsdown.client.config.ts` 的 `PLATFORM`）：只有官方平台种子表内的说明符可以 external，其余一律内联。种子表见 `deepseek-harness/packages/client/web/src/platform.ts` 的 `PLATFORM_MODULES`，当前为 react 四项 + `@deepseek-ai/cordis`、`dsh-client-store`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`。
   - external 了表外的包 → 浏览器抛 `require("x") missed the module table`，**整个插件页面启动中断**（所有插件 UI 全部消失，不只是出错的那个）；内联了表内的包 → 模块身份分裂（两份实例，服务/上下文对不上）。
   - 这张表会随 DSH 版本变动：0.1.2-alpha.1 删掉了 `@deepseek-ai/dsh-client-runtime`、加入了 `dsh-client-store`。升级 DSH 后需比对该表并重新构建产物。

@@ -13,6 +13,7 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CommandResult, KindListView, KindRecordView } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
+import { outputStyle, shortDate, useConfirm } from './shared.ts'
 
 /** Registration-side Remote face provided by the section. */
 export interface PluginKindsTabInjected {
@@ -80,20 +81,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
   status: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)', margin: 0 },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
-  output: {
-    maxHeight: '200px', overflow: 'auto', whiteSpace: 'pre-wrap',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
-    padding: '10px 14px', background: 'var(--dsw-alias-bg-module-platform)',
-    fontFamily: 'var(--ds-font-family-code)', fontSize: '12px', lineHeight: '18px',
-    color: 'var(--dsw-alias-label-primary)', margin: 0,
-  },
-}
-
-/** Format an ISO timestamp as a short date. */
-function shortDate(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return iso
-  return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0')
 }
 
 /** Whether a record key is a github owner/repo (re-pullable) vs a local path. */
@@ -107,21 +94,31 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [output, setOutput] = useState('')
-  // 行内二次确认：卸载第一次点击只点亮确认态（替代 window.confirm 弹窗）。
-  const [confirmKey, setConfirmKey] = useState<string | null>(null)
+  // 行内二次确认：卸载第一次点击只点亮确认态（替代 window.confirm 弹窗），
+  // 4 秒无操作自动复位。
+  const [confirmKey, setConfirmKey] = useConfirm()
 
   const injected = useRef({ kinds, uninstall, reinstall })
 
-  const reload = (): void => {
-    void injected.current.kinds().then(setState, (err: unknown) => {
+  /** Returns the in-flight request so callers can chain busy handling. */
+  const reload = (): Promise<void> =>
+    injected.current.kinds().then((view) => {
+      setState(view)
+      setError('')
+    }, (err: unknown) => {
       setError(err instanceof Error ? err.message : String(err))
     })
-  }
 
   useEffect(() => {
-    reload()
+    void reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  /** Refresh button: guarded against repeated clicks, with feedback. */
+  const onRefresh = (): void => {
+    setBusy('refresh')
+    void reload().finally(() => setBusy(null))
+  }
 
   /** Only skill / agent-preset records are managed here (cordis lives in Manage). */
   const records = (state?.records ?? []).filter(record => record.type === 'skill' || record.type === 'agent-preset')
@@ -163,8 +160,8 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
         <h2 style={styles.pageTitle}>{t('kindsTitle')}</h2>
         <span style={styles.headingCount}>{records.length}</span>
         <span style={{ marginLeft: 'auto' }}>
-          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={reload}>
-            {t('refresh')}
+          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={onRefresh}>
+            {busy === 'refresh' ? t('refreshing') : t('refresh')}
           </Button>
         </span>
       </div>
@@ -234,7 +231,7 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
           <div style={styles.heading}>
             <h3 style={styles.headingTitle}>{t('commandOutput')}</h3>
           </div>
-          <pre style={styles.output}>{output}</pre>
+          <pre style={outputStyle}>{output}</pre>
         </div>
       )}
     </div>

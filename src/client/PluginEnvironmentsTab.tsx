@@ -10,6 +10,7 @@ import type {
   BackupDiffResult, BackupFile, CommandResult, MutationResult, ProfileInfo, StartResult,
 } from '../types.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
+import { PM_CARD_CSS, outputStyle, useConfirm } from './shared.ts'
 import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
@@ -24,6 +25,14 @@ export interface PluginEnvironmentsTabInjected {
   readonly backupExport: (profile: string) => Promise<BackupFile>
   readonly backupDiff: (backup: BackupFile, profile: string) => Promise<BackupDiffResult>
   readonly backupRestore: (backup: BackupFile, profile: string) => Promise<CommandResult>
+}
+
+/** Minimal structural gate for an imported backup file (audit: any JSON was
+ *  previously cast blindly and failed deep inside the host). */
+function isBackupFile(value: unknown): value is BackupFile {
+  if (value === null || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  return Array.isArray(v.profiles) && Array.isArray(v.kinds)
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -91,13 +100,6 @@ const styles: Record<string, React.CSSProperties> = {
   detailsActions: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
   error: { fontSize: '13px', lineHeight: '20px', color: 'var(--dsw-alias-state-error-primary)', margin: 0 },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  output: {
-    maxHeight: '200px', overflow: 'auto', whiteSpace: 'pre-wrap',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '10px',
-    padding: '10px 14px', background: 'var(--dsw-alias-bg-module-platform)',
-    fontFamily: 'var(--ds-font-family-code)', fontSize: '12px', lineHeight: '18px',
-    color: 'var(--dsw-alias-label-primary)', margin: 0,
-  },
 }
 
 /** Render the environment management tab. */
@@ -116,9 +118,14 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
   const [backupProfile, setBackupProfile] = useState('')
   const [backupData, setBackupData] = useState<BackupFile | null>(null)
   const [diffResult, setDiffResult] = useState<BackupDiffResult | null>(null)
-  // 行内二次确认（删除环境）：第一次点击只点亮确认态。
-  const [confirmKey, setConfirmKey] = useState<string | null>(null)
+  // 行内二次确认（删除环境/备份恢复，键空间：环境名 + 'restore:' 前缀），
+  // 4 秒无操作自动复位——点亮态不会无限期等第二次点击。
+  const [confirmKey, setConfirmKey] = useConfirm()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  // Rename flow: inline input instead of window.prompt (blocks the main
+  // thread, no styling, no validation surface).
+  const [renameTarget, setRenameTarget] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
 
   const injected = useRef({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile, backupExport, backupDiff, backupRestore })
 
@@ -151,12 +158,19 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
     }
   }
 
-  const onRename = async (oldName: string): Promise<void> => {
-    const newProfileName = window.prompt(t('renamePrompt'), oldName)
-    if (newProfileName === null || newProfileName.trim().length === 0 || newProfileName.trim() === oldName) return
+  const onRenameStart = (oldName: string): void => {
+    setRenameTarget(oldName)
+    setRenameValue(oldName)
+  }
+
+  const onRenameConfirm = async (): Promise<void> => {
+    const oldName = renameTarget
+    const newProfileName = renameValue.trim()
+    if (oldName === null || newProfileName.length === 0 || newProfileName === oldName) return
+    setRenameTarget(null)
     setBusy('rename-' + oldName)
     try {
-      const result = await injected.current.renameProfile(oldName, newProfileName.trim())
+      const result = await injected.current.renameProfile(oldName, newProfileName)
       setOutput(result.message)
       if (result.ok) refresh()
     } catch (error: unknown) {
@@ -190,7 +204,14 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
     try {
       const result = await injected.current.startProfile(name)
       setOutput(result.message)
-      if (result.ok && result.url !== undefined) window.open(result.url, '_blank')
+      if (result.ok && result.url !== undefined) {
+        // window.open after an await has left the user-gesture context and is
+        // commonly swallowed by popup blockers — fall back to the URL in the
+        // output area instead of failing silently.
+        if (window.open(result.url, '_blank') === null) {
+          setOutput(result.message + '\n' + result.url)
+        }
+      }
     } catch (error: unknown) {
       setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
@@ -248,22 +269,62 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
   /** Read an imported backup file and diff it against the current state. */
   const onBackupFile = async (file: File | null): Promise<void> => {
     if (file === null) return
+    setBusy('backup-import')
     try {
-      const backup = JSON.parse(await file.text()) as BackupFile
-      setBackupData(backup)
-      const diff = await injected.current.backupDiff(backup, backupProfile)
+      // Minimal shape gate: an arbitrary JSON file used to be cast blindly
+      // and only failed deep inside the host with an opaque error.
+      const parsed: unknown = JSON.parse(await file.text())
+      if (!isBackupFile(parsed)) {
+        setOutput('$ import failed: ' + file.name + ' is not a plugin-manager backup (missing profiles/kinds lists)')
+        return
+      }
+      setBackupData(parsed)
+      const diff = await injected.current.backupDiff(parsed, backupProfile)
       setDiffResult(diff)
       setOutput('$ import ' + file.name + ' — diff computed ('
         + diff.missing.length + ' missing, ' + diff.already.length + ' already, '
         + diff.missingProfiles.length + ' missing profiles, ' + diff.unrestorable.length + ' unrestorable)')
     } catch (error: unknown) {
       setOutput('$ import failed: ' + (error instanceof Error ? error.message : String(error)))
+    } finally {
+      setBusy(null)
     }
+  }
+
+  /**
+   * Switch the restore target: the imported backup re-diffs against the new
+   * target. Without this, the visible missing list still describes the old
+   * target while the restore button would write into the newly selected one
+   * — the diff summary and the actual behavior must never diverge.
+   */
+  const onBackupTargetChange = (name: string): void => {
+    setBackupProfile(name)
+    setConfirmKey(null)
+    const backup = backupData
+    if (backup === null) return
+    setBusy('backup-diff')
+    injected.current.backupDiff(backup, name).then((diff) => {
+      setDiffResult(diff)
+      setOutput('$ diff against ' + (name.length > 0 ? name : 'all') + ' — ('
+        + diff.missing.length + ' missing, ' + diff.already.length + ' already, '
+        + diff.missingProfiles.length + ' missing profiles, ' + diff.unrestorable.length + ' unrestorable)')
+    }, (error: unknown) => {
+      setDiffResult(null)
+      setOutput('[error] ' + (error instanceof Error ? error.message : String(error)))
+    }).finally(() => setBusy(null))
   }
 
   /** Restore every missing entry from the imported backup. */
   const onBackupRestore = async (): Promise<void> => {
     if (backupData === null) return
+    // 行内二次确认：恢复会向目标环境批量重装缺失项（与删除环境同一确认
+    // 模式；键前缀 ':' 与环境名空间不相交——环境名不含冒号）。
+    const key = 'restore:' + backupProfile
+    if (confirmKey !== key) {
+      setConfirmKey(key)
+      return
+    }
+    setConfirmKey(null)
     setBusy('backup-restore')
     try {
       const result = await injected.current.backupRestore(backupData, backupProfile)
@@ -280,18 +341,7 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
 
   return (
     <div style={styles.section}>
-      <style>{`
-.pm-card {
-  min-width: 0; overflow: hidden;
-  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-3);
-}
-.pm-card[data-open='true'] { border-color: var(--dsw-alias-border-l1); }
-.pm-card-title-btn:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: -2px;
-}
-`}</style>
+      <style>{PM_CARD_CSS}</style>
       <div style={styles.heading}>
         <h3 style={styles.headingTitle}>{t('envList')}</h3>
         <span style={styles.headingCount}>{profileList.length}</span>
@@ -342,20 +392,46 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
                   <div style={styles.cardDetails}>
                     <div style={styles.detailsActions}>
                       {!profile.isOfficial && !profile.isCurrent && (
-                        <>
-                          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRename(profile.name)}>
-                            {t('renameButton')}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant={confirmKey === profile.name ? 'primary' : 'ghost'}
-                            disabled={busy !== null}
-                            title={t('confirmRemoveProfile') + ' ' + profile.name + '?'}
-                            onClick={() => void onRemove(profile.name)}
-                          >
-                            {confirmKey === profile.name ? t('fixConfirm') : t('removeButton')}
-                          </Button>
-                        </>
+                        renameTarget === profile.name ? (
+                          <>
+                            <Input
+                              type="text"
+                              value={renameValue}
+                              placeholder={t('renamePrompt')}
+                              disabled={busy !== null}
+                              autoFocus
+                              onChange={(event: React.ChangeEvent<HTMLInputElement>) => setRenameValue(event.currentTarget.value)}
+                              onKeyDown={(event: React.KeyboardEvent<HTMLInputElement>) => { if (event.key === 'Enter') void onRenameConfirm() }}
+                              style={{ width: '180px' }}
+                            />
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={busy !== null || renameValue.trim().length === 0 || renameValue.trim() === profile.name}
+                              onClick={() => void onRenameConfirm()}
+                            >
+                              {t('renameConfirm')}
+                            </Button>
+                            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => setRenameTarget(null)}>
+                              {t('envFormCancel')}
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => onRenameStart(profile.name)}>
+                              {t('renameButton')}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant={confirmKey === profile.name ? 'primary' : 'ghost'}
+                              disabled={busy !== null}
+                              title={t('confirmRemoveProfile') + ' ' + profile.name + '?'}
+                              onClick={() => void onRemove(profile.name)}
+                            >
+                              {confirmKey === profile.name ? t('fixConfirm') : t('removeButton')}
+                            </Button>
+                          </>
+                        )
                       )}
                       {profile.isOfficial && <span style={styles.filterLabel}>{t('officialReadonly')}</span>}
                       {profile.isCurrent && <span style={styles.filterLabel}>{t('currentRunningHint')}</span>}
@@ -444,7 +520,7 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
               { value: '', label: t('backupAll') },
               ...profileList.map(profile => ({ value: profile.name, label: profile.name })),
             ]}
-            onChange={setBackupProfile}
+            onChange={onBackupTargetChange}
           />
           <span style={{ marginLeft: 'auto' }} />
           <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onBackupExport()}>
@@ -467,8 +543,13 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
           {diffResult !== null && (
             <>
               {diffResult.missing.length > 0 && (
-                <Button variant="primary" disabled={busy !== null} onClick={() => void onBackupRestore()}>
-                  {busy === 'backup-restore' ? t('restoring') : t('backupRestoreButton')}
+                <Button
+                  variant="primary"
+                  disabled={busy !== null}
+                  title={t('confirmRestore')}
+                  onClick={() => void onBackupRestore()}
+                >
+                  {confirmKey === 'restore:' + backupProfile ? t('fixConfirm') : (busy === 'backup-restore' ? t('restoring') : t('backupRestoreButton'))}
                 </Button>
               )}
               <span style={styles.filterLabel}>
@@ -501,7 +582,7 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
           <div style={styles.heading}>
             <h3 style={styles.headingTitle}>{t('commandOutput')}</h3>
           </div>
-          <pre style={styles.output}>{output}</pre>
+          <pre style={outputStyle}>{output}</pre>
         </div>
       )}
     </div>

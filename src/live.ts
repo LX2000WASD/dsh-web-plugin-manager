@@ -268,9 +268,7 @@ export function ensurePatchWatcher(ctx: Context, patchPath: string): void {
   const dirPath = dirname(patchPath)
   if (patchWatcher !== undefined) {
     if (patchWatcher.patchPath === patchPath && patchWatcher.ctx === ctx) return
-    patchWatcher.watcher?.close()
-    if (patchWatcher.timer !== undefined) clearTimeout(patchWatcher.timer)
-    patchWatcher = undefined
+    closePatchWatcher()
   }
   const state: PatchWatcherState = {
     patchPath,
@@ -323,6 +321,18 @@ function safeRead(path: string): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * Stop the plugin-owned patch watcher (fs watch handle + pending timer).
+ * Called when the plugin's context is finally disposed — without it the
+ * handle outlives the plugin and keeps recomposing into a dead loader.
+ */
+export function closePatchWatcher(): void {
+  if (patchWatcher === undefined) return
+  patchWatcher.watcher?.close()
+  if (patchWatcher.timer !== undefined) clearTimeout(patchWatcher.timer)
+  patchWatcher = undefined
 }
 
 /**

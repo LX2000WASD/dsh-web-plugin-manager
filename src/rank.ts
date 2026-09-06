@@ -37,8 +37,16 @@ function boundaryBonus(name: string, index: number): number {
  *  - 总分下限 1——名称命中（哪怕很松）恒不低于描述子串兜底命中。
  */
 export function fuzzyScore(name: string, query: string): number | null {
-  const haystack = name.toLowerCase()
-  const needle = query.toLowerCase()
+  return fuzzyScoreLowered(name.toLowerCase(), query.toLowerCase())
+}
+
+/**
+ * fuzzyScore 的预小写版本：marketplace 搜索每次键击对 ~3000 条 × 2 个字段
+ * 调用本函数——把 toLowerCase() 提到循环外（调用方按条目缓存小写形式）
+ * 消除每键击数千次的字符串分配。语义与 fuzzyScore 完全一致（传入方须自行
+ * toLowerCase）。
+ */
+export function fuzzyScoreLowered(haystack: string, needle: string): number | null {
   const m = needle.length
   if (m === 0) return 0
   const n = haystack.length
@@ -110,13 +118,14 @@ export function fuzzyFilter<T>(
 ): FuzzyHit<T>[] | null {
   const trimmed = query.trim()
   if (trimmed.length === 0) return null
+  const needle = trimmed.toLowerCase()
   const hits: FuzzyHit<T>[] = []
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index]!
-    const name = nameOf(item)
-    const score = fuzzyScore(name, trimmed)
+    const lowered = nameOf(item).toLowerCase()
+    const score = fuzzyScoreLowered(lowered, needle)
     if (score === null) continue
-    hits.push({ item, score, prefix: name.toLowerCase().startsWith(trimmed.toLowerCase()) })
+    hits.push({ item, score, prefix: lowered.startsWith(needle) })
   }
   hits.sort((left, right) =>
     Number(right.prefix) - Number(left.prefix) || right.score - left.score || 0)

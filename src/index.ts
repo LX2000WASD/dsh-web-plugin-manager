@@ -50,7 +50,7 @@ import {
 } from './patch.ts'
 import { analyzeProfile, OFFICIAL_DEP_ALLOWED, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
 import type { AnalyzeIssue, AnalyzeResult } from './types.ts'
-import { applyLiveOps, ensurePatchWatcher, type StackOp } from './live.ts'
+import { applyLiveOps, closePatchWatcher, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
 import {
   addBlockedRepo, detectRepoType, installPreset, installSkill, isUnderRoot, loadBlockedRepos,
@@ -121,7 +121,11 @@ function readManifest(dir: string): Record<string, unknown> {
   if (!existsSync(path)) return {}
   try {
     return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
-  } catch {
+  } catch (error: unknown) {
+    // A corrupt manifest silently reading as "zero deps, zero bundles" hides
+    // real state from every listing — surface it at least once per parse.
+    console.warn('[plugin-manager] unreadable profile manifest ' + path + ': '
+      + (error instanceof Error ? error.message : String(error)))
     return {}
   }
 }
@@ -131,10 +135,15 @@ function patchPath(dir: string): string {
   return join(dir, 'cordis.patch.yml')
 }
 
-/** Read patch file content, or the empty string when absent. */
+/** Read patch file content, or the empty string when absent/unreadable. */
 function readPatch(dir: string): string {
-  const path = patchPath(dir)
-  return existsSync(path) ? readFileSync(path, 'utf8') : ''
+  // Direct read (no existsSync gate): the exists→read gap is a TOCTOU —
+  // a concurrently removed file would throw straight into the REST layer.
+  try {
+    return readFileSync(patchPath(dir), 'utf8')
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -676,29 +685,34 @@ export class PluginManagerService extends Service {
     const prior = new Map<string, MarketplaceItem>(readCache().items.map(item => [item.name, item]))
     let catalogError: string | null = null
     let markdownError: string | null = null
-    // Fetch sources independently: the registry index, the structured
-    // catalog and the legacy PLUGINS.md complement each other — one failing
-    // must not empty the list.
-    const registryFetch = await fetchRegistryRepos().catch((error: unknown) => {
-      console.warn('[plugin-manager] registry index unavailable: ' + (error instanceof Error ? error.message : String(error)))
-      return null
-    })
+    // Fetch sources independently and CONCURRENTLY: the registry index, the
+    // structured catalog, the legacy PLUGINS.md and the dsh.so overlay
+    // complement each other — one failing must not empty the list. Refresh
+    // latency becomes the slowest source instead of the sum of all four.
+    const [registryFetch, catalogFetch, markdownFetch, dshSo] = await Promise.all([
+      fetchRegistryRepos().catch((error: unknown) => {
+        console.warn('[plugin-manager] registry index unavailable: ' + (error instanceof Error ? error.message : String(error)))
+        return null
+      }),
+      fetchCatalogItems().catch((error: unknown) => {
+        catalogError = error instanceof Error ? error.message : String(error)
+        return []
+      }),
+      fetchMarkdownItems().catch((error: unknown) => {
+        markdownError = error instanceof Error ? error.message : String(error)
+        return []
+      }),
+      // dsh.so registry: independent verification (L1–L5) + security scan
+      // metadata, overlaid onto matching entries (never an install source).
+      fetchDshSoIndex().catch((error: unknown) => {
+        console.warn('[plugin-manager] dsh.so index unavailable: ' + (error instanceof Error ? error.message : String(error)))
+        return null
+      }),
+    ])
     const registryItems = registryFetch !== null ? registryFetch.repos : null
     const registryCacheable = registryFetch !== null && registryFetch.cacheable
-    const catalogItems = await fetchCatalogItems().catch((error: unknown) => {
-      catalogError = error instanceof Error ? error.message : String(error)
-      return []
-    })
-    const markdownItems = await fetchMarkdownItems().catch((error: unknown) => {
-      markdownError = error instanceof Error ? error.message : String(error)
-      return []
-    })
-    // dsh.so registry: independent verification (L1–L5) + security scan
-    // metadata, overlaid onto matching entries (never an install source).
-    const dshSo = await fetchDshSoIndex().catch((error: unknown) => {
-      console.warn('[plugin-manager] dsh.so index unavailable: ' + (error instanceof Error ? error.message : String(error)))
-      return null
-    })
+    const catalogItems = catalogFetch
+    const markdownItems = markdownFetch
     const curated = mergeMarketplace(catalogItems, markdownItems)
     // Registry base: network index → disk cache → search fallback (partial,
     // never persisted). The catalog-only path remains when all fail.
@@ -1050,12 +1064,14 @@ export class PluginManagerService extends Service {
       for (const launcher of run.launchers) {
         try { process.kill(launcher, 'SIGTERM') } catch { /* already gone */ }
       }
-      // Wait for the process to exit (up to ~5s).
+      // Wait for the process to exit (up to ~5s). Probed with kill(pid, 0) —
+      // a full process-table scan per 400ms tick would block the event loop
+      // for seconds in total on Windows (powershell CIM query).
       const deadline = Date.now() + 5_000
       for (;;) {
         if (Date.now() > deadline) break
         await new Promise(resolve => setTimeout(resolve, 400))
-        if (scanRuns().get(name) === undefined) {
+        if (!pidAlive(run.pid)) {
           return { ok: true, message: 'stopped ' + name }
         }
       }
@@ -1230,7 +1246,10 @@ export class PluginManagerService extends Service {
    * Restore a backup: reinstall every missing entry through the protected
    * install chain (quality gate + rollback apply). Failures do not abort the
    * batch — each entry is reported, and the overall result is failed when
-   * any entry failed. Serialized by the mutation mutex (installWithSource).
+   * any entry failed. The WHOLE batch runs as one mutation (same reasoning
+   * as copyPlugins, audit C3): a per-entry loop of separately enqueued
+   * installs would let concurrent install/remove/update interleave between
+   * entries and interleave manifest snapshots and patch rows.
    */
   async backupRestore(backup: BackupFile, targetProfile: string): Promise<CommandResult> {
     const diff = await this.backupDiff(backup, targetProfile)
@@ -1242,35 +1261,38 @@ export class PluginManagerService extends Service {
           + (diff.unrestorable.length > 0 ? '\nunrestorable:\n  ' + diff.unrestorable.join('\n  ') : ''),
       }
     }
-    const outputs: string[] = []
-    let ok = true
-    for (const entry of diff.missing) {
-      // Kind installs (skill/preset) ignore the profile; cordis goes into it.
-      const profile = entry.kind === 'cordis-plugin' ? entry.profile : (targetProfile.length > 0 ? targetProfile : 'web')
-      try {
-        const result = await installWithSource(this.ctx, profile, entry.source)
-        if (!result.ok && result.awaiting !== undefined) {
-          // The repository needs install-time env vars the backup cannot
-          // carry — say exactly which, so the restore is not a dead end
-          // (audit m4).
-          outputs.push('[' + entry.name + '] PAUSED: needs environment variable(s) '
-            + result.awaiting.questions.map(q => q.id).join(', ')
-            + ' — install it manually from the marketplace/Manage tab and provide them')
+    return enqueueMutation(async () => {
+      const outputs: string[] = []
+      let ok = true
+      for (const entry of diff.missing) {
+        // Kind installs (skill/preset) ignore the profile; cordis goes into it.
+        const profile = entry.kind === 'cordis-plugin' ? entry.profile : (targetProfile.length > 0 ? targetProfile : 'web')
+        try {
+          // Inner (non-enqueuing) variant: the batch already holds the mutex.
+          const result = await installWithSourceInner(this.ctx, profile, entry.source)
+          if (!result.ok && result.awaiting !== undefined) {
+            // The repository needs install-time env vars the backup cannot
+            // carry — say exactly which, so the restore is not a dead end
+            // (audit m4).
+            outputs.push('[' + entry.name + '] PAUSED: needs environment variable(s) '
+              + result.awaiting.questions.map(q => q.id).join(', ')
+              + ' — install it manually from the marketplace/Manage tab and provide them')
+            ok = false
+          } else {
+            outputs.push('[' + entry.name + '] ' + (result.ok ? 'restored' : 'FAILED: ' + result.output.slice(0, 300)))
+            if (!result.ok) ok = false
+          }
+        } catch (error: unknown) {
+          outputs.push('[' + entry.name + '] FAILED: ' + (error instanceof Error ? error.message : String(error)))
           ok = false
-        } else {
-          outputs.push('[' + entry.name + '] ' + (result.ok ? 'restored' : 'FAILED: ' + result.output.slice(0, 300)))
-          if (!result.ok) ok = false
         }
-      } catch (error: unknown) {
-        outputs.push('[' + entry.name + '] FAILED: ' + (error instanceof Error ? error.message : String(error)))
+      }
+      if (diff.unrestorable.length > 0) {
+        outputs.push('unrestorable:\n  ' + diff.unrestorable.join('\n  '))
         ok = false
       }
-    }
-    if (diff.unrestorable.length > 0) {
-      outputs.push('unrestorable:\n  ' + diff.unrestorable.join('\n  '))
-      ok = false
-    }
-    return { ok, exitCode: ok ? 0 : 1, output: outputs.join('\n') }
+      return { ok, exitCode: ok ? 0 : 1, output: outputs.join('\n') }
+    })
   }
 
   /**
@@ -1363,7 +1385,11 @@ export class PluginManagerService extends Service {
     return enqueueMutation(async () => {
       const dir = profileDir(profile)
       if (!existsSync(dir)) return { ok: false, exitCode: 1, output: 'profile not found: ' + profile }
-      const analysis = analyzeProfile(dir, readBundles(profile), readPatch(dir), new Set(), [])
+      // Same disabled-row source as analyze(): an empty set pretends nothing
+      // is disabled, so auto-fix would "repair" deliberate disables.
+      const liveRows = profile === hostProfileName() ? liveRowStates(this.ctx) : []
+      const disabledNames = new Set(liveRows.filter(row => !row.enabled).map(row => row.moduleName))
+      const analysis = analyzeProfile(dir, readBundles(profile), readPatch(dir), disabledNames, [])
       const auto = analysis.issues.filter(issue => issue.fix !== undefined && !issue.fix!.confirm)
       if (auto.length === 0) return { ok: true, exitCode: 0, output: 'nothing to auto-fix' }
       const outputs: string[] = []
@@ -1471,13 +1497,20 @@ export class PluginManagerService extends Service {
       if (names.length === 0) {
         return { ok: false, exitCode: 1, output: 'install record for ' + key + ' has no package names' }
       }
+      // One mutation for the whole batch (same reasoning as copyPlugins,
+      // audit C3): separately enqueued per-name removals would let a
+      // concurrent install/toggle interleave between names and interleave
+      // manifest snapshots and patch rows. Inner (non-enqueuing) variant —
+      // the batch already holds the mutex.
       const outputs: string[] = []
       let ok = true
-      for (const name of names) {
-        const result = await removeProtected(this.ctx, targetProfile, name)
-        outputs.push(result.output)
-        if (!result.ok) ok = false
-      }
+      await enqueueMutation(async () => {
+        for (const name of names) {
+          const result = await removeProtectedInner(this.ctx, targetProfile, name)
+          outputs.push(result.output)
+          if (!result.ok) ok = false
+        }
+      })
       if (!ok) {
         // A failed package removal must keep the record — the package is
         // still installed (audit M6).
@@ -1639,14 +1672,19 @@ export class PluginManagerService extends Service {
           if (impl?.fiber?.state === 2 && typeof impl.name === 'string') activeServices.add(impl.name)
         }
       }
-      const analysis = analyzeProfile(dir, bundles, patch, disabledNames, [])
+      // The one static sweep feeds BOTH purposes: its result carries the
+      // load-failure extras, and the pending-dependency diagnostics derived
+      // from it are appended to that same result — a second full sweep
+      // (the dominant /analyze cost) would only duplicate this output.
+      const analysis = analyzeProfile(dir, bundles, patch, disabledNames, extra)
+      const pendingIssues: AnalyzeIssue[] = []
       for (const pkg of analysis.packages) {
         if (pkg.injects.length === 0) continue
         const row = liveRows.find(live => live.moduleName === pkg.name)
         if (row === undefined || row.phase !== 'pending') continue
         const missing = pkg.injects.filter(name => !activeServices.has(name) && name !== 'loader' && name !== 'webServer')
         if (missing.length > 0) {
-          extra.push({
+          pendingIssues.push({
             kind: 'pending-dependency',
             from: pkg.name,
             message: pkg.name + ' is pending: it injects ' + missing.join(', ')
@@ -1654,6 +1692,9 @@ export class PluginManagerService extends Service {
           })
         }
       }
+      return pendingIssues.length === 0
+        ? analysis
+        : { ...analysis, issues: [...analysis.issues, ...pendingIssues] }
     }
     return analyzeProfile(dir, bundles, patch, disabledNames, extra)
   }
@@ -1678,15 +1719,11 @@ function execFileTimeout(cmd: string, args: readonly string[], timeoutMs: number
 }
 
 /** Whether a directory is a git repository (cheap probe). */
-function isGitRepo(path: string): boolean {
-  try {
-    const tool = resolveCommand('git')
-    const exec = resolveExec(tool, ['-C', path, 'rev-parse', '--git-dir'])
-    execFileSync(exec.command, exec.args, { stdio: 'ignore', timeout: 5_000, windowsHide: true, env: commandEnv(tool.dir), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) })
-    return true
-  } catch {
-    return false
-  }
+async function isGitRepo(path: string): Promise<boolean> {
+  // Async (never execFileSync): a git probe on the request path must not
+  // freeze the whole web server for up to its timeout.
+  const result = await execFileTimeout('git', ['-C', path, 'rev-parse', '--git-dir'], 5_000)
+  return result.ok
 }
 
 /** Resolve a `link:`/`file:` dependency value to its target path, or null. */
@@ -1850,7 +1887,7 @@ async function checkPackageUpdate(dir: string, name: string, source: string): Pr
     // the service was launched (the same relative-path trap the official
     // workspace package fixed in 0.1.3: qualify paths before realpath/git).
     const localPath = resolve(dir, local)
-    if (!isGitRepo(localPath)) {
+    if (!(await isGitRepo(localPath))) {
       return {
         name,
         hasUpdate: false,
@@ -1975,12 +2012,13 @@ export function gitCommitFromLock(profile: string, packageName: string): string 
 /**
  * Prepare an install source. Git URLs (npm-unpublished repositories,
  * workspace subpackages) are cloned into $DSH_HOME/plugin-manager-src and
- * installed from there — the local-directory path the official CLI also
- * supports. Custom subdir syntax: `repo#路径:packages/x` (the # in normal
- * git specs is a ref/branch). The cache is kept: local-directory installs
- * are pnpm links that need their source to stay in place.
+ * installed from there — the "official path" for repositories that never
+ * reached the registry — with npm-first when the cloned package is published.
+ * Custom subdir syntax: `repo#路径:packages/x` (the # in normal git specs is
+ * a ref/branch). The cache is kept: local-directory installs are pnpm links
+ * that need their source to stay in place.
  */
-function prepareInstallSource(spec: string): { spec?: string; note?: string; error?: string; packageName?: string; created?: boolean; gitSpec?: string } {
+async function prepareInstallSource(spec: string): Promise<{ spec?: string; note?: string; error?: string; packageName?: string; created?: boolean; gitSpec?: string }> {
   const trimmed = spec.trim()
   const gitUrl = /^(?:git\+)?(https?:\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
   const gitFile = /^file:(\/\/[^\s#]+?)(?:#([^\s]*))?$/.exec(trimmed)
@@ -2021,9 +2059,10 @@ function prepareInstallSource(spec: string): { spec?: string; note?: string; err
       const args = ['clone']
       if (ref !== undefined) args.push('-b', ref)
       args.push('--depth', '1', repo, dest)
-      const tool = resolveCommand('git')
-      const exec = resolveExec(tool, args)
-      execFileSync(exec.command, exec.args, { stdio: 'pipe', timeout: 3 * 60 * 1000, env: commandEnv(tool.dir), ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}) })
+      // Async clone (never execFileSync): a slow network clone must not
+      // freeze the whole web server event loop for up to three minutes.
+      const clone = await execFileTimeout('git', args, 3 * 60 * 1000)
+      if (!clone.ok) return { error: 'git clone failed: ' + (clone.output.trim() || 'git exited non-zero') }
     }
     const pkgDir = subdir !== undefined ? join(dest, subdir) : dest
     // The #路径: subdirectory must stay inside the clone cache — `../../`
@@ -2084,6 +2123,31 @@ interface NpmLatestManifest {
 }
 
 /**
+ * The npm registry base URL, resolved once per process. The value is a
+ * process constant — re-running `npm config get registry` for every version
+ * check multiplied checkUpdates latency by the dependency count (and each
+ * spawn blocked the event loop for up to 5s). The npm_config_registry env
+ * var (npm's own override channel) is consulted first, zero-cost.
+ */
+let npmRegistryBase: string | undefined
+async function resolveNpmRegistry(): Promise<string> {
+  if (npmRegistryBase !== undefined) return npmRegistryBase
+  const fromEnv = process.env.npm_config_registry
+  if (typeof fromEnv === 'string' && /^https?:\/\//.test(fromEnv.trim())) {
+    npmRegistryBase = fromEnv.trim().endsWith('/') ? fromEnv.trim() : fromEnv.trim() + '/'
+    return npmRegistryBase
+  }
+  let registry = 'https://registry.npmjs.org/'
+  const probe = await execFileTimeout('npm', ['config', 'get', 'registry'], 5_000)
+  const trimmed = probe.ok ? probe.output.trim() : ''
+  if (trimmed.length > 0 && /^https?:\/\//.test(trimmed)) {
+    registry = trimmed.endsWith('/') ? trimmed : trimmed + '/'
+  }
+  npmRegistryBase = registry
+  return registry
+}
+
+/**
  * Latest dist-tag manifest of an npm package. Uses the registry's /latest
  * endpoint (a tiny document) instead of `npm view` (which pulls the full
  * packument and routinely exceeds short timeouts on slow networks), through
@@ -2091,21 +2155,7 @@ interface NpmLatestManifest {
  * resolved from the npm config so mirrors and private registries work.
  */
 async function npmRegistryManifest(packageName: string): Promise<NpmLatestManifest | undefined> {
-  let registry = 'https://registry.npmjs.org/'
-  try {
-    const tool = resolveCommand('npm')
-    const exec = resolveExec(tool, ['config', 'get', 'registry'])
-    const config = execFileSync(exec.command, exec.args, {
-      encoding: 'utf8',
-      timeout: 5_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-      env: commandEnv(tool.dir),
-      ...(exec.verbatim ? { windowsVerbatimArguments: true } : {}),
-    })
-    const trimmed = config.trim()
-    if (trimmed.length > 0) registry = trimmed.endsWith('/') ? trimmed : trimmed + '/'
-  } catch { /* registry defaults to npmjs.org */ }
+  const registry = await resolveNpmRegistry()
   // Scoped packages keep their slash: encodeURIComponent would turn the `/`
   // into %2F, which some private registries/proxies 404 (audit M4) — encode
   // each segment instead.
@@ -2237,7 +2287,7 @@ async function installWithSourceInner(ctx: Context | null, profile: string, spec
       }
     }
   }
-  const prepared = prepareInstallSource(spec)
+  const prepared = await prepareInstallSource(spec)
   if (prepared.error !== undefined || prepared.spec === undefined) {
     return { ok: false, exitCode: 1, output: '[plugin-manager] ' + (prepared.error ?? 'no install source') }
   }
@@ -2605,7 +2655,7 @@ export async function installProtected(ctx: Context | null, profile: string, spe
     // Roll back: remove the dependency and any insert row written below.
     await runDshPlugin(profile, 'remove', [installed], process.cwd())
     restoreInBoxBundles(profile, before)
-    cleanupInsertRows(ctx, profile, installed)
+    await cleanupInsertRows(ctx, profile, installed)
     return {
       ok: false,
       exitCode: 1,
@@ -2735,7 +2785,7 @@ async function removeProtectedInner(ctx: Context | null, profile: string, name: 
   let result = await runDshPlugin(profile, 'remove', [name], process.cwd())
   if (result.ok) {
     restoreInBoxBundles(profile, before)
-    cleanupInsertRows(ctx, profile, name)
+    await cleanupInsertRows(ctx, profile, name)
     removeDisableBlocks(profile, orphanedIds)
     // Live-unmount every loader row mounting the removed package in the
     // running profile. pnpm remove only rewrites the manifest and deletes
@@ -2829,12 +2879,13 @@ function removeDisableBlocks(profile: string, rowIds: readonly string[]): void {
   try {
     const dir = profileDir(profile)
     const path = patchPath(dir)
-    let next = readPatch(dir)
+    const original = readPatch(dir)
+    let next = original
     for (const id of rowIds) {
       const cleaned = removeDisableBlock(next, id)
       if (cleaned !== next) next = cleaned
     }
-    if (next !== readPatch(dir)) writePatch(path, next)
+    if (next !== original) writePatch(path, next)
   } catch { /* block cleanup is best-effort */ }
 }
 
@@ -2881,7 +2932,7 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
   }
   const before = readBundles(profile)
   const local = parseLocalSource(source)
-  if (local !== null && isGitRepo(resolve(dir, local))) {
+  if (local !== null && (await isGitRepo(resolve(dir, local)))) {
     // Git-cache update: fetch + hard reset the cache to its remote ref.
     // The previous HEAD is remembered so a failed quality gate can restore
     // the cache (gitPullToRemote already discarded the old worktree — the
@@ -3307,6 +3358,19 @@ function scanRunsCached(): Map<string, RunInfo> {
   scanRunsCache = { at: Date.now(), value }
   return value
 }
+
+/**
+ * Cheap liveness probe: signal 0 throws ESRCH only when the pid is gone.
+ * EPERM still means the process exists (owned by someone else).
+ */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error: unknown) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
 /** Result of trying to open a terminal window. */
 interface TerminalOpen {
   readonly opened: boolean
@@ -3431,6 +3495,9 @@ function probePort(port: number): Promise<boolean> {
       socket.destroy()
       resolve(ok)
     }
+    // A silently dropped SYN (firewall) would otherwise leave the promise
+    // unsettled forever and hang the start-readiness loop.
+    socket.setTimeout(1_000, () => done(false))
     socket.once('connect', () => done(true))
     socket.once('error', () => done(false))
   })
@@ -3516,48 +3583,58 @@ async function fetchCatalogItems(): Promise<MarketplaceItem[]> {
   } catch { /* tombstones are advisory */ }
 
   const seen = new Map<string, MarketplaceItem>()
-  for (const file of files) {
-    try {
-      const response = await marketplaceFetch(file.download_url, { headers: GITHUB_UA })
-      if (!response.ok) continue
-      const entry = await response.json() as CatalogEntry
-      const id = typeof entry.id === 'string' ? entry.id : ''
-      if (id.length > 0 && tombstoned.has(id)) continue
-      const curation = typeof entry.curation?.state === 'string' ? entry.curation.state : ''
-      if (curation === 'rejected' || curation === 'removed' || curation === 'blocked') continue
-      const lifecycle = typeof entry.lifecycle?.state === 'string' ? entry.lifecycle.state : ''
-      if (lifecycle === 'deleted') continue
-      const fullName = typeof entry.repository?.full_name === 'string' ? entry.repository.full_name : ''
-      const url = typeof entry.repository?.url === 'string' ? entry.repository.url : ''
-      if (fullName.length === 0 || url.length === 0) continue
-      if (fullName.startsWith('deepseek-ai/')) continue
-      const packageName = typeof entry.package?.name === 'string' ? entry.package.name : ''
-      const category = typeof entry.curation?.category === 'string' ? entry.curation.category : ''
-      const description = typeof entry.curation?.description_zh === 'string' ? entry.curation.description_zh : ''
-      const status = catalogStatus(entry)
-      const item: MarketplaceItem = {
-        name: fullName,
-        displayName: fullName.split('/').pop() ?? fullName,
-        ...(description.length > 0 ? { description } : {}),
-        stars: 0,
-        updatedAt: '',
-        createdAt: '',
-        url,
-        status,
-        installed: false,
-        updateAvailable: false,
-        ...(packageName.length > 0 ? { packageName } : {}),
-        ...(category.length > 0 ? { category } : {}),
-        ...(lifecycle.length > 0 ? { lifecycle } : {}),
-      }
-      // Deduplicate by repository; a verified listing wins over a candidate.
-      const existing = seen.get(fullName)
-      const verified = (value: MarketplaceItem | undefined): boolean => (value?.status ?? '').includes('✅')
-      if (existing === undefined || (verified(item) && !verified(existing))) {
-        seen.set(fullName, item)
-      }
-    } catch { /* skip one broken entry */ }
-  }
+  // Bounded concurrency: every entry is its own HTTP round trip — a serial
+  // loop paid list-size × RTT on every refresh. 8 workers keep us polite
+  // toward the catalog host without a serial tail; each entry parses
+  // independently, so one failure skips only itself.
+  const WORKERS = 8
+  let cursor = 0
+  await Promise.all(Array.from({ length: Math.min(WORKERS, files.length) }, async () => {
+    while (cursor < files.length) {
+      const file = files[cursor]!
+      cursor += 1
+      try {
+        const response = await marketplaceFetch(file.download_url, { headers: GITHUB_UA })
+        if (!response.ok) continue
+        const entry = await response.json() as CatalogEntry
+        const id = typeof entry.id === 'string' ? entry.id : ''
+        if (id.length > 0 && tombstoned.has(id)) continue
+        const curation = typeof entry.curation?.state === 'string' ? entry.curation.state : ''
+        if (curation === 'rejected' || curation === 'removed' || curation === 'blocked') continue
+        const lifecycle = typeof entry.lifecycle?.state === 'string' ? entry.lifecycle.state : ''
+        if (lifecycle === 'deleted') continue
+        const fullName = typeof entry.repository?.full_name === 'string' ? entry.repository.full_name : ''
+        const url = typeof entry.repository?.url === 'string' ? entry.repository.url : ''
+        if (fullName.length === 0 || url.length === 0) continue
+        if (fullName.startsWith('deepseek-ai/')) continue
+        const packageName = typeof entry.package?.name === 'string' ? entry.package.name : ''
+        const category = typeof entry.curation?.category === 'string' ? entry.curation.category : ''
+        const description = typeof entry.curation?.description_zh === 'string' ? entry.curation.description_zh : ''
+        const status = catalogStatus(entry)
+        const item: MarketplaceItem = {
+          name: fullName,
+          displayName: fullName.split('/').pop() ?? fullName,
+          ...(description.length > 0 ? { description } : {}),
+          stars: 0,
+          updatedAt: '',
+          createdAt: '',
+          url,
+          status,
+          installed: false,
+          updateAvailable: false,
+          ...(packageName.length > 0 ? { packageName } : {}),
+          ...(category.length > 0 ? { category } : {}),
+          ...(lifecycle.length > 0 ? { lifecycle } : {}),
+        }
+        // Deduplicate by repository; a verified listing wins over a candidate.
+        const existing = seen.get(fullName)
+        const verified = (value: MarketplaceItem | undefined): boolean => (value?.status ?? '').includes('✅')
+        if (existing === undefined || (verified(item) && !verified(existing))) {
+          seen.set(fullName, item)
+        }
+      } catch { /* skip one broken entry */ }
+    }
+  }))
   if (seen.size === 0) throw new Error('no usable entries parsed from the catalog')
   return [...seen.values()]
 }
@@ -4241,7 +4318,7 @@ function slugify(name: string): string {
  * (the package directory is gone) — the bug that took the instance down
  * during V2 testing.
  */
-function cleanupInsertRows(ctx: Context | null, profile: string, packageName: string): void {
+async function cleanupInsertRows(ctx: Context | null, profile: string, packageName: string): Promise<void> {
   try {
     const dir = profileDir(profile)
     const current = readPatch(dir)
@@ -4256,7 +4333,15 @@ function cleanupInsertRows(ctx: Context | null, profile: string, packageName: st
         ops.push({ kind: 'remove-first', value: { insert: [{ id: row.id, name: row.name }] } })
       }
     }
-    if (ops.length > 0 && ctx !== null && profile === hostProfileName()) void applyLiveOps(ctx, ops)
+    if (ops.length > 0 && ctx !== null && profile === hostProfileName()) {
+      // The live half must not fail silently: a stuck entry is the exact
+      // issue-#10 hazard (half-mounted loader tree) — log it for diagnosis.
+      const live = await applyLiveOps(ctx, ops)
+      if (!live.ok) {
+        console.error('[plugin-manager] insert-row live cleanup failed for ' + packageName
+          + ': ' + (live.message ?? 'unknown error') + ' — restart the profile to finish')
+      }
+    }
     if (next !== current) writePatch(patchPath(dir), next)
   } catch {
     /* patch cleanup is best-effort */
@@ -4649,6 +4734,9 @@ export function apply(ctx: Context, config: PluginManagerConfig): void {
   const host = hostProfileName()
   if (host !== null) {
     ensurePatchWatcher(ctx, patchPath(profileDir(host)))
+    // Final unload must stop the watcher too: the fs handle would otherwise
+    // outlive the plugin and keep recomposing into a dead loader tree.
+    ctx.effect(() => () => { closePatchWatcher() }, 'dsh-web-plugin-manager: patch watcher')
   }
   // webServer is a sibling include-group row; ctx.inject waits for it like
   // the official agent-tool-presentation waits for codeRuntime.

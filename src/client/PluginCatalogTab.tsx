@@ -13,6 +13,7 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import type { MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry } from '../types.ts'
 import { fuzzyScore } from '../rank.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
+import { PM_CARD_CSS, useConfirm } from './shared.ts'
 import { PmSelect } from './PmSelect.tsx'
 
 /** Registration-side Remote face provided by the section. */
@@ -38,7 +39,9 @@ export type CatalogSort = 'default' | 'az' | 'enabled'
 type ViewState =
   | { readonly status: 'loading' }
   | { readonly status: 'error'; readonly message: string }
-  | { readonly status: 'ready'; readonly snapshot: PluginManagerSnapshot }
+  // snapshot stays optional: a profile list with no entries renders the
+  // ready-empty state (no `undefined as unknown` casts).
+  | { readonly status: 'ready'; readonly snapshot?: PluginManagerSnapshot }
 
 /** Official --dsw-* token styles (mirrors the official inventory tab). */
 const styles: Record<string, React.CSSProperties> = {
@@ -154,8 +157,11 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
   const [descending, setDescending] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
   // 行内二次确认：停用是危险操作（依赖它的条目可能拖垮 profile），
-  // 第一次点击只点亮确认态，再点才执行——替代 window.confirm 弹窗。
-  const [confirmKey, setConfirmKey] = useState<string | null>(null)
+  // 第一次点击只点亮确认态，再点才执行，4 秒无操作自动复位。
+  const [confirmKey, setConfirmKey] = useConfirm()
+  // Toggle/mount failures render here (window.alert blocks the main thread
+  // and offered no visible trail).
+  const [actionError, setActionError] = useState('')
 
   // Stable identity for the once-only boot effect: injected faces may be
   // rebuilt by the slot renderer on parent re-renders, and depending on them
@@ -175,7 +181,7 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
         setSelected(current.name)
         load(current.name)
       } else {
-        setState({ status: 'ready', snapshot: undefined as unknown as PluginManagerSnapshot })
+        setState({ status: 'ready' })
       }
     }, (error: unknown) => {
       setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
@@ -186,22 +192,31 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
   // Request sequence guard: a slow response from an earlier profile must not
   // overwrite the state of the currently selected one (audit M8).
   const loadSeq = useRef(0)
-  const load = (profile: string): void => {
-    if (profile.length === 0) return
+  /** Returns the in-flight request so callers can chain busy handling. */
+  const load = (profile: string): Promise<void> => {
+    if (profile.length === 0) return Promise.resolve()
     const seq = ++loadSeq.current
     // Keep showing the previous snapshot during refreshes so the page does
     // not collapse to the top (only the first load shows the loading state).
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
-    void injected.current.list(profile).then(
+    return injected.current.list(profile).then(
       (snapshot) => { if (seq === loadSeq.current) setState({ status: 'ready', snapshot }) },
       (error: unknown) => { if (seq === loadSeq.current) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) }) },
     )
+  }
+
+  /** Refresh button: guarded against repeated clicks, with feedback. */
+  const onRefresh = (): void => {
+    if (selected.length === 0) return
+    setBusy('refresh')
+    void load(selected).finally(() => setBusy(null))
   }
 
   const onSelect = (name: string): void => {
     setSelected(name)
     setExpanded(null)
     setConfirmKey(null)
+    setActionError('')
     load(name)
   }
 
@@ -213,12 +228,16 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
     }
     setConfirmKey(null)
     setBusy(entryId)
+    setActionError('')
     try {
       const result = await injected.current.setEnabled(selected, entryId, enable)
+      // A graceful failure (HTTP 200 + ok:false) must not look like a
+      // no-op — the message explains why nothing changed.
+      if (!result.ok) setActionError(result.message)
       setExpanded(null)
       load(selected)
     } catch (error: unknown) {
-      window.alert((error instanceof Error ? error.message : String(error)))
+      setActionError(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(null)
     }
@@ -228,13 +247,14 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
   const onMount = async (packageName: string): Promise<void> => {
     if (selected.length === 0) return
     setBusy(packageName)
+    setActionError('')
     try {
       const result = await injected.current.mount(selected, packageName)
+      if (!result.ok) setActionError(result.message)
       setExpanded(null)
       load(selected)
-      if (!result.ok) window.alert(result.message)
     } catch (error: unknown) {
-      window.alert((error instanceof Error ? error.message : String(error)))
+      setActionError(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(null)
     }
@@ -275,10 +295,14 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
     if (expanded !== null && !rows.some(entry => entry.entryId === expanded)) setExpanded(null)
   }, [expanded, rows])
 
+  // Precomputed phase dot styles (was rebuilt per row per render).
+  const DOT_ACTIVE = { ...styles.statusDot, ...styles.statusDotActive }
+  const DOT_FAILED = { ...styles.statusDot, ...styles.statusDotFailed }
+  const DOT_LOADING = { ...styles.statusDot, ...styles.statusDotLoading }
   const dotStyle = (phase: string | null): React.CSSProperties => {
-    if (phase === 'active') return { ...styles.statusDot, ...styles.statusDotActive }
-    if (phase === 'failed') return { ...styles.statusDot, ...styles.statusDotFailed }
-    if (phase === 'loading' || phase === 'pending') return { ...styles.statusDot, ...styles.statusDotLoading }
+    if (phase === 'active') return DOT_ACTIVE
+    if (phase === 'failed') return DOT_FAILED
+    if (phase === 'loading' || phase === 'pending') return DOT_LOADING
     return styles.statusDot
   }
 
@@ -302,22 +326,12 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
 
   return (
     <div style={styles.section}>
-      <style>{`
-.pm-card {
-  min-width: 0; overflow: hidden;
-  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-3);
-}
-.pm-card[data-open='true'] { border-color: var(--dsw-alias-border-l1); }
+      <style>{PM_CARD_CSS + `
 .pm-card[data-modified='true'] {
   border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 55%, transparent);
 }
 .pm-card[data-modified='true'][data-open='true'] {
   border-color: var(--dsw-alias-state-warn-secondary);
-}
-.pm-card-content:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: -2px;
 }
 `}</style>
       <div style={styles.toolbar}>
@@ -329,11 +343,12 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
           options={profileList.map(profile => ({ value: profile.name, label: profile.name }))}
           onChange={onSelect}
         />
-        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={() => load(selected)}>
-          {t('refresh')}
+        <Button size="sm" variant="ghost" disabled={selected.length === 0 || busy !== null} onClick={onRefresh}>
+          {busy === 'refresh' ? t('refreshing') : t('refresh')}
         </Button>
       </div>
 
+      {actionError.length > 0 && <p style={styles.error} role="alert">{t('error')}: {actionError}</p>}
       {state.status === 'error' && <p style={styles.error} role="alert">{t('error')}: {state.message}</p>}
       {state.status === 'loading' && <p style={styles.status} aria-busy="true">{t('loading')}</p>}
 
@@ -397,6 +412,7 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
                   <li
                     key={entry.entryId}
                     className="pm-card"
+                    style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 53px' }}
                     data-plugin-entry={entry.entryId}
                     data-open={open ? 'true' : undefined}
                     data-modified={entry.modified && !entry.installed ? 'true' : undefined}
