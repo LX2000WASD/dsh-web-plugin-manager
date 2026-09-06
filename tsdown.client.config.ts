@@ -9,8 +9,17 @@
  */
 import { defineConfig } from 'tsdown'
 
+// Mirrors the official PLATFORM_MODULES seed table
+// (deepseek-harness/packages/client/web/src/platform.ts). Anything on the
+// table MUST stay external: the shell shares one frozen instance, and
+// inlining a second copy splits module identity. Anything off the table must
+// NOT be external — a require() the seed table cannot answer throws
+// "missed the module table" and aborts the whole client boot.
 const PLATFORM = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
+  '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
 ]
 

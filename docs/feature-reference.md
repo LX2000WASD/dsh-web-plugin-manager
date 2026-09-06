@@ -124,6 +124,9 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）
 - 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
 - Client：`src/client/` —— `settings.plugins.tab`（all 遮蔽官方只读列表 + manager + environments）+ `settings.section`（marketplace）；同源 fetch 调 REST（不走 Typert Remote）
+- Client 构建约束（`tsdown.client.config.ts` 的 `PLATFORM`）：只有官方平台种子表内的说明符可以 external，其余一律内联。种子表见 `deepseek-harness/packages/client/web/src/platform.ts` 的 `PLATFORM_MODULES`，当前为 react 四项 + `@deepseek-ai/cordis`、`dsh-client-store`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`。
+  - external 了表外的包 → 浏览器抛 `require("x") missed the module table`，**整个插件页面启动中断**（所有插件 UI 全部消失，不只是出错的那个）；内联了表内的包 → 模块身份分裂（两份实例，服务/上下文对不上）。
+  - 这张表会随 DSH 版本变动：0.1.2-alpha.1 删掉了 `@deepseek-ai/dsh-client-runtime`、加入了 `dsh-client-store`。升级 DSH 后需比对该表并重新构建产物。
 
 ## 已知限制明细
 

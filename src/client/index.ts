@@ -8,8 +8,14 @@
  */
 
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+// ClientContext is the cordis browser Context. The former
+// @deepseek-ai/dsh-client-runtime package that re-exported it was deleted in
+// DSH 0.1.2-alpha.1 (refactor(client): migrate consumers and remove Runtime).
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: pulls the SlotRegistry service merge (ctx.slots). ui-renderer,
+// not the removed runtime package, owns that Context merge since 0.1.2.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {
   AnalyzeResult, BackupDiffResult, BackupFile, CommandResult, KindListView, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
   UpdateCheckResult,
