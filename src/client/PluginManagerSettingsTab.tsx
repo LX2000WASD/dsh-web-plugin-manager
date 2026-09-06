@@ -105,7 +105,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   detailsRow: { display: 'contents' },
   link: {
-    color: 'var(--dsw-alias-state-business-primary)', textDecoration: 'none', overflowWrap: 'anywhere',
+    color: 'var(--dsw-alias-link, var(--dsw-alias-state-business-primary))',
+    fontWeight: 500, textDecoration: 'none', overflowWrap: 'anywhere',
   },
   output: {
     maxHeight: '200px', overflow: 'auto', whiteSpace: 'pre-wrap',
@@ -172,7 +173,6 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   const [fixing, setFixing] = useState<string | null>(null)
   const [confirmKey, setConfirmKey] = useState<string | null>(null)
   const [fixedKeys, setFixedKeys] = useState<Set<string>>(new Set())
-
   // Stable identity for the once-only boot effect (see PluginCatalogTab).
   const injected = useRef({ profiles, list, install, remove, removeInsert, copyPlugins, checkUpdates, update, analyze, fixIssue, fixAll })
 
@@ -220,6 +220,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     // dangling across a profile switch (audit M9 / m-1).
     setEnvQuestions(null)
     setOutput('')
+    // 确认态（fix/remove/uninstall 共用，键空间互不相交）随 profile 复位。
+    setConfirmKey(null)
     load(name)
   }
 
@@ -351,7 +353,13 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   }
 
   const onRemove = async (name: string): Promise<void> => {
-    if (!window.confirm(t('confirmRemove'))) return
+    // 行内二次确认（键前缀与 fix 流程互不相交）：第一次点击只点亮确认态。
+    const key = 'remove:' + name
+    if (confirmKey !== key) {
+      setConfirmKey(key)
+      return
+    }
+    setConfirmKey(null)
     setBusy(name)
     try {
       const result = await remove(selected, name)
@@ -365,7 +373,12 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   }
 
   const onUninstall = async (rowId: string): Promise<void> => {
-    if (!window.confirm(t('confirmUninstall'))) return
+    const key = 'uninstall:' + rowId
+    if (confirmKey !== key) {
+      setConfirmKey(key)
+      return
+    }
+    setConfirmKey(null)
     setBusy(rowId)
     try {
       const result = await removeInsert(selected, rowId)
@@ -435,6 +448,15 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 }
 .pm-card[data-updatable='true'][data-open='true'] {
   border-color: var(--dsw-alias-state-success-secondary);
+}
+/* 链接语言对齐官方（0.1.3 alias-link）：hover/focus 点状下划线。
+   颜色令牌带 fallback——0.1.2 平台还没有 --dsw-alias-link。 */
+.pm-link {
+  color: var(--dsw-alias-link, var(--dsw-alias-state-business-primary));
+}
+.pm-link:hover, .pm-link:focus-visible {
+  text-decoration: underline dotted var(--dsw-alias-link, var(--dsw-alias-state-business-primary));
+  text-underline-offset: 3px;
 }
 .pm-card-content:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
@@ -616,7 +638,7 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                             <dt>{t('repository')}</dt>
                             <dd>
                               {pkg.repository !== undefined ? (
-                                <a href={pkg.repository} target="_blank" rel="noreferrer" style={styles.link}>
+                                <a href={pkg.repository} target="_blank" rel="noreferrer" className="pm-link" style={styles.link}>
                                   {pkg.repository}
                                 </a>
                               ) : t('unknown')}
@@ -654,8 +676,14 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                           >
                             {busy === 'update:' + pkg.name ? t('updating') : t('updateButton')}
                           </Button>
-                          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRemove(pkg.name)}>
-                            {t('removeButton')}
+                          <Button
+                            size="sm"
+                            variant={confirmKey === 'remove:' + pkg.name ? 'primary' : 'ghost'}
+                            disabled={busy !== null}
+                            title={t('confirmRemove')}
+                            onClick={() => void onRemove(pkg.name)}
+                          >
+                            {confirmKey === 'remove:' + pkg.name ? t('fixConfirm') : t('removeButton')}
                           </Button>
                         </div>
                       </div>
@@ -682,8 +710,14 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                     </span>
                     <span style={{ marginLeft: 'auto' }}>
                       {row.managed && (
-                        <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onUninstall(row.id)}>
-                          {t('uninstallButton')}
+                        <Button
+                          size="sm"
+                          variant={confirmKey === 'uninstall:' + row.id ? 'primary' : 'ghost'}
+                          disabled={busy !== null}
+                          title={t('confirmUninstall')}
+                          onClick={() => void onUninstall(row.id)}
+                        >
+                          {confirmKey === 'uninstall:' + row.id ? t('fixConfirm') : t('uninstallButton')}
                         </Button>
                       )}
                     </span>

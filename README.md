@@ -68,7 +68,7 @@ git 源插件需要安装期环境变量时，CLI 会打印缺失变量清单并
 | 更新 | 检查更新（npm dist-tag / git HEAD / 安装 commit），更新带质量门与回滚；含管理器自身（自更新）——管理页可直接点更新升级，失败自动装回旧版本 |
 | 健康检查 | 依赖图/缺失/循环/重复行 id/同名注册冲突（服务/工具/section/路由）/peer 版本/官方包重复；运行中追加 pending 与失败诊断；A 级问题一键修复、B 级建议确认后修复 |
 | 环境管理 | 启停、复制/转移插件、创建/重命名/删除 profile（官方 profile 只读）、备份导出/导入恢复（差异对比后逐项受保护恢复） |
-| 市场 | 静态索引（topic:dsh-plugin 全量 ~3100 条，多源兜底 + gzip + 磁盘缓存 + 新鲜度门控）+ awesome 精选覆盖层 + dsh.so 独立验证/安全扫描徽标（L1-L5 + 风险等级叠加）；服务端已安装判定（包名/repository 双向/git 源/目录探测）；更新检测（索引版本对比）；同名包冲突消解；24h 缓存、超时预算、代理支持、失败负缓存 |
+| 市场 | 静态索引（topic:dsh-plugin 全量 ~3100 条，多源兜底 + gzip + 磁盘缓存 + 新鲜度门控）+ awesome 精选覆盖层 + dsh.so 独立验证/安全扫描徽标（L1-L5 + 风险等级叠加）；服务端已安装判定（包名/repository 双向/git 源/目录探测）；更新检测（索引版本对比）；同名包冲突消解；模糊搜索 + 相关性排序（`plgmgr` 命中 `plugin-manager`，官方 rankByName 算法长名适配版）；24h 缓存、超时预算、代理支持、失败负缓存 |
 | agent 工具 | plugin_status/search/install/uninstall/toggle + 安装守卫（拦截裸命令并引导）+ 提示词注入；plugin_search 自然语言检索市场（name/topics/描述加权），结果提示安装前先浏览仓库 |
 
 功能与限制的详细说明见 [docs/feature-reference.md](docs/feature-reference.md)（随仓库与 npm 包发布）。
@@ -81,8 +81,9 @@ git 源插件需要安装期环境变量时，CLI 会打印缺失变量清单并
 - Patch 编辑：`src/patch.ts` —— managed 标记块追加/移除（insert/disable 双类型识别）、行级操作、原子写入（tmp + rename）；处理 YAML 陷阱（`@` 包名引号、空数组文档、纯注释文件恢复模板）
 - 环境变量扫描：`src/scan.ts` —— git 源安装期 env 需求扫描（2 层/40 文件/8 变量上限）+ 子进程 env 敏感键剔除；`src/installSession.ts` 会话状态机（15 分钟 TTL、answers 白名单校验）
 - Agent 工具：`src/tools.ts` —— 依赖注入避免循环依赖；安装守卫 `src/guard.ts` 拒绝裸 `dsh plugin`/npm/yarn/bun/pnpm 变更命令（只读 verb 放行），拒绝原因直接指路 `plugin_*` 工具与 `dshpm`；`systemPrompt.section` 常驻提示同一条规则
+- 模糊打分：`src/rank.ts` —— vendor 自官方 0.1.3-alpha.1 `rankByName` 的有序子序列对齐算法（长仓库名适配版），client/host 共用纯函数
 - CLI：`src/cli.ts` —— 复用受保护链路（ctx 可空：无宿主进程时跳过 live 应用，文件级操作与 Web UI 完全一致）
-- Client：`src/client/` —— 注册 `settings.plugins.tab`（遮蔽官方只读列表 + manager）+ `settings.section`（marketplace/kinds）；同源 fetch 调 REST
+- Client：`src/client/` —— 注册 `settings.plugins.tab`（遮蔽官方只读列表 + manager）+ `settings.section`（marketplace/kinds）；同源 fetch 调 REST；危险操作行内二次确认（无弹窗）
 - 通信：官方 webServer 路由 + 同源 fetch（不走 Typert Remote）
 
 ## 已知限制

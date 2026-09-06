@@ -342,7 +342,7 @@ export class PluginManagerService extends Service {
   /** List every profile under $DSH_HOME/profiles (directories with package.json). */
   listProfiles(): ProfileInfo[] {
     const root = join(dshHome(), 'profiles')
-    const runs = scanRuns()
+    const runs = scanRunsCached()
     const out: ProfileInfo[] = []
     for (const entry of readdirSafe(root)) {
       if (!entry.isDirectory() || entry.name === 'node_modules') continue
@@ -855,7 +855,7 @@ export class PluginManagerService extends Service {
         dependencies: packages.map(p => p.name),
         isCurrent: Object.keys(deps).includes(OUR_PACKAGE_NAME),
         isOfficial: isOfficialProfile(profile),
-        running: scanRuns().get(profile) ?? null,
+        running: scanRunsCached().get(profile) ?? null,
       },
       entries: allEntries,
       packages,
@@ -1844,7 +1844,13 @@ async function checkPackageUpdate(dir: string, name: string, source: string): Pr
   const installed = readPackageInfo(dir, name).version
   const local = parseLocalSource(source)
   if (local !== null) {
-    if (!isGitRepo(local)) {
+    // link:/file: targets resolve relative to the profile directory (pnpm
+    // semantics — the manifest location), NOT the host cwd: handing a
+    // relative path to `git -C` would silently resolve it against wherever
+    // the service was launched (the same relative-path trap the official
+    // workspace package fixed in 0.1.3: qualify paths before realpath/git).
+    const localPath = resolve(dir, local)
+    if (!isGitRepo(localPath)) {
       return {
         name,
         hasUpdate: false,
@@ -1853,7 +1859,7 @@ async function checkPackageUpdate(dir: string, name: string, source: string): Pr
         message: 'installed from a local directory — no upstream to compare',
       }
     }
-    const git = await gitRemoteState(local)
+    const git = await gitRemoteState(localPath)
     return {
       name,
       hasUpdate: git.ok && git.hasUpdate,
@@ -2875,15 +2881,16 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
   }
   const before = readBundles(profile)
   const local = parseLocalSource(source)
-  if (local !== null && isGitRepo(local)) {
+  if (local !== null && isGitRepo(resolve(dir, local))) {
     // Git-cache update: fetch + hard reset the cache to its remote ref.
     // The previous HEAD is remembered so a failed quality gate can restore
     // the cache (gitPullToRemote already discarded the old worktree — the
     // audit found the old rollback merely removed the package while the
     // cache stayed on the broken new code and the message claimed a
     // rollback that never happened).
-    const oldHead = await execFileTimeout('git', ['-C', local, 'rev-parse', 'HEAD'], 10_000)
-    const updated = await gitPullToRemote(local)
+    const cacheDir = resolve(dir, local)
+    const oldHead = await execFileTimeout('git', ['-C', cacheDir, 'rev-parse', 'HEAD'], 10_000)
+    const updated = await gitPullToRemote(cacheDir)
     if (!updated.ok) {
       return { ok: false, exitCode: 1, output: '[plugin-manager] git update failed: ' + updated.message }
     }
@@ -2892,8 +2899,8 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
     // tree and its dependencies resolve (a link install cannot reach the
     // profile/fallback node_modules). This also migrates legacy link
     // installs to the protocol form.
-    const gitSpec = await gitSpecFromCache(local)
-    const result = await runDshPlugin(profile, 'add', [gitSpec ?? local], process.cwd())
+    const gitSpec = await gitSpecFromCache(cacheDir)
+    const result = await runDshPlugin(profile, 'add', [gitSpec ?? cacheDir], process.cwd())
     if (!result.ok) return result
     restoreInBoxBundles(profile, before)
     const issues = qualityIssues(profile, name)
@@ -2903,7 +2910,7 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
       // when it was installed).
       let restoreNote = ''
       if (oldHead.ok && oldHead.output.trim().length > 0) {
-        const restored = await execFileTimeout('git', ['-C', local, 'reset', '--hard', oldHead.output.trim()], 20_000)
+        const restored = await execFileTimeout('git', ['-C', cacheDir, 'reset', '--hard', oldHead.output.trim()], 20_000)
         if (restored.ok) restoreNote = '\n[plugin-manager] cache restored to the previous commit '
           + oldHead.output.trim().slice(0, 12)
         else restoreNote = '\n[plugin-manager] WARNING: could not restore the cache (' + restored.output.trim().slice(0, 120) + ')'
@@ -2916,7 +2923,7 @@ async function updateProtectedInner(profile: string, name: string, locale?: 'zh'
         : undefined
       const reinstall = await runDshPlugin(
         profile, 'add',
-        [oldCommit !== undefined ? gitSpec + '#' + oldCommit : (gitSpec ?? local)],
+        [oldCommit !== undefined ? gitSpec + '#' + oldCommit : (gitSpec ?? cacheDir)],
         process.cwd(),
       )
       restoreInBoxBundles(profile, before)
@@ -3282,6 +3289,23 @@ function scanRuns(): Map<string, RunInfo> {
     })
   }
   return out
+}
+
+/**
+ * scanRuns 结果的短 TTL 缓存。一次页面加载会连续触发 listProfiles + list
+ * （每次都 spawn 一个 `ps` 全表扫描；Windows 上是 powershell CIM 查询，
+ * 可达数秒）——运行状态变化频率低，3s 内共享一份扫描对读路径不可感知。
+ * start/stop 的轮询判定必须看到即时变化，保持走 scanRuns() 实时扫描。
+ */
+const SCAN_RUNS_TTL_MS = 3_000
+let scanRunsCache: { at: number; value: Map<string, RunInfo> } | null = null
+function scanRunsCached(): Map<string, RunInfo> {
+  if (scanRunsCache !== null && Date.now() - scanRunsCache.at < SCAN_RUNS_TTL_MS) {
+    return scanRunsCache.value
+  }
+  const value = scanRuns()
+  scanRunsCache = { at: Date.now(), value }
+  return value
 }
 /** Result of trying to open a terminal window. */
 interface TerminalOpen {

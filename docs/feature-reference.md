@@ -70,6 +70,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - **dsh.so 验证/安全叠加**：[dsh.so](https://www.dsh.so) 独立索引（1630 条，全部带 verification L1–L5 + 自动化安全扫描）按仓库名叠加 verification/security 徽标到卡片（TAG 行与 awesome 状态徽标同行，不新增条目、不作安装源）；dsh.so 索引独立磁盘缓存 24h，失败降级不阻塞；注意扫描为静态启发式，`high` 风险可能是误报（如本管理器自身也被标 high）——徽标是"装前留意"信号，最终判定仍是安装质量门
 - **已安装判定在服务端**（每请求按目标 profile 计算，12 并发池标注）：① npm 包名（registry pkg_name / 仓库名）② manifest `repository` 双向匹配（同名不同仓库不误判）③ git 缓存源 owner-repo 身份 ④ `~/.dsh/skills|.agent-presets` 目录探测；返回 `installed` / `installedVersion` / `latestVersion`（索引版本字段）/ `updateAvailable`（仅严格更高才提示，回滚不误报）
 - **同名包冲突消解**：同一 pkg_name 只保留一条（已安装优先、否则星数高者），`dropped` 计数透传前端提示「N 个同名包已隐藏」
+- **模糊搜索与相关性排序**（`src/rank.ts`）：搜索框按"有序子序列"对齐打分（vendor 自官方 0.1.3-alpha.1 ui-primitives `rankByName` 算法并做长名适配）——`plgmgr` 能命中 `plugin-manager`，`trmnl` 能命中 `dsh-terminal-panel`；打分规则：分隔符边界（`-`/`_` 后）加分、连续命中强加分、间隔按间距扣分、首字符起始位有界扣分（官方的全局 -index 惩罚在长仓库名上会累计成大负分，已适配）、总分下限 1（名称命中恒不低于描述兜底）；搜索态按相关性排序（同分星数破平），清空搜索恢复所选排序；打分经 `useDeferredValue` 在低优先级渲染中重算，3000+ 条不阻塞键击；目录页（查看 tab）同一算法做过滤
 - 卡片动作：未安装 → 安装；已装无新版 → 绿色「已安装 vX」；已装有新版 → 橙色「更新」（npm 包走受保护 update 链路重写 specifier + 质量门 + 回滚，git-only 源重装）；星数排序时已安装置顶
 - 卡片布局：标题省略号不挤占按钮区；短 meta 行（星数缩写 2.5K / 来源 npm包|git仓库 / 类型占位）；TAG 行（审核状态 + 功能分类本地化）；单/双列切换（localStorage 记忆）；**增量渲染**——首屏 120 条 + 触底加载更多 + `content-visibility: auto`（~3000 条列表不卡顿，无需服务端分页）
 - **缓存**：进程内存镜像（listing 与 profile 无关，切 profile 只重算已安装标记，零磁盘 IO）+ 磁盘 24h 缓存 + 失败负缓存 5min + registry 原始索引缓存；`refresh=1` 是唯一强制网络路径
@@ -122,8 +123,8 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 ## 架构模块
 
 - Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）
-- 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
-- Client：`src/client/` —— `settings.plugins.tab`（all 遮蔽官方只读列表 + manager + environments）+ `settings.section`（marketplace）；同源 fetch 调 REST（不走 Typert Remote）
+- 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；模糊打分：`src/rank.ts`（client/host 共用纯函数）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
+- Client：`src/client/` —— `settings.plugins.tab`（all 遮蔽官方只读列表 + manager + environments）+ `settings.section`（marketplace）；同源 fetch 调 REST（不走 Typert Remote）；危险操作（停用/删除/卸载/删除环境）一律行内二次确认（首击点亮确认态、再击执行，无 window.confirm 弹窗）；链接样式对齐官方 0.1.3 链接语言（`--dsw-alias-link` 令牌带 0.1.2 fallback + hover 点状下划线）
 - Client 构建约束（`tsdown.client.config.ts` 的 `PLATFORM`）：只有官方平台种子表内的说明符可以 external，其余一律内联。种子表见 `deepseek-harness/packages/client/web/src/platform.ts` 的 `PLATFORM_MODULES`，当前为 react 四项 + `@deepseek-ai/cordis`、`dsh-client-store`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`。
   - external 了表外的包 → 浏览器抛 `require("x") missed the module table`，**整个插件页面启动中断**（所有插件 UI 全部消失，不只是出错的那个）；内联了表内的包 → 模块身份分裂（两份实例，服务/上下文对不上）。
   - 这张表会随 DSH 版本变动：0.1.2-alpha.1 删掉了 `@deepseek-ai/dsh-client-runtime`、加入了 `dsh-client-store`。升级 DSH 后需比对该表并重新构建产物。

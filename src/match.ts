@@ -57,12 +57,12 @@ export function findPluginMatches(
 }
 
 /** Whether a dependency value is a git source spec (github:/git+/URL). */
+const GIT_URL_RE = /^https?:\/\//
+const DOT_GIT_RE = /\.git(?:\/|$)/
 export function isGitSourceSpec(source: string): boolean {
   const spec = source.trim()
   if (spec.startsWith('github:') || spec.startsWith('git+') || spec.startsWith('git@')) return true
-  const urlRe = new RegExp('^https?://')
-  const dotGitRe = new RegExp('\\.git(?:/|$)')
-  return urlRe.test(spec) && (dotGitRe.test(spec) || spec.includes('github.com/'))
+  return GIT_URL_RE.test(spec) && (DOT_GIT_RE.test(spec) || spec.includes('github.com/'))
 }
 
 /**

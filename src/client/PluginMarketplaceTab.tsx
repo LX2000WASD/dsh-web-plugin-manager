@@ -10,10 +10,11 @@
  * a ~3000-entry listing stays responsive without server-side paging.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, IconSearchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CommandResult, EnvQuestion, MarketplaceItem, MarketplaceResult, MutationResult, ProfileInfo } from '../types.ts'
+import { fuzzyScore } from '../rank.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { EnvQuestionForm } from './EnvQuestionForm.tsx'
 import { PmSelect } from './PmSelect.tsx'
@@ -145,7 +146,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--dsw-alias-label-primary)', margin: 0,
   },
   link: {
-    color: 'var(--dsw-alias-state-business-primary)', textDecoration: 'none', overflowWrap: 'anywhere',
+    color: 'var(--dsw-alias-link, var(--dsw-alias-state-business-primary))',
+    fontWeight: 500, textDecoration: 'none', overflowWrap: 'anywhere',
   },
 }
 
@@ -291,31 +293,47 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
   }
 
   const items = state.status === 'ready' ? state.result.items : []
-  const normalizedQuery = query.trim().toLocaleLowerCase()
+  // 输入保持即时响应：过滤/排序跟随 deferred 值在低优先级渲染中重算
+  // （3000+ 条 × O(名称×query) 的对齐打分不阻塞键击）。
+  const deferredQuery = useDeferredValue(query)
+  const searchQuery = deferredQuery.trim().toLocaleLowerCase()
   const rows = useMemo(() => {
-    const filtered = items.filter(item => normalizedQuery.length === 0
-      || item.name.toLocaleLowerCase().includes(normalizedQuery)
-      || (item.description ?? '').toLocaleLowerCase().includes(normalizedQuery))
-    const sorted = [...filtered]
-    if (sort === 'az') {
-      sorted.sort((a, b) => a.displayName.localeCompare(b.displayName))
-    } else if (sort === 'updated') {
-      sorted.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    } else if (sort === 'created') {
-      sorted.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    } else {
-      // Stars: installed entries first, then star count (server flags).
-      sorted.sort((a, b) => (b.installed ? 1 : 0) - (a.installed ? 1 : 0) || b.stars - a.stars)
+    if (searchQuery.length === 0) {
+      const sorted = [...items]
+      if (sort === 'az') {
+        sorted.sort((a, b) => a.displayName.localeCompare(b.displayName))
+      } else if (sort === 'updated') {
+        sorted.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      } else if (sort === 'created') {
+        sorted.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      } else {
+        // Stars: installed entries first, then star count (server flags).
+        sorted.sort((a, b) => (b.installed ? 1 : 0) - (a.installed ? 1 : 0) || b.stars - a.stars)
+      }
+      if (descending) sorted.reverse()
+      return sorted
     }
-    if (descending) sorted.reverse()
-    return sorted
-  }, [items, normalizedQuery, sort, descending])
+    // 搜索态：相关性优先（对齐分 desc，同分星数 desc）——与官方 slash
+    // 菜单的排序契约一致（rankByName：前缀/边界 > 连续命中 > 间隔）。
+    // 名称子序列命中为主（已涵盖子串命中），描述子串命中作 1 分兜底，
+    // 保证"名字不匹配但描述匹配"的条目仍可被发现。
+    const hits: Array<{ item: MarketplaceItem; score: number }> = []
+    for (const item of items) {
+      const display = fuzzyScore(item.displayName, searchQuery)
+      const full = fuzzyScore(item.name, searchQuery)
+      const best = display !== null && full !== null ? Math.max(display, full) : (display ?? full)
+      const score = best ?? ((item.description ?? '').toLocaleLowerCase().includes(searchQuery) ? 1 : null)
+      if (score !== null) hits.push({ item, score })
+    }
+    hits.sort((a, b) => b.score - a.score || b.item.stars - a.item.stars)
+    return hits.map(hit => hit.item)
+  }, [items, searchQuery, sort, descending])
 
   // A fresh query/sort resets the incremental window (a new list is not
   // progressively revealed from a stale offset).
   useEffect(() => {
     setVisibleCount(RENDER_BATCH)
-  }, [normalizedQuery, sort, descending])
+  }, [searchQuery, sort, descending])
 
   // Grow the rendered window when the sentinel approaches the viewport.
   useEffect(() => {
@@ -334,6 +352,17 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
 
   return (
     <div style={styles.section}>
+      {/* 链接语言对齐官方（0.1.3 alias-link）：hover/focus 点状下划线。
+          颜色令牌带 fallback——0.1.2 平台还没有 --dsw-alias-link。 */}
+      <style>{`
+.pm-link {
+  color: var(--dsw-alias-link, var(--dsw-alias-state-business-primary));
+}
+.pm-link:hover, .pm-link:focus-visible {
+  text-decoration: underline dotted var(--dsw-alias-link, var(--dsw-alias-state-business-primary));
+  text-underline-offset: 3px;
+}
+`}</style>
       <div style={styles.heading}>
         <h2 style={styles.pageTitle}>{t('marketList')}</h2>
       </div>
@@ -440,7 +469,7 @@ export function PluginMarketplaceTab({ marketplace, profiles, install, update, u
                 return (
                   <li key={item.name} style={styles.card}>
                     <div style={styles.cardRow}>
-                      <a href={item.url} target="_blank" rel="noreferrer" style={{ ...styles.cardTitle, ...styles.link }} title={item.name}>
+                      <a href={item.url} target="_blank" rel="noreferrer" className="pm-link" style={{ ...styles.cardTitle, ...styles.link }} title={item.name}>
                         {item.displayName}
                       </a>
                       <span style={styles.cardAction}>

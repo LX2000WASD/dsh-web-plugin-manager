@@ -107,6 +107,8 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
   const [output, setOutput] = useState('')
+  // 行内二次确认：卸载第一次点击只点亮确认态（替代 window.confirm 弹窗）。
+  const [confirmKey, setConfirmKey] = useState<string | null>(null)
 
   const injected = useRef({ kinds, uninstall, reinstall })
 
@@ -125,7 +127,11 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
   const records = (state?.records ?? []).filter(record => record.type === 'skill' || record.type === 'agent-preset')
 
   const onUninstall = (record: KindRecordView): void => {
-    if (!window.confirm(t('confirmKindRemove'))) return
+    if (confirmKey !== record.repo) {
+      setConfirmKey(record.repo)
+      return
+    }
+    setConfirmKey(null)
     setBusy(record.repo)
     void injected.current.uninstall(record.repo).then((result) => {
       setOutput('$ uninstall ' + record.repo + '\n' + result.output)
@@ -184,8 +190,14 @@ export function PluginKindsTab({ kinds, uninstall, reinstall, t }: PluginKindsTa
                     {busy === record.repo ? t('installing') : t('reinstallButton')}
                   </Button>
                 )}
-                <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => onUninstall(record)}>
-                  {t('uninstallButton')}
+                <Button
+                  size="sm"
+                  variant={confirmKey === record.repo ? 'primary' : 'ghost'}
+                  disabled={busy !== null}
+                  title={t('confirmKindRemove')}
+                  onClick={() => onUninstall(record)}
+                >
+                  {confirmKey === record.repo ? t('fixConfirm') : t('uninstallButton')}
                 </Button>
               </span>
             </div>

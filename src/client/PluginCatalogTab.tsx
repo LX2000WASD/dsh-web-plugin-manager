@@ -11,6 +11,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry } from '../types.ts'
+import { fuzzyScore } from '../rank.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PmSelect } from './PmSelect.tsx'
 
@@ -152,6 +153,9 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
   const [sort, setSort] = useState<CatalogSort>('default')
   const [descending, setDescending] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
+  // 行内二次确认：停用是危险操作（依赖它的条目可能拖垮 profile），
+  // 第一次点击只点亮确认态，再点才执行——替代 window.confirm 弹窗。
+  const [confirmKey, setConfirmKey] = useState<string | null>(null)
 
   // Stable identity for the once-only boot effect: injected faces may be
   // rebuilt by the slot renderer on parent re-renders, and depending on them
@@ -197,12 +201,17 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
   const onSelect = (name: string): void => {
     setSelected(name)
     setExpanded(null)
+    setConfirmKey(null)
     load(name)
   }
 
   const onToggle = async (entryId: string, enable: boolean): Promise<void> => {
     if (selected.length === 0) return
-    if (!enable && !window.confirm(t('confirmDisable'))) return
+    if (!enable && confirmKey !== entryId) {
+      setConfirmKey(entryId)
+      return
+    }
+    setConfirmKey(null)
     setBusy(entryId)
     try {
       const result = await injected.current.setEnabled(selected, entryId, enable)
@@ -241,8 +250,10 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
       if (filter === 'installed' && !entry.installed) return false
       if (filter === 'builtin' && entry.installed) return false
       if (normalizedQuery.length === 0) return true
-      return entry.entryId.toLocaleLowerCase().includes(normalizedQuery)
-        || entry.moduleName.toLocaleLowerCase().includes(normalizedQuery)
+      // 模糊过滤（官方 rankByName 语义）：子序列命中，涵盖并超越旧的
+      // 子串匹配——'plgmgr' 也能命中 'plugin-manager'。
+      return fuzzyScore(entry.entryId, normalizedQuery) !== null
+        || fuzzyScore(entry.moduleName, normalizedQuery) !== null
     })
     const sorted = [...filtered]
     // Sort by the displayed short name (what the user sees), tie-break on the
@@ -450,11 +461,14 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
                           ) : (
                             <Button
                               size="sm"
-                              variant={entry.enabled ? 'ghost' : 'primary'}
+                              variant={entry.enabled ? (confirmKey === entry.entryId ? 'primary' : 'ghost') : 'primary'}
                               disabled={busy !== null}
+                              title={entry.enabled ? t('confirmDisable') : undefined}
                               onClick={() => void onToggle(entry.entryId, !entry.enabled)}
                             >
-                              {entry.enabled ? t('disableButton') : t('enableButton')}
+                              {entry.enabled
+                                ? (confirmKey === entry.entryId ? t('fixConfirm') : t('disableButton'))
+                                : t('enableButton')}
                             </Button>
                           )}
                         </div>

@@ -116,6 +116,8 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
   const [backupProfile, setBackupProfile] = useState('')
   const [backupData, setBackupData] = useState<BackupFile | null>(null)
   const [diffResult, setDiffResult] = useState<BackupDiffResult | null>(null)
+  // 行内二次确认（删除环境）：第一次点击只点亮确认态。
+  const [confirmKey, setConfirmKey] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const injected = useRef({ profiles, copyPlugins, startProfile, stopProfile, createProfile, renameProfile, removeProfile, backupExport, backupDiff, backupRestore })
@@ -165,7 +167,12 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
   }
 
   const onRemove = async (name: string): Promise<void> => {
-    if (!window.confirm(t('confirmRemoveProfile') + ' ' + name + '?')) return
+    // 行内二次确认：删除整个环境目录不可逆，第一次点击只点亮确认态。
+    if (confirmKey !== name) {
+      setConfirmKey(name)
+      return
+    }
+    setConfirmKey(null)
     setBusy('remove-' + name)
     try {
       const result = await injected.current.removeProfile(name)
@@ -339,8 +346,14 @@ export function PluginEnvironmentsTab({ profiles, copyPlugins, startProfile, sto
                           <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRename(profile.name)}>
                             {t('renameButton')}
                           </Button>
-                          <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void onRemove(profile.name)}>
-                            {t('removeButton')}
+                          <Button
+                            size="sm"
+                            variant={confirmKey === profile.name ? 'primary' : 'ghost'}
+                            disabled={busy !== null}
+                            title={t('confirmRemoveProfile') + ' ' + profile.name + '?'}
+                            onClick={() => void onRemove(profile.name)}
+                          >
+                            {confirmKey === profile.name ? t('fixConfirm') : t('removeButton')}
                           </Button>
                         </>
                       )}
