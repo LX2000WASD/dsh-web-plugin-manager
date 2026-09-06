@@ -76,6 +76,10 @@ git 源插件需要安装期环境变量时，CLI 会打印缺失变量清单并
 ## 架构
 
 - Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST 路由（带信任围栏：POST+JSON 强制、Host 回环/白名单校验、Origin 同源——防 CSRF/DNS-rebinding）；安装链路 installWithSource→installProtected（质量门+回滚）整体串行互斥
+- 基础层：`src/paths.ts` —— profile 路径/manifest/patch 读取、全局变更互斥队列、宿主 profile 识别（argv → 安装位置兜底）；`src/childproc.ts` —— 命令解析（运行中 node 目录 → PATH → $NVM_DIR 兜底）、PATH 注入子进程环境、官方 `dsh plugin` 运行器、异步 exec 工具（请求路径上零 execFileSync）
+- 保护链路：`src/installFlow.ts` —— 安装/更新/删除保护流（源准备：git clone 缓存 + npm-first 探测；质量门 + 自动回滚；更新检查 npm dist-tag / git HEAD / lockfile commit；managed 行清理），全部经全局互斥串行
+- 市场管道：`src/marketplaceMerge.ts` —— catalog/PLUGINS.md 抓取、registry 索引合并、星数富化、服务端已安装标记、dsh.so 徽标叠加、屏蔽名单过滤与同名包消解（index.ts 只保留缓存闭包与 REST 接线）
+- profile 生命周期：`src/profiles.ts` —— 运行实例进程表扫描（3s TTL 缓存）、终端窗口启动、端口探测、新 profile 模板、in-box bundle 保护恢复
 - 实时应用：`src/live.ts` —— 补丁变更先经 loader include 条目直接应用（`entry.update`，与平台 watchUserPatches 同通道）再写文件，绕开平台级死锁（watcher 刷新增量卸载 HMR 依赖的 timer 行造成循环等待）；补偿平台 `applyEntryPatches` 对 patch 对象的原地改写（深克隆 + 烘焙值归一化）；插件自有的 patch 文件 watcher 让手动编辑持续实时生效；删除包时按行名卸载其全部 loader 行（remove-by-name，容忍烘焙字段），防止残留客户端条目引用已删除的 bundle 脚本
 - 分析引擎：`src/analyze.ts` —— 离线依赖图/冲突/兼容性分析（与质量门共享扫描器）；运行时诊断读取 `ctx.reflect` 活跃服务表
 - Patch 编辑：`src/patch.ts` —— managed 标记块追加/移除（insert/disable 双类型识别）、行级操作、原子写入（tmp + rename）；处理 YAML 陷阱（`@` 包名引号、空数组文档、纯注释文件恢复模板）

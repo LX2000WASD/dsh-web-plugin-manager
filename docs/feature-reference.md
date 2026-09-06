@@ -118,7 +118,9 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 ## 架构模块
 
 - Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）
-- 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；模糊打分：`src/rank.ts`（client/host 共用纯函数）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
+- 基础层：`src/paths.ts`（profile 路径/manifest/patch 读取、全局变更互斥队列、宿主 profile 识别）；`src/childproc.ts`（命令解析、PATH 注入、官方 CLI 运行器、异步 exec）；`src/profiles.ts`（进程表扫描/终端/端口/模板/in-box 保护）
+- 保护链路：`src/installFlow.ts`（安装/更新/删除保护流 + 质量门 + 回滚 + managed 行清理）；市场管道：`src/marketplaceMerge.ts`（抓取/合并/标记/叠加/消解）
+- 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理 + 共享 UA）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；模糊打分：`src/rank.ts`（client/host 共用纯函数）；版本比较：`src/match.ts`（updateSpec + compareVersions）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`
 - Client：`src/client/` —— `settings.plugins.tab`（all 遮蔽官方只读列表 + manager + environments）+ `settings.section`（marketplace）；同源 fetch 调 REST（不走 Typert Remote）；危险操作（停用/删除/卸载/删除环境/备份恢复）一律行内二次确认（首击点亮确认态、再击执行，**4 秒无操作自动复位**，无 window.confirm 弹窗）；错误一律行内呈现（无 alert/prompt，catalog 有独立错误行、其余进命令输出区）；共享样式/格式化/确认 hook 收口在 `src/client/shared.ts`；链接样式对齐官方 0.1.3 链接语言（`--dsw-alias-link` 令牌带 0.1.2 fallback + hover 点状下划线）
 - Client 构建约束（`tsdown.client.config.ts` 的 `PLATFORM`）：只有官方平台种子表内的说明符可以 external，其余一律内联。种子表见 `deepseek-harness/packages/client/web/src/platform.ts` 的 `PLATFORM_MODULES`，当前为 react 四项 + `@deepseek-ai/cordis`、`dsh-client-store`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`。
   - external 了表外的包 → 浏览器抛 `require("x") missed the module table`，**整个插件页面启动中断**（所有插件 UI 全部消失，不只是出错的那个）；内联了表内的包 → 模块身份分裂（两份实例，服务/上下文对不上）。

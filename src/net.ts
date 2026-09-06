@@ -15,6 +15,9 @@ import type { RequestInit as UndiciRequestInit, Response as UndiciResponse } fro
 /** Per-request cap: a silently hung connection must not pin the page. */
 export const MARKETPLACE_FETCH_TIMEOUT_MS = 15_000
 
+/** Shared user-agent header (marketplace pipeline + npm registry probe). */
+export const GITHUB_UA = { 'user-agent': 'dsh-web-plugin-manager' }
+
 /** Cached agents, one per proxy URL (agents are stateless dispatchers). */
 const agents = new Map<string, ProxyAgent>()
 /** Upper bound on cached agents (proxy env changes are rare). */

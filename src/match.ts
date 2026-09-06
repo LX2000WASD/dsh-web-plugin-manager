@@ -78,3 +78,46 @@ export function updateSpec(source: string, name: string, latest: string | undefi
   if (isGitSourceSpec(source)) return source
   return latest === undefined ? name + '@latest' : name + '@' + latest
 }
+
+/**
+ * Lightweight semver comparison (v1.2.3-rc.1 < v1.2.3; rc.10 > rc.9;
+ * 1.0 / 1 count as 1.0.0). Returns -1/0/1; falls back to string comparison
+ * when a version does not parse.
+ */
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string): { major: number; minor: number; patch: number; pre: string | null } | null => {
+    const s = v.trim().replace(/^v/i, '')
+    const m = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?$/.exec(s)
+    if (m === null) return null
+    return {
+      major: Number(m[1]),
+      minor: m[2] === undefined ? 0 : Number(m[2]),
+      patch: m[3] === undefined ? 0 : Number(m[3]),
+      pre: m[4] ?? null,
+    }
+  }
+  const pa = parse(a)
+  const pb = parse(b)
+  if (pa === null || pb === null) return a === b ? 0 : a < b ? -1 : 1
+  for (const key of ['major', 'minor', 'patch'] as const) {
+    if (pa[key] !== pb[key]) return pa[key] < pb[key] ? -1 : 1
+  }
+  // Prerelease ordering: no pre > any pre; numeric ids > alphanumeric ids.
+  if (pa.pre === pb.pre) return 0
+  if (pa.pre === null) return 1
+  if (pb.pre === null) return -1
+  const paParts = pa.pre.split('.')
+  const pbParts = pb.pre.split('.')
+  for (let i = 0; i < Math.max(paParts.length, pbParts.length); i++) {
+    const x = paParts[i] ?? ''
+    const y = pbParts[i] ?? ''
+    if (x === y) continue
+    const xn = /^\d+$/.test(x)
+    const yn = /^\d+$/.test(y)
+    if (xn && yn) return Number(x) < Number(y) ? -1 : 1
+    if (xn) return 1
+    if (yn) return -1
+    return x < y ? -1 : 1
+  }
+  return 0
+}
