@@ -82,6 +82,29 @@ export interface PluginManagerSnapshot {
   readonly packages: readonly ManagedPackage[]
   /** Insert rows (non-bundle plugin mounts) in the profile patch file. */
   readonly insertRows: readonly InsertRow[]
+  /** Agent preset compositions (official 0.1.3 parity; absent pre-0.1.3). */
+  readonly agentPresets?: readonly PresetCompositionGroup[]
+}
+
+/** One plugin row inside an agent preset's composition (official 0.1.3
+ *  agentPresets.compositionInventory shape, defensively narrowed). */
+export interface PresetCompositionRowView {
+  readonly entryId: string | null
+  readonly moduleName: string
+  /** 'enabled' | 'disabled' | 'conditional' (the row carries a !!js gate). */
+  readonly enabled: string
+  readonly fiberPhase: RuntimeEntry['fiberPhase']
+  readonly condition?: string
+}
+
+/** One agent preset's roster identity beside its composition rows. */
+export interface PresetCompositionGroup {
+  readonly id: string
+  readonly trust: string
+  readonly name?: string
+  readonly isDefault: boolean
+  readonly broken?: string
+  readonly rows: readonly PresetCompositionRowView[]
 }
 
 /** Result of an enable/disable mutation. */
@@ -341,6 +364,8 @@ export interface AnalyzeIssue {
     | 'official-duplicate'
     | 'pending-dependency'
     | 'load-failure'
+  /** Runtime diagnostic from the manager itself (not the offline engine). */
+  | 'shadow-health'
   readonly message: string
   readonly from?: string
   readonly to?: string

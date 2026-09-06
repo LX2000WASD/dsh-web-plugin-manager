@@ -7,6 +7,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - **四源合并**：include 树稳定行（`EntryOptions.id`，官方语义稳定，Loader 挂载 id 每次随机，patch 定位必须用它）+ `dsh.profile.bundles` 层栈 + `package.json` 依赖 + `cordis.patch.yml` insert 行
 - 非运行 profile 显示离线合成条目（官方 in-box 包 base/web-app/headless 不标记为已安装）
 - **已安装但未挂载的依赖**：官方 CLI/pnpm 手动安装的非 bundle 插件只写依赖、不写挂载行（从未被加载）——list() 合成为 `unmounted` 条目，目录页显示「未挂载」标签与「挂载」按钮，一键补写 managed insert 行（运行中 profile 实时生效）
+- **Agent 预设构成**（官方 0.1.3 inventory 对齐）：目录页在插件列表下方展示每个 agent 预设的构成行（官方 agentPresets `compositionInventory()`——0.1.2 平台无该方法时整节自动隐藏）——预设名 / 默认徽标 / 每行模块 + fiber 相位圆点 / `!!js` 条件行标记 / 启停态（含 conditional）/ 坏损原因；数据 host 全局，随目录加载并行拉取、失败静默
 
 ## 实时启停
 
@@ -54,7 +55,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 
 - **A 级（安全默认，一键自动修 / 单条「修复」）**：`duplicate-row-id`（保留第一个删其余重复顶层行）、`disabled-dependency`（恢复启用被依赖条目）、`official-duplicate`（删除 profile node_modules 里的重复官方包拷贝 + 清理 manifest 声明）
 - **B 级（建议 + 行内确认，不弹窗）**：`service/tool/section/route-conflict`——建议"禁用后注册者"，按钮两态（执行建议 → 确认执行？）
-- **C 级（只输出）**：`missing-import` / `circular-dependency` / `peer-mismatch` / 运行时诊断
+- **C 级（只输出）**：`missing-import` / `circular-dependency` / `peer-mismatch` / 运行时诊断 / `shadow-health`（遮蔽自检：官方 inventory bundle 从 loader 树消失=改名致禁用行失配，或未禁用=仅剩 slot priority 单层遮蔽——防线变薄即提示）
 - 交互：行内按钮 + 状态反馈（已修复 ✓），执行细节进命令输出区；`fixAll` 批量跑 A 级；修复后自动重新分析
 - 服务端：`fixIssue(profile, action, target)` / `fixAll(profile)`（mutation mutex 串行，A 级动作执行前不二次确认）
 

@@ -50,7 +50,7 @@ import {
   removeInsertRow, writePatch,
 } from './patch.ts'
 import { analyzeProfile, OFFICIAL_DEP_ALLOWED, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
-import type { AnalyzeIssue, AnalyzeResult } from './types.ts'
+import type { AnalyzeIssue, AnalyzeResult, PresetCompositionGroup } from './types.ts'
 import { applyLiveOps, closePatchWatcher, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
 import {
@@ -651,6 +651,47 @@ export class PluginManagerService extends Service {
       entries: allEntries,
       packages,
       insertRows,
+    }
+  }
+
+  /**
+   * Each agent preset's composition rows (the model-facing plugins a
+   * composed roster runs) — official 0.1.3 inventory parity for the
+   * shadowed catalog tab. null when the platform's agentPresets service
+   * predates compositionInventory (0.1.2) or introspection fails.
+   */
+  async presetCompositions(): Promise<PresetCompositionGroup[] | null> {
+    const service = agentPresetsOf(this.ctx) as
+      | { compositionInventory?: () => Promise<unknown> }
+      | undefined
+    if (service === undefined || typeof service.compositionInventory !== 'function') return null
+    try {
+      const raw = await service.compositionInventory()
+      if (!Array.isArray(raw)) return null
+      return raw.map((group) => {
+        const g = group as Record<string, unknown>
+        const rows = Array.isArray(g.rows) ? g.rows : []
+        return {
+          id: typeof g.id === 'string' ? g.id : '',
+          trust: typeof g.trust === 'string' ? g.trust : '',
+          ...(typeof g.name === 'string' && g.name.length > 0 ? { name: g.name } : {}),
+          isDefault: g.isDefault === true,
+          ...(typeof g.broken === 'string' && g.broken.length > 0 ? { broken: g.broken } : {}),
+          rows: rows.map((row) => {
+            const r = row as Record<string, unknown>
+            return {
+              entryId: typeof r.entryId === 'string' ? r.entryId : null,
+              moduleName: typeof r.moduleName === 'string' ? r.moduleName : '',
+              enabled: r.enabled === 'conditional' ? 'conditional'
+                : r.enabled === true ? 'enabled' : r.enabled === false ? 'disabled' : 'conditional',
+              fiberPhase: phaseOf(typeof r.fiberState === 'number' ? r.fiberState : undefined),
+              ...(typeof r.condition === 'string' && r.condition.length > 0 ? { condition: r.condition } : {}),
+            }
+          }),
+        }
+      })
+    } catch {
+      return null
     }
   }
 
@@ -1473,6 +1514,39 @@ export class PluginManagerService extends Service {
           })
         }
       }
+      // Dual-layer shadow health: the catalog tab hides the official
+      // read-only inventory twice over (bundle disable + slot priority).
+      // A missing official row (renamed upstream) leaves the disable line
+      // matching nothing; a present-but-enabled row means the official
+      // client loads and only slot priority still shadows. Either way the
+      // defense has narrowed — say so in the health check.
+      try {
+        const loader = (this.ctx as { get?: (name: string) => unknown }).get?.('loader') as
+          | { entries(): Iterable<{ id: string; disabled?: unknown }> }
+          | undefined
+        if (loader !== undefined) {
+          let official = false
+          let officialDisabled = false
+          for (const entry of loader.entries()) {
+            if (entry.id !== 'ui-settings-plugin-inventory') continue
+            official = true
+            officialDisabled = entry.disabled === true
+          }
+          if (!official) {
+            pendingIssues.push({
+              kind: 'shadow-health',
+              message: 'official inventory bundle not found in the loader tree — the bundle-disable row no longer'
+                + ' matches (upstream rename?) and the official read-only plugin list may reappear',
+            })
+          } else if (!officialDisabled) {
+            pendingIssues.push({
+              kind: 'shadow-health',
+              message: 'official inventory bundle is loaded (not disabled) — the catalog tab shadows it only by'
+                + ' slot priority; the read-only list will reappear if the official tab id changes',
+            })
+          }
+        }
+      } catch { /* loader introspection is best-effort */ }
       return pendingIssues.length === 0
         ? analysis
         : { ...analysis, issues: [...analysis.issues, ...pendingIssues] }
@@ -1942,6 +2016,10 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           respondJob(respond, startJob(() => service.update(profile, name, locale)))
           return
         }
+        case 'presetCompositions': {
+          respond(200, { ok: true, value: await service.presetCompositions() })
+          return
+        }
         case 'job': {
           // Long-operation poll (install/update/remove/… return { jobId }).
           const id = typeof body['id'] === 'string' ? body['id'] : ''
@@ -1973,7 +2051,7 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
   }
 
   const disposers: (() => void)[] = []
-  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'backupExport', 'backupDiff', 'backupRestore', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze', 'fixIssue', 'fixAll', 'job']) {
+  for (const op of ['listProfiles', 'list', 'setEnabled', 'install', 'remove', 'uninstallKind', 'listKinds', 'unblockRepo', 'backupExport', 'backupDiff', 'backupRestore', 'removeInsert', 'mount', 'createProfile', 'renameProfile', 'removeProfile', 'copyPlugins', 'startProfile', 'stopProfile', 'marketplace', 'checkUpdates', 'update', 'analyze', 'fixIssue', 'fixAll', 'job', 'presetCompositions']) {
     disposers.push(webServer.register({ kind: 'exact', path: `${ROUTE_PREFIX}/${op}`, handler: handler(op) as unknown as WebRoute['handler'] }))
   }
   return disposers

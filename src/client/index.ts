@@ -17,7 +17,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // not the removed runtime package, owns that Context merge since 0.1.2.
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {
-  AnalyzeResult, BackupDiffResult, BackupFile, CommandResult, KindListView, MarketplaceResult, MutationResult, PluginManagerSnapshot, ProfileInfo, StartResult,
+  AnalyzeResult, BackupDiffResult, BackupFile, CommandResult, KindListView, MarketplaceResult, MutationResult, PluginManagerSnapshot, PresetCompositionGroup, ProfileInfo, StartResult,
   UpdateCheckResult,
 } from '../types.ts'
 import {
@@ -123,6 +123,7 @@ export function apply(ctx: ClientContext): void {
     list: (profile, signal) => call<PluginManagerSnapshot>('list', { profile }, signal),
     setEnabled: (profile, entryId, enabled) => call<MutationResult>('setEnabled', { profile, entryId, enabled }),
     mount: (profile, packageName) => call<MutationResult>('mount', { profile, packageName }),
+    presetCompositions: () => call<PresetCompositionGroup[] | null>('presetCompositions', {}),
   })
   const managerInjected = (): PluginManagerTabInjected => ({
     profiles: (signal) => call<ProfileInfo[]>('listProfiles', {}, signal),

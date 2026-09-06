@@ -10,7 +10,7 @@ import {
   Button, IconChevronDownOutline14, IconSearchOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { MutationResult, PluginManagerSnapshot, ProfileInfo, RuntimeEntry } from '../types.ts'
+import type { MutationResult, PluginManagerSnapshot, PresetCompositionGroup, ProfileInfo, RuntimeEntry } from '../types.ts'
 import { fuzzyScore } from '../rank.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 import { PM_CARD_CSS, isAbortError, useConfirm } from './shared.ts'
@@ -24,6 +24,8 @@ export interface PluginCatalogTabInjected {
   readonly list: (profile: string, signal?: AbortSignal) => Promise<PluginManagerSnapshot>
   readonly setEnabled: (profile: string, entryId: string, enabled: boolean) => Promise<MutationResult>
   readonly mount: (profile: string, packageName: string) => Promise<MutationResult>
+  /** Agent preset compositions (official 0.1.3 parity); null pre-0.1.3. */
+  readonly presetCompositions: () => Promise<PresetCompositionGroup[] | null>
 }
 
 /** Full component props assembled by the Settings slot renderer. */
@@ -125,6 +127,13 @@ const styles = {
   },
   filterRow: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
   filterLabel: { fontSize: '12px', lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+  presetCard: { padding: '10px 14px 12px' },
+  presetHead: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' },
+  presetRow: { display: 'flex', alignItems: 'center', gap: '8px', padding: '3px 0', minWidth: 0 },
+  presetCondition: {
+    fontFamily: 'var(--ds-font-family-code)', fontSize: '10px', lineHeight: '14px',
+    color: 'var(--dsw-alias-label-tertiary)',
+  },
 } satisfies Record<string, React.CSSProperties>
 
 /** Compact a module specifier like the official inventory. */
@@ -147,7 +156,7 @@ function authorModule(moduleName: string): string {
 }
 
 /** Render the catalog (shadows the official read-only inventory). */
-export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: PluginCatalogTabProps): ReactNode {
+export function PluginCatalogTab({ profiles, list, setEnabled, mount, presetCompositions, t }: PluginCatalogTabProps): ReactNode {
   const catalogId = useId()
   const [profileList, setProfileList] = useState<ProfileInfo[]>([])
   const [selected, setSelected] = useState<string>('')
@@ -164,11 +173,13 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
   // Toggle/mount failures render here (window.alert blocks the main thread
   // and offered no visible trail).
   const [actionError, setActionError] = useState('')
+  // Agent preset compositions (official 0.1.3 inventory parity; best-effort).
+  const [compositions, setCompositions] = useState<PresetCompositionGroup[] | null>(null)
 
   // Stable identity for the once-only boot effect: injected faces may be
   // rebuilt by the slot renderer on parent re-renders, and depending on them
   // would re-run the load and grow the list on every interaction.
-  const injected = useRef({ profiles, list, setEnabled, mount })
+  const injected = useRef({ profiles, list, setEnabled, mount, presetCompositions })
 
   useEffect(() => {
     // The boot profiles fetch joins the same abort group so an unmount (or
@@ -218,6 +229,12 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
     // Keep showing the previous snapshot during refreshes so the page does
     // not collapse to the top (only the first load shows the loading state).
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
+    // Composition data is host-global (not per-profile) and purely additive:
+    // fetched in parallel, never aborted with the listing, failures silent.
+    void injected.current.presetCompositions().then(
+      (groups) => { if (seq === loadSeq.current) setCompositions(groups) },
+      () => { if (seq === loadSeq.current) setCompositions(null) },
+    )
     return injected.current.list(profile, controller.signal).then(
       (snapshot) => { if (seq === loadSeq.current) setState({ status: 'ready', snapshot }) },
       (error: unknown) => {
@@ -519,6 +536,50 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, t }: Plugi
               })}
             </ul>
           ) : null}
+
+          {compositions !== null && compositions.length > 0 && (
+            <>
+              <div style={styles.heading}>
+                <h3 style={styles.headingTitle}>{t('presetGroups')}</h3>
+                <span style={styles.headingCount}>{compositions.length}</span>
+              </div>
+              {compositions.map(group => (
+                <div key={group.id} className="pm-card" style={styles.presetCard}>
+                  <div style={styles.presetHead}>
+                    <strong style={styles.cardTitle} title={group.id}>{group.name ?? group.id}</strong>
+                    {group.isDefault && (
+                      <span style={{ ...styles.configTag, ...styles.configTagOn }}>{t('presetDefault')}</span>
+                    )}
+                    {group.broken !== undefined && (
+                      <span style={styles.error}>{t('presetBroken')}: {group.broken}</span>
+                    )}
+                  </div>
+                  {group.rows.map((row, index) => (
+                    <div key={(row.entryId ?? row.moduleName) + '-' + String(index)} style={styles.presetRow}>
+                      <span
+                        style={dotStyle(row.fiberPhase)}
+                        data-phase={row.fiberPhase ?? 'unobserved'}
+                        role="img"
+                        aria-label={phaseLabel(row.fiberPhase)}
+                        title={phaseLabel(row.fiberPhase)}
+                      />
+                      <span style={styles.entryValue}>{row.moduleName}</span>
+                      {row.condition !== undefined && (
+                        <code style={styles.presetCondition} title={row.condition}>!!js</code>
+                      )}
+                      <span style={styles.configTag}>
+                        {row.enabled === 'conditional' ? t('presetConditional')
+                          : row.enabled === 'enabled' ? t('enabled') : t('disabled')}
+                      </span>
+                    </div>
+                  ))}
+                  {group.rows.length === 0 && group.broken === undefined && (
+                    <p style={styles.status}>{t('presetNoRows')}</p>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
         </>
       )}
     </div>
