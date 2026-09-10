@@ -330,8 +330,38 @@ function normalizeDshSoEntry(raw: unknown): DshSoEntry | null {
 /** Convenience alias for the security sub-shape. */
 type DshSoSecurity = NonNullable<DshSoEntry['security']>
 
-/** Fetch the dsh.so index (network, then disk cache); null when unusable. */
-export async function fetchDshSoIndex(): Promise<DshSoEntry[] | null> {
+/**
+ * Fetch the dsh.so overlay index. Cache-first: the disk cache (while fresh)
+ * and an in-process memo are checked BEFORE the network — every marketplace
+ * request overlays this index, so a network-first strategy fired one request
+ * per page load (and up to the full HTTP timeout when the host is slow);
+ * `forceNetwork` (manual refresh) skips both caches.
+ */
+let dshSoMemo: { at: number; entries: DshSoEntry[] } | null = null
+
+/** Read the fresh (< TTL) dsh.so disk cache, or null. */
+function readDshSoDiskCache(): DshSoEntry[] | null {
+  try {
+    const data = JSON.parse(readFileSync(dshSoCacheFile(), 'utf8')) as { savedAt?: string; entries?: unknown }
+    const age = Date.now() - Date.parse(typeof data.savedAt === 'string' ? data.savedAt : '')
+    if (Number.isNaN(age) || age > DSH_SO_TTL_MS) return null
+    const list = Array.isArray(data.entries) ? data.entries : []
+    return list.map(normalizeDshSoEntry).filter((entry): entry is DshSoEntry => entry !== null)
+  } catch {
+    return null
+  }
+}
+
+/** Fetch the dsh.so index (memo → fresh disk cache → network → cache). */
+export async function fetchDshSoIndex(options?: { forceNetwork?: boolean }): Promise<DshSoEntry[] | null> {
+  if (options?.forceNetwork !== true) {
+    if (dshSoMemo !== null && Date.now() - dshSoMemo.at < DSH_SO_TTL_MS) return dshSoMemo.entries
+    const cached = readDshSoDiskCache()
+    if (cached !== null && cached.length > 0) {
+      dshSoMemo = { at: Date.now(), entries: cached }
+      return cached
+    }
+  }
   try {
     const response = await marketplaceFetch(DSH_SO_INDEX_URL, { headers: { 'user-agent': 'dsh-web-plugin-manager' } })
     if (!response.ok) throw new Error('dsh.so index HTTP ' + response.status)
@@ -348,18 +378,23 @@ export async function fetchDshSoIndex(): Promise<DshSoEntry[] | null> {
     if (entries.length > 0) {
       try {
         mkdirSync(dirname(dshSoCacheFile()), { recursive: true })
-        writeFileSync(dshSoCacheFile(), JSON.stringify({ savedAt: new Date().toISOString(), entries }, undefined, 2) + '\n')
+        writeFileSync(dshSoCacheFile(), JSON.stringify({ savedAt: new Date().toISOString(), entries }) + '\n')
       } catch { /* cache write is best-effort */ }
+      dshSoMemo = { at: Date.now(), entries }
       return entries
     }
   } catch { /* fall through to the disk cache */ }
-  try {
-    const data = JSON.parse(readFileSync(dshSoCacheFile(), 'utf8')) as { savedAt?: string; entries?: unknown }
-    const age = Date.now() - Date.parse(typeof data.savedAt === 'string' ? data.savedAt : '')
-    if (Number.isNaN(age) || age > DSH_SO_TTL_MS) return null
-    const list = Array.isArray(data.entries) ? data.entries : []
-    return list.map(normalizeDshSoEntry).filter((entry): entry is DshSoEntry => entry !== null)
-  } catch {
-    return null
+  const cached = readDshSoDiskCache()
+  if (cached !== null && cached.length > 0 && dshSoMemo === null) {
+    dshSoMemo = { at: Date.now(), entries: cached }
   }
+  return cached
+}
+
+/**
+ * The generation stamp of the currently memoized dsh.so index (0 when none):
+ * keys the marketplace pipeline cache so a new overlay invalidates it.
+ */
+export function dshSoIndexAt(): number {
+  return dshSoMemo?.at ?? 0
 }

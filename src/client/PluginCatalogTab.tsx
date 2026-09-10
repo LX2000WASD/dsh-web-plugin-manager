@@ -174,7 +174,8 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, presetComp
   // and offered no visible trail).
   const [actionError, setActionError] = useState('')
   // Agent preset compositions (official 0.1.3 inventory parity; best-effort).
-  const [compositions, setCompositions] = useState<PresetCompositionGroup[] | null>(null)
+  // undefined = not fetched yet (fetch once per mount), null = fetch failed.
+  const [compositions, setCompositions] = useState<PresetCompositionGroup[] | null | undefined>(undefined)
 
   // Stable identity for the once-only boot effect: injected faces may be
   // rebuilt by the slot renderer on parent re-renders, and depending on them
@@ -230,11 +231,16 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, presetComp
     // not collapse to the top (only the first load shows the loading state).
     setState(current => current.status === 'ready' ? current : { status: 'loading' })
     // Composition data is host-global (not per-profile) and purely additive:
-    // fetched in parallel, never aborted with the listing, failures silent.
-    void injected.current.presetCompositions().then(
-      (groups) => { if (seq === loadSeq.current) setCompositions(groups) },
-      () => { if (seq === loadSeq.current) setCompositions(null) },
-    )
+    // fetched once per tab mount, never aborted with the listing, failures
+    // silent. Profile switches and refreshes used to re-fetch it alongside
+    // every listing — a wasted REST round-trip for data that changes only
+    // when presets change.
+    if (compositions === undefined) {
+      void injected.current.presetCompositions().then(
+        (groups) => { setCompositions(groups) },
+        () => { setCompositions(null) },
+      )
+    }
     return injected.current.list(profile, controller.signal).then(
       (snapshot) => { if (seq === loadSeq.current) setState({ status: 'ready', snapshot }) },
       (error: unknown) => {
@@ -537,7 +543,7 @@ export function PluginCatalogTab({ profiles, list, setEnabled, mount, presetComp
             </ul>
           ) : null}
 
-          {compositions !== null && compositions.length > 0 && (
+          {compositions != null && compositions.length > 0 && (
             <>
               <div style={styles.heading}>
                 <h3 style={styles.headingTitle}>{t('presetGroups')}</h3>

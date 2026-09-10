@@ -100,46 +100,55 @@ function isNonPackageSpec(spec: string): boolean {
 }
 
 export function scanImports(filePath: string): string[] {
+  return scanFileSpecifiers(filePath).bare
+}
+
+/** One source file's specifiers, classified (read + comment-strip ONCE). */
+export function scanFileSpecifiers(filePath: string): { bare: string[]; relative: string[] } {
   try {
-    const code = stripComments(readFileSync(filePath, 'utf8'))
-    // Type-only imports/exports are erased at compile time — they must not
-    // count as runtime dependencies.
-    const typeOnly = new Set<string>()
-    const typePattern = /(?:import|export)\s+type\s+[^;'"]*?from\s*['"]([^'"]+)['"]/g
-    for (const match of code.matchAll(typePattern)) typeOnly.add(match[1]!)
-    const found = new Set<string>()
-    // Statement forms must start after a line/statement boundary — a bare
-    // `from` (e.g. in body['from']) is never an import keyword.
-    const statement = /(?:^|[;\n])\s*(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]/g
-    const sideEffect = /(?:^|[;\n])\s*import\s*['"]([^'"]+)['"]/g
-    const dynamic = /(?:import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g
-    const dynamicTemplate = /(?:import\s*\(\s*|require\s*\(\s*)`([^`$]+)`/g
-    for (const match of code.matchAll(statement)) {
-      const spec = match[1]!
-      if (isNonPackageSpec(spec)) continue
-      if (typeOnly.has(spec)) continue
-      found.add(spec)
-    }
-    for (const match of code.matchAll(sideEffect)) {
-      const spec = match[1]!
-      if (isNonPackageSpec(spec)) continue
-      if (typeOnly.has(spec)) continue
-      found.add(spec)
-    }
-    for (const match of code.matchAll(dynamic)) {
-      const spec = match[1]!
-      if (isNonPackageSpec(spec)) continue
-      found.add(spec)
-    }
-    for (const match of code.matchAll(dynamicTemplate)) {
-      const spec = match[1]!
-      if (isNonPackageSpec(spec)) continue
-      found.add(spec)
-    }
-    return [...found]
+    return scanSpecifiers(stripComments(readFileSync(filePath, 'utf8')))
   } catch {
-    return []
+    return { bare: [], relative: [] }
   }
+}
+
+/**
+ * Every import specifier of a comment-stripped source file, classified into
+ * bare package specifiers and relative traversal targets. One pass of each
+ * regex form feeds both classifications — the two consumers (dependency
+ * scan, entry traversal) used to re-read and re-strip the same file.
+ *
+ * Type-only statement imports are compile-time and skipped for BARE specs
+ * (they are runtime dependencies otherwise); relative specs are never
+ * type-filtered (traversal is conservative by design). `.css`/`.json`
+ * relative specs are leaf assets, not traversal targets.
+ */
+function scanSpecifiers(code: string): { bare: string[]; relative: string[] } {
+  const typeOnly = new Set<string>()
+  const typePattern = /(?:import|export)\s+type\s+[^;'"]*?from\s*['"]([^'"]+)['"]/g
+  for (const match of code.matchAll(typePattern)) typeOnly.add(match[1]!)
+  const bare = new Set<string>()
+  const relative = new Set<string>()
+  const classify = (spec: string, statementForm: boolean): void => {
+    if (spec.startsWith('.')) {
+      if (!spec.endsWith('.css') && !spec.endsWith('.json')) relative.add(spec)
+      return
+    }
+    if (spec.startsWith('/') || isBuiltin(spec)) return
+    if (statementForm && typeOnly.has(spec)) return
+    bare.add(spec)
+  }
+  // Statement forms must start after a line/statement boundary — a bare
+  // `from` (e.g. in body['from']) is never an import keyword.
+  const statement = /(?:^|[;\n])\s*(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]/g
+  const sideEffect = /(?:^|[;\n])\s*import\s*['"]([^'"]+)['"]/g
+  const dynamic = /(?:import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g
+  const dynamicTemplate = /(?:import\s*\(\s*|require\s*\(\s*)`([^`$]+)`/g
+  for (const match of code.matchAll(statement)) classify(match[1]!, true)
+  for (const match of code.matchAll(sideEffect)) classify(match[1]!, true)
+  for (const match of code.matchAll(dynamic)) classify(match[1]!, false)
+  for (const match of code.matchAll(dynamicTemplate)) classify(match[1]!, false)
+  return { bare: [...bare], relative: [...relative] }
 }
 
 /** Strip line and block comments (string literals are untouched). */
@@ -152,34 +161,11 @@ function stripComments(code: string): string {
 
 /** All relative specifiers referenced by one JS file (for entry traversal). */
 function relativeImports(filePath: string): string[] {
-  try {
-    const code = stripComments(readFileSync(filePath, 'utf8'))
-    const found = new Set<string>()
-    const statement = /(?:^|[;\n])\s*(?:import|export)[^'"]*?from\s*['"]([^'"]+)['"]/g
-    const sideEffect = /(?:^|[;\n])\s*import\s*['"]([^'"]+)['"]/g
-    const dynamic = /(?:import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g
-    const dynamicTemplate = /(?:import\s*\(\s*|require\s*\(\s*)`([^`$]+)`/g
-    for (const match of code.matchAll(statement)) {
-      const spec = match[1]!
-      if (spec.startsWith('.') && !spec.endsWith('.css') && !spec.endsWith('.json')) found.add(spec)
-    }
-    for (const match of code.matchAll(sideEffect)) {
-      const spec = match[1]!
-      if (spec.startsWith('.') && !spec.endsWith('.css') && !spec.endsWith('.json')) found.add(spec)
-    }
-    for (const match of code.matchAll(dynamic)) {
-      const spec = match[1]!
-      if (spec.startsWith('.') && !spec.endsWith('.css') && !spec.endsWith('.json')) found.add(spec)
-    }
-    return [...found]
-  } catch {
-    return []
-  }
+  return scanFileSpecifiers(filePath).relative
 }
 
 /** Resolve one relative specifier to a file path (dir, .js, .mjs, .cjs, .ts…). */
 function resolveRelative(baseDir: string, spec: string): string | null {
-  const { extname, resolve } = requireNodePath()
   const candidate = resolve(baseDir, spec)
   for (const suffix of ['', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '/index.js', '/index.mjs', '/index.cjs', '/index.ts']) {
     const target = candidate + suffix
@@ -187,16 +173,7 @@ function resolveRelative(baseDir: string, spec: string): string | null {
       if (existsSync(target) && !statSync(target).isDirectory()) return target
     } catch { /* keep probing */ }
   }
-  if (extname(candidate).length > 0) return null
   return null
-}
-
-let nodePath: { extname(p: string): string; resolve(...parts: string[]): string } | undefined
-function requireNodePath(): { extname(p: string): string; resolve(...parts: string[]): string } {
-  if (nodePath === undefined) {
-    nodePath = { extname: extname, resolve: resolve }
-  }
-  return nodePath
 }
 
 /**
@@ -218,8 +195,11 @@ export function scanPackageImports(
   while (queue.length > 0 && scanned < maxFiles) {
     const current = queue.shift()!
     scanned += 1
-    for (const spec of scanImports(current)) bare.add(spec)
-    for (const rel of relativeImports(current)) {
+    // One read per file: the same stripped source feeds both classifications
+    // (bare specifiers here, relative targets for the BFS frontier below).
+    const { bare: fileBare, relative } = scanFileSpecifiers(current)
+    for (const spec of fileBare) bare.add(spec)
+    for (const rel of relative) {
       const resolved = resolveRelative(dirname(current), rel)
       if (resolved === null || seen.has(resolved)) continue
       if (!resolved.startsWith(pkgDir)) continue // never leave the package
@@ -237,65 +217,90 @@ export function scanPackageImports(
  * same name at runtime (fail loud), so a conflict here is a deterministic
  * load/runtime failure, not a heuristic.
  */
-function scanServices(filePath: string): {
+/** Shared empty scan result (packages without a resolvable entry). */
+const NO_SERVICES: { registered: string[]; injected: string[]; tools: string[]; sections: string[]; routes: string[] } = {
+  registered: [], injected: [], tools: [], sections: [], routes: [],
+}
+
+/**
+ * The scanner body over comment-stripped source. Comment-stripping matters
+ * here as much as for import scanning: a commented-out `new Service(ctx,
+ * 'x')` used to register as a live conflict (false service-conflict report).
+ */
+export function scanServicesCode(code: string): {
   registered: string[]
   injected: string[]
   tools: string[]
   sections: string[]
   routes: string[]
 } {
-  const empty = { registered: [], injected: [], tools: [], sections: [], routes: [] }
-  try {
-    const code = readFileSync(filePath, 'utf8')
-    const registered = new Set<string>()
-    const injected = new Set<string>()
-    const tools = new Set<string>()
-    const sections = new Set<string>()
-    const routes = new Set<string>()
-    const providePattern = /(?:new\s+Service\([^)]*,\s*|ctx\.provide\(\s*|this\.provide\(\s*)['"]([^'"]+)['"]/g
-    for (const match of code.matchAll(providePattern)) registered.add(match[1]!)
-    const injectPattern = /(?:static\s+inject|inject)\s*=\s*\[([^\]]*)\]/g
-    for (const match of code.matchAll(injectPattern)) {
-      for (const name of match[1]!.split(',')) {
-        const trimmed = name.trim().replace(/^['"]|['"]$/g, '')
-        if (trimmed.length > 0) injected.add(trimmed)
-      }
+  const registered = new Set<string>()
+  const injected = new Set<string>()
+  const tools = new Set<string>()
+  const sections = new Set<string>()
+  const routes = new Set<string>()
+  const providePattern = /(?:new\s+Service\([^)]*,\s*|ctx\.provide\(\s*|this\.provide\(\s*)['"]([^'"]+)['"]/g
+  for (const match of code.matchAll(providePattern)) registered.add(match[1]!)
+  const injectPattern = /(?:static\s+inject|inject)\s*=\s*\[([^\]]*)\]/g
+  for (const match of code.matchAll(injectPattern)) {
+    for (const name of match[1]!.split(',')) {
+      const trimmed = name.trim().replace(/^['"]|['"]$/g, '')
+      if (trimmed.length > 0) injected.add(trimmed)
     }
-    // tools.register({ name: 'x' ... }) — also matches defineTool({...})
-    // wrapper shapes since the name key is inside the same object literal.
-    const toolPattern = /(?:ctx|this)\.tools\.register\(\s*\{[\s\S]{0,400}?name:\s*['"]([^'"]+)['"]/g
-    for (const match of code.matchAll(toolPattern)) tools.add(match[1]!)
-    // systemPrompt.section({ name: 'x', ... }) — duplicate section names
-    // within one layer throw at registration time.
-    const sectionPattern = /(?:ctx|this)\.systemPrompt\.section\(\s*\{[\s\S]{0,400}?name:\s*['"]([^'"]+)['"]/g
-    for (const match of code.matchAll(sectionPattern)) sections.add(match[1]!)
-    // webServer.register({ kind, path: 'x', handler }) — duplicate paths on
-    // the same kind shadow or reject depending on the server.
-    const routePattern = /(?:ctx|this)\.webServer\.register\(\s*\{[\s\S]{0,300}?path:\s*['"]([^'"]+)['"]/g
-    for (const match of code.matchAll(routePattern)) routes.add(match[1]!)
-    return {
-      registered: [...registered],
-      injected: [...injected],
-      tools: [...tools],
-      sections: [...sections],
-      routes: [...routes],
-    }
-  } catch {
-    return empty
+  }
+  // tools.register({ name: 'x' ... }) — also matches defineTool({...})
+  // wrapper shapes since the name key is inside the same object literal.
+  const toolPattern = /(?:ctx|this)\.tools\.register\(\s*\{[\s\S]{0,400}?name:\s*['"]([^'"]+)['"]/g
+  for (const match of code.matchAll(toolPattern)) tools.add(match[1]!)
+  // systemPrompt.section({ name: 'x', ... }) — duplicate section names
+  // within one layer throw at registration time.
+  const sectionPattern = /(?:ctx|this)\.systemPrompt\.section\(\s*\{[\s\S]{0,400}?name:\s*['"]([^'"]+)['"]/g
+  for (const match of code.matchAll(sectionPattern)) sections.add(match[1]!)
+  // webServer.register({ kind, path: 'x', handler }) — duplicate paths on
+  // the same kind shadow or reject depending on the server.
+  const routePattern = /(?:ctx|this)\.webServer\.register\(\s*\{[\s\S]{0,300}?path:\s*['"]([^'"]+)['"]/g
+  for (const match of code.matchAll(routePattern)) routes.add(match[1]!)
+  return {
+    registered: [...registered],
+    injected: [...injected],
+    tools: [...tools],
+    sections: [...sections],
+    routes: [...routes],
   }
 }
 
-/** Resolve a package's entry file (exports["."].default, main, module, index.js). */
+/** Collect every string target of an exports node (recursed). */
+export function collectExportTargets(node: unknown, targets: string[]): void {
+  if (typeof node === 'string') {
+    if (node.length > 0) targets.push(node)
+    return
+  }
+  if (node === null || typeof node !== 'object') return
+  for (const value of Object.values(node)) collectExportTargets(value, targets)
+}
+
+/**
+ * Resolve a package's entry file. Handles every common exports shape:
+ * `"exports": "./dist/main.js"`, `"exports": {".": "./dist/main.js"}`,
+ * `{".": {"default": ...}}` and nested conditions — a line-only default
+ * lookup misjudged valid string-exports packages as "no entry" and rolled
+ * back legal installs (audit M3). Single source of truth: the health
+ * analysis and the install quality gate must never drift on entry
+ * resolution (a string-exports package used to pass the gate but silently
+ * skip every analysis check).
+ */
 export function packageEntry(pkgDir: string, manifest: Record<string, unknown>): string | null {
-  const exportsField = manifest['exports'] as Record<string, unknown> | undefined
-  const dot = exportsField !== undefined ? exportsField['.'] as Record<string, unknown> | undefined : undefined
-  const candidates: unknown[] = [
-    dot !== undefined && typeof dot === 'object' ? (dot as Record<string, unknown>)['default'] : undefined,
-    manifest['main'],
-    manifest['module'],
-  ]
+  const candidates: string[] = []
+  const exportsField = manifest['exports']
+  if (typeof exportsField === 'string') {
+    candidates.push(exportsField)
+  } else if (exportsField !== null && typeof exportsField === 'object') {
+    const dot = (exportsField as Record<string, unknown>)['.']
+    if (dot !== undefined) collectExportTargets(dot, candidates)
+  }
+  if (typeof manifest['main'] === 'string') candidates.push(manifest['main'])
+  if (typeof manifest['module'] === 'string') candidates.push(manifest['module'])
   for (const candidate of candidates) {
-    if (typeof candidate !== 'string') continue
     const resolved = join(pkgDir, candidate)
     if (existsSync(resolved)) return resolved
   }
@@ -485,21 +490,43 @@ export function analyzeProfile(
     const insert = /^\s{4}- id:\s*([^\s]+)/.exec(line)
     if (insert !== null) insertIds.add(insert[1]!)
   }
+  // Manifests of dependencies that the provider scan did not cover (linked
+  // outside the scanned roots) are read at most once per analysis run — the
+  // package loop and the peer-compatibility loop used to re-read each.
+  const manifestMemo = new Map<string, Record<string, unknown>>()
+  const manifestOf = (name: string): Record<string, unknown> => {
+    const viaProvider = providerManifests.get(name)
+    if (viaProvider !== undefined) return viaProvider
+    let memo = manifestMemo.get(name)
+    if (memo === undefined) {
+      memo = readManifest(join(nodeModules, name))
+      manifestMemo.set(name, memo)
+    }
+    return memo
+  }
   for (const name of Object.keys(deps)) {
     const providerDir = providerDirs.get(name)
-    const pkgManifest = providerDir !== undefined ? providerManifests.get(name) ?? {} : readManifest(join(nodeModules, name))
+    const pkgManifest = manifestOf(name)
     const dsh = (pkgManifest['dsh'] ?? {}) as Record<string, unknown> | undefined
     const isBundle = (dsh?.bundle as Record<string, unknown> | undefined)?.patch !== undefined
       || bundles.includes(name)
     const entryPath = providerDir !== undefined ? packageEntry(providerDir, pkgManifest) : null
-    const services = entryPath !== null
-      ? scanServices(entryPath)
-      : { registered: [], injected: [], tools: [], sections: [], routes: [] }
+    // One read of the entry file feeds both scanners (named registrations
+    // and import specifiers) — they used to read and strip it independently.
+    let services = NO_SERVICES
+    let imports: string[] = []
+    if (entryPath !== null) {
+      try {
+        const code = stripComments(readFileSync(entryPath, 'utf8'))
+        services = scanServicesCode(code)
+        imports = scanSpecifiers(code).bare
+      } catch { /* unreadable entry: no findings from it */ }
+    }
     packages.push({
       name,
       isBundle,
       ...(typeof pkgManifest['version'] === 'string' ? { version: pkgManifest['version'] } : {}),
-      imports: entryPath !== null ? scanImports(entryPath) : [],
+      imports,
       services: services.registered,
       injects: services.injected,
       tools: services.tools,
@@ -522,7 +549,7 @@ export function analyzeProfile(
   const regularDepsByPackage = new Map<string, Set<string>>()
   for (const pkg of packages) {
     const providerDir = providerDirs.get(pkg.name)
-    const pkgManifest = providerDir !== undefined ? providerManifests.get(pkg.name) ?? {} : readManifest(join(nodeModules, pkg.name))
+    const pkgManifest = manifestOf(pkg.name)
     const regularDeps = new Set<string>(Object.keys((pkgManifest['dependencies'] ?? {}) as Record<string, unknown>))
     regularDepsByPackage.set(pkg.name, regularDeps)
     declaredByPackage.set(pkg.name, new Set([
@@ -617,15 +644,13 @@ export function analyzeProfile(
 
   // Peer compatibility: peerDependencies vs installed/resolved versions.
   for (const pkg of packages) {
-    const providerDir = providerDirs.get(pkg.name)
-    const pkgManifest = providerDir !== undefined ? providerManifests.get(pkg.name) ?? {} : readManifest(join(nodeModules, pkg.name))
+    const pkgManifest = manifestOf(pkg.name)
     const peers = (pkgManifest['peerDependencies'] ?? {}) as Record<string, string>
     for (const [peer, range] of Object.entries(peers)) {
       // NOTE: the loader-provided whitelist does NOT apply here — the
       // whitelist concerns import declarations, while a peerDependency is a
       // VERSION constraint on a resolved package and must be checked.
-      const peerDir = providerDirs.get(peer)
-      const peerManifest = peerDir !== undefined ? providerManifests.get(peer) ?? {} : readManifest(join(nodeModules, peer))
+      const peerManifest = manifestOf(peer)
       const peerVersion = typeof peerManifest['version'] === 'string' ? peerManifest['version'] : undefined
       if (peerVersion === undefined || peerVersion.length === 0) continue
       if (!satisfiesRange(peerVersion, range)) {

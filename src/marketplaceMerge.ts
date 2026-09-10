@@ -9,14 +9,14 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { GITHUB_UA, marketplaceFetch } from './net.ts'
 import {
-  fetchSearchFallback, functionalTopics, readRegistryCache, writeRegistryCache,
+  dshSoIndexAt, fetchSearchFallback, functionalTopics, readRegistryCache, writeRegistryCache,
   type DshSoEntry, type RegistryRepo,
 } from './registry.ts'
-import { loadKindRecords, normalizeRepoRef, pruneGhostRecords, slugDirName, type KindRecord } from './kinds.ts'
+import { kindRecordsStamp, loadKindRecords, normalizeRepoRef, pruneGhostRecords, slugDirName, type KindRecord } from './kinds.ts'
 import { dshHome, isSafeProfileName, profileDir, readManifest } from './paths.ts'
 import { readPackageInfo } from './installFlow.ts'
 import { compareVersions } from './match.ts'
-import type { MarketplaceItem } from './types.ts'
+import type { MarketplaceItem, MarketplaceResult } from './types.ts'
 
 /** Marketplace snapshot TTL and cache format version. */
 export const MARKETPLACE_TTL = 24 * 60 * 60 * 1000
@@ -47,9 +47,13 @@ export function readMemoryCache(): MemoryCache | null {
   return null
 }
 
-/** Publish a fresh listing to the in-process mirror (on every fresh fetch). */
-export function writeMemoryCache(items: MarketplaceItem[], source: string): void {
-  marketplaceMemoryCache = { at: Date.now(), items, source }
+/**
+ * Publish a listing to the in-process mirror. `at` defaults to now (fresh
+ * fetch); the disk-cache warm path passes the file's own fetchedAt so the
+ * mirror cannot extend a listing's lifetime beyond its real age.
+ */
+export function writeMemoryCache(items: MarketplaceItem[], source: string, at: number = Date.now()): void {
+  marketplaceMemoryCache = { at, items, source }
 }
 
 /**
@@ -451,6 +455,82 @@ export function buildInstalledIndex(profile: string): InstalledIndex | null {
   return index
 }
 
+/**
+ * The generation stamp of the cached installed index for one profile (the
+ * entry's build time, 0 when never built): keys the marketplace pipeline
+ * cache so installs/removes (explicit invalidation) refresh the flags.
+ */
+export function installedIndexAt(profile: string): number {
+  return installedIndexCache.get(profile)?.at ?? 0
+}
+
+/** Which listing path a finalize call serves (kept in the cache key: the same items generation can exit through different paths with different messages). */
+export type ListingVariant = 'fresh' | 'cache' | 'stale-cache'
+
+/** Inputs of the final marketplace pipeline (overlay → filter → flag → dedupe). */
+export interface FinalizeListingOptions {
+  readonly profile: string
+  /** Base (already merged) items, straight from the memory/disk cache or a fresh walk. */
+  readonly items: readonly MarketplaceItem[]
+  /** Generation stamp of the base items: memory-cache write time, or the disk cache's fetchedAt. */
+  readonly baseAt: number
+  readonly dshSo: readonly DshSoEntry[] | null
+  readonly blocked: ReadonlySet<string>
+  readonly variant: ListingVariant
+  /** Human message; deterministic per (variant, items, source state). */
+  readonly message: string
+  readonly fromCache: boolean
+  readonly cachedAt?: string
+  readonly source?: string
+}
+
+/**
+ * Final-pipeline cache. The cache-hit path re-ran four full-array passes
+ * over the ~13k-item listing per request (dsh.so overlay spread, blocked
+ * filter, per-item installed flagging with object spreads, dedupe) — the
+ * output only changes when an input generation does, so the constructed
+ * result is keyed by every generation and reused (one entry per profile:
+ * generations move forward, never back). The shared result object also
+ * keys the REST layer's serialization cache.
+ */
+const listingPipelineCache = new Map<string, { key: string; result: MarketplaceResult }>()
+
+/** Run (or reuse) the final marketplace pipeline for one request. */
+export async function finalizeListing(options: FinalizeListingOptions): Promise<MarketplaceResult> {
+  // Warm the installed index BEFORE reading its stamp so the key names the
+  // generation the flags are actually computed from.
+  buildInstalledIndex(options.profile)
+  const key = [
+    options.profile,
+    options.baseAt,
+    dshSoIndexAt(),
+    installedIndexAt(options.profile),
+    kindRecordsStamp(),
+    options.blocked.size > 0 ? [...options.blocked].sort().join(',') : '-',
+    options.variant,
+  ].join('|')
+  const cached = listingPipelineCache.get(options.profile)
+  if (cached !== undefined && cached.key === key) return cached.result
+  const flagged = await flagMarketplaceItems(
+    filterBlockedRepos(overlayDshSo(options.items, options.dshSo), options.blocked),
+    options.profile,
+  )
+  const { items: deduped, dropped } = dedupeMarketplace(flagged)
+  const result: MarketplaceResult = {
+    ok: true,
+    items: deduped,
+    fromCache: options.fromCache,
+    message: options.message,
+    ...(options.cachedAt !== undefined ? { cachedAt: options.cachedAt } : {}),
+    ...(options.source !== undefined ? { source: options.source } : {}),
+    ...(dropped > 0 ? { dropped } : {}),
+    ...blockedMeta(options.blocked),
+    total: deduped.length,
+  }
+  listingPipelineCache.set(options.profile, { key, result })
+  return result
+}
+
 /** Uncached build (the original per-dependency read walk; see the cache above). */
 function buildInstalledIndexUncached(profile: string): InstalledIndex | null {
   if (profile.length === 0 || !isSafeProfileName(profile)) return null
@@ -542,23 +622,19 @@ export function flagItemInstalled(item: MarketplaceItem, index: InstalledIndex |
 }
 
 /**
- * Flag every item with a bounded worker pool (registry lists can reach
- * thousands of entries; serial stat/read would stall the first paint).
+ * Flag every item in place-preserving order. flagItemInstalled is fully
+ * synchronous (map/set probes over the prebuilt index), so a plain loop is
+ * both the cheapest and the honest shape — the worker pool this replaced
+ * only simulated concurrency while one worker ran the whole cursor.
  */
 export async function flagMarketplaceItems(items: readonly MarketplaceItem[], profile: string): Promise<MarketplaceItem[]> {
   await pruneGhostRecords()
   const index = buildInstalledIndex(profile)
   const records = await loadKindRecords()
   const out = new Array<MarketplaceItem>(items.length)
-  const workers = Math.min(12, items.length)
-  let cursor = 0
-  const worker = async (): Promise<void> => {
-    while (cursor < items.length) {
-      const idx = cursor++
-      out[idx] = flagItemInstalled(items[idx]!, index, records)
-    }
+  for (let i = 0; i < items.length; i += 1) {
+    out[i] = flagItemInstalled(items[i]!, index, records)
   }
-  await Promise.all(Array.from({ length: workers }, () => worker()))
   return out
 }
 

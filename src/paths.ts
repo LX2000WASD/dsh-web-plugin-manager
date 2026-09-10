@@ -135,6 +135,16 @@ export function isOfficialProfile(name: string): boolean {
  * (apply) treats null as "no host", never crashing the plugin tree.
  */
 export function hostProfileName(): string | null {
+  // Memoized: the inputs (process.argv, this file's location) never change
+  // within a process, and the location fallback walks up to ten directories
+  // reading package.json on every call — isHostProfile() runs per request.
+  if (hostProfileMemo === undefined) hostProfileMemo = detectHostProfileName()
+  return hostProfileMemo
+}
+
+let hostProfileMemo: string | null | undefined
+
+function detectHostProfileName(): string | null {
   try {
     const argv = process.argv
     const flagIndex = argv.indexOf('--profile')

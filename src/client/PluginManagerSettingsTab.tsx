@@ -172,6 +172,11 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   // Request sequence guard: a slow response from an earlier profile must
   // not overwrite the state of the currently selected one (audit M8).
   const loadSeq = useRef(0)
+  // Late-response guard for per-profile commands (analyze / checkUpdates /
+  // fixes / updates): same race as load, different surface — the response
+  // is dropped when the profile it was issued for is no longer selected.
+  const selectedRef = useRef(selected)
+  useEffect(() => { selectedRef.current = selected }, [selected])
   // Abort handle of the in-flight load: a profile switch cancels the stale
   // fetch outright instead of letting it race (and possibly error against)
   // the newer one. Mutating commands never share this controller — they
@@ -250,14 +255,17 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 
   const onAnalyze = async (): Promise<void> => {
     if (selected.length === 0 || analyzing) return
+    const profile = selected
     setAnalyzing(true)
     try {
-      const result = await injected.current.analyze(selected)
+      const result = await injected.current.analyze(profile)
+      if (selectedRef.current !== profile) return
       setAnalysis(result)
       setFixedKeys(new Set())
       setConfirmKey(null)
     } catch (error: unknown) {
-      setOutput('$ analyze --profile ' + selected + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
+      if (selectedRef.current !== profile) return
+      setOutput('$ analyze --profile ' + profile + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setAnalyzing(false)
     }
@@ -275,15 +283,18 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
       setConfirmKey(null)
     }
     const fixKey = key ?? 'auto-' + issue.kind
+    const profile = selected
     setFixing(fixKey)
     try {
-      const result = await injected.current.fixIssue(selected, issue.fix.action, issue.fix.target)
+      const result = await injected.current.fixIssue(profile, issue.fix.action, issue.fix.target)
+      if (selectedRef.current !== profile) return
       setOutput('$ fix ' + issue.kind + ' (' + issue.fix.label + ')\n' + result.message)
       if (result.ok) {
         setFixedKeys(current => new Set(current).add(fixKey))
         void onAnalyze()
       }
     } catch (error: unknown) {
+      if (selectedRef.current !== profile) return
       setOutput('$ fix ' + issue.kind + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setFixing(null)
@@ -291,12 +302,15 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   }
 
   const onFixAll = async (): Promise<void> => {
+    const profile = selected
     setFixing('all')
     try {
-      const result = await injected.current.fixAll(selected)
+      const result = await injected.current.fixAll(profile)
+      if (selectedRef.current !== profile) return
       setOutput('$ fix all\n' + result.output)
       void onAnalyze()
     } catch (error: unknown) {
+      if (selectedRef.current !== profile) return
       setOutput('$ fix all\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setFixing(null)
@@ -394,20 +408,23 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
 
   const onCheckUpdates = async (): Promise<void> => {
     if (selected.length === 0 || checking) return
+    const profile = selected
     setChecking(true)
     try {
-      const result = await injected.current.checkUpdates(selected)
+      const result = await injected.current.checkUpdates(profile)
+      if (selectedRef.current !== profile) return
       const byName: Record<string, UpdateInfo> = {}
       for (const item of result.items) byName[item.name] = item
       setUpdates(byName)
       const updatable = result.items.filter(item => item.hasUpdate)
-      setOutput('$ check updates --profile ' + selected + '\n'
+      setOutput('$ check updates --profile ' + profile + '\n'
         + (updatable.length > 0
           ? updatable.map(item => '  ' + item.name + ': ' + (item.currentVersion ?? '?') + ' → ' + (item.latestVersion ?? '?')).join('\n')
           : '  all ' + result.items.length + ' packages up to date')
         + '\n' + result.message)
     } catch (error: unknown) {
-      setOutput('$ check updates --profile ' + selected + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
+      if (selectedRef.current !== profile) return
+      setOutput('$ check updates --profile ' + profile + '\n[error] ' + (error instanceof Error ? error.message : String(error)))
     } finally {
       setChecking(false)
     }

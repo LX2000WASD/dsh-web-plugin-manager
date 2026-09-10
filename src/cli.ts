@@ -27,66 +27,12 @@
  */
 
 import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { analyzeProfile } from './analyze.ts'
 import { installWithSource, removeProtected, updateProtected } from './index.ts'
 import { isUnderRoot, loadKindRecords, normalizeRepoRef, presetsDirPath, removeKindRecord, skillsDirPath } from './kinds.ts'
 import { addInsertRow, readInsertRows, readManagedIds, removeInsertRow, writePatch } from './patch.ts'
-
-/** Resolve the Harness home directory (DSH_HOME env, then ~/.dsh). */
-function dshHome(): string {
-  return process.env.DSH_HOME ?? join(homedir(), '.dsh')
-}
-
-/** The safe-profile-name rule (mirrors src/index.ts). */
-function isSafeProfileName(name: string): boolean {
-  return /^[A-Za-z0-9._-]+$/.test(name) && name.length <= 120
-}
-
-/** Resolve one profile's directory, rejecting traversal. */
-function profileDir(name: string): string {
-  if (!isSafeProfileName(name)) {
-    throw new Error('unsafe profile name: ' + JSON.stringify(name))
-  }
-  return join(dshHome(), 'profiles', name)
-}
-
-/** The profile's package.json manifest, parsed defensively. */
-function readManifest(dir: string): Record<string, unknown> {
-  const path = join(dir, 'package.json')
-  if (!existsSync(path)) return {}
-  try {
-    return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
-  } catch {
-    return {}
-  }
-}
-
-/** The profile's cordis.patch.yml path (may not exist yet). */
-function patchPath(dir: string): string {
-  return join(dir, 'cordis.patch.yml')
-}
-
-/** Read patch file content, or the empty string when absent. */
-function readPatch(dir: string): string {
-  const path = patchPath(dir)
-  return existsSync(path) ? readFileSync(path, 'utf8') : ''
-}
-
-/** Turn a package name into a safe insert-row id (mirrors src/index.ts). */
-function slugify(name: string): string {
-  return name.replace(/^@/, '').replace(/[^a-z0-9-]/gi, '-').toLowerCase()
-}
-
-/** The profile's bundle layer list (dsh.profile.bundles). */
-function readBundles(dir: string): string[] {
-  const manifest = readManifest(dir)
-  const dsh = (manifest['dsh'] ?? {}) as Record<string, unknown>
-  const profileManifest = (dsh['profile'] ?? {}) as Record<string, unknown>
-  const bundles = Array.isArray(profileManifest['bundles']) ? profileManifest['bundles'] as string[] : []
-  return [...bundles]
-}
+import { patchPath, profileDir, readBundles, readManifest, readPatch, slugify } from './paths.ts'
 
 function printHelp(): void {
   process.stdout.write(`dshpm — dsh-web-plugin-manager CLI (protected plugin operations)
@@ -261,7 +207,7 @@ function cmdList(profile: string): number {
   }
   const manifest = readManifest(dir)
   const deps = (manifest['dependencies'] ?? {}) as Record<string, string>
-  const bundles = readBundles(dir)
+  const bundles = readBundles(profile)
   const rows = readInsertRows(readPatch(dir))
   process.stdout.write('profile ' + profile + ' (' + dir + ')\n')
   process.stdout.write('\nbundle layers:\n')
@@ -301,7 +247,7 @@ function cmdMount(profile: string, packageName: string): number {
     process.stdout.write(packageName + ' is not a profile dependency (install it first)\n')
     return 1
   }
-  const bundles = readBundles(dir)
+  const bundles = readBundles(profile)
   if (bundles.includes(packageName)) {
     process.stdout.write(packageName + ' is a bundle-layer plugin — it loads on restart, no mount row needed\n')
     return 0
@@ -332,7 +278,7 @@ function cmdAnalyze(profile: string): number {
     process.stdout.write('profile not found: ' + profile + '\n')
     return 1
   }
-  const bundles = readBundles(dir)
+  const bundles = readBundles(profile)
   const analysis = analyzeProfile(dir, bundles, readPatch(dir), new Set(), [])
   process.stdout.write('analysis of profile ' + profile + ': ' + (analysis.ok ? 'no issues\n' : analysis.issues.length + ' issue(s)\n'))
   for (const issue of analysis.issues) {

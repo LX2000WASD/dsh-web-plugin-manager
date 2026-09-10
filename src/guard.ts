@@ -42,7 +42,6 @@ const DSH_PLUGIN_MUTATION =
 // yarn, bun, and their --dir/-C variants (audit: the old guard only
 // covered pnpm).
 const PM_MUTATION = /\b(?:pnpm|npm|yarn|bun)\b[\s\S]{0,80}?\b(?:add|remove|rm|uninstall|install)\b/
-const PM_DIR_FLAG = /(?:--dir|--prefix|-C)\b[^;\n&|]{0,60}?/ 
 const PROFILE_DIR_MARKER = /profiles|\\.dsh|DSH_HOME/
 
 /** Denial reason shown to the model in the tool result. */

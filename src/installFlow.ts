@@ -20,7 +20,7 @@ import {
 import { restoreInBoxBundles } from './profiles.ts'
 import { applyLiveOps, type StackOp } from './live.ts'
 import { addDisableBlock, addInsertRow, readInsertRows, readManagedIds, removeDisableBlock, removeInsertRow, writePatch } from './patch.ts'
-import { analyzeProfile, OFFICIAL_DEP_ALLOWED, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
+import { analyzeProfile, OFFICIAL_DEP_ALLOWED, packageEntry, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
 import { compareVersions, isGitSourceSpec, updateSpec } from './match.ts'
 import {
   addBlockedRepo, detectRepoType, installPreset, installSkill, loadKindRecords, looksLikeDshPlugin,
@@ -1394,44 +1394,9 @@ export function isLoaderProvided(spec: string): boolean {
     || spec.startsWith('@deepseek-ai/cordis-plugin-')
 }
 
-// scanImports / scanPackageImports live in src/analyze.ts (shared with the
-// health-check engine so the gate and the analysis never drift).
-
-/** Collect every string target of an exports node (recursed). */
-export function collectExportTargets(node: unknown, targets: string[]): void {
-  if (typeof node === 'string') {
-    if (node.length > 0) targets.push(node)
-    return
-  }
-  if (node === null || typeof node !== 'object') return
-  for (const value of Object.values(node)) collectExportTargets(value, targets)
-}
-
-/**
- * Resolve a package's entry file. Handles every common exports shape:
- * `"exports": "./dist/main.js"`, `"exports": {".": "./dist/main.js"}`,
- * `{".": {"default": ...}}` and nested conditions — a line-only default
- * lookup misjudged valid string-exports packages as "no entry" and rolled
- * back legal installs (audit M3).
- */
-export function packageEntry(pkgDir: string, manifest: Record<string, unknown>): string | null {
-  const candidates: string[] = []
-  const exportsField = manifest['exports']
-  if (typeof exportsField === 'string') {
-    candidates.push(exportsField)
-  } else if (exportsField !== null && typeof exportsField === 'object') {
-    const dot = (exportsField as Record<string, unknown>)['.']
-    if (dot !== undefined) collectExportTargets(dot, candidates)
-  }
-  if (typeof manifest['main'] === 'string') candidates.push(manifest['main'])
-  if (typeof manifest['module'] === 'string') candidates.push(manifest['module'])
-  for (const candidate of candidates) {
-    const resolved = join(pkgDir, candidate)
-    if (existsSync(resolved)) return resolved
-  }
-  const index = join(pkgDir, 'index.js')
-  return existsSync(index) ? index : null
-}
+// scanImports / scanPackageImports / packageEntry live in src/analyze.ts
+// (shared with the health-check engine so the gate and the analysis never
+// drift — entry resolution in particular must be one implementation).
 
 /**
  * Quality check for one installed package: undeclared bare imports that the

@@ -328,6 +328,17 @@ export function kindRecordsFile(): string {
 
 let kindRecordsCache: Map<string, KindRecord> | null = null
 let kindQueue: Promise<unknown> = Promise.resolve()
+/** Monotonic stamp bumped on every kind-record persistence (keys caches). */
+let kindRecordsStampValue = 0
+
+/**
+ * The kind-records generation: every save/remove/ghost-prune bumps it, so
+ * caches keying on installed flags can tell a record change from a
+ * no-op read. 0 until the first read of this process.
+ */
+export function kindRecordsStamp(): number {
+  return kindRecordsStampValue
+}
 
 function enqueueKind<T>(task: () => Promise<T>): Promise<T> {
   const run = kindQueue.then(task, task)
@@ -358,6 +369,7 @@ function writeKindRecords(records: Map<string, KindRecord>): void {
   const tmp = target + '.tmp'
   writeFileSync(tmp, JSON.stringify({ version: 1, records: data }, undefined, 2) + '\n')
   renameSync(tmp, target)
+  kindRecordsStampValue += 1
   try { rmSync(tmp, { force: true }) } catch { /* best-effort */ }
 }
 

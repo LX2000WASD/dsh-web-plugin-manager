@@ -27,11 +27,9 @@
  *    ctx.tools when the host provides it (src/tools.ts).
  */
 
-import { execFile, execFileSync, spawn } from 'node:child_process'
-import { connect, createServer } from 'node:net'
+import { execFileSync, spawn } from 'node:child_process'
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { isBuiltin } from 'node:module'
-import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
@@ -46,7 +44,7 @@ import type {
 } from './types.ts'
 import {
   addDisableBlock, addInsertRow, applyRowDisabled, applyRowEnabled,
-  hasManagedDisable, readInsertRows, readManagedIds, removeDisableBlock,
+  readInsertRows, readManagedIds, removeDisableBlock,
   removeInsertRow, writePatch,
 } from './patch.ts'
 import { analyzeProfile, OFFICIAL_DEP_ALLOWED, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
@@ -66,7 +64,7 @@ import { marketplaceFetch } from './net.ts'
 import { compareVersions, isGitSourceSpec, updateSpec } from './match.ts'
 import { isTrustedRequest, readJsonBody } from './rest.ts'
 import {
-  fetchDshSoIndex, fetchRegistryRepos, fetchSearchFallback, functionalTopics, readRegistryCache, writeRegistryCache,
+  dshSoIndexAt, fetchDshSoIndex, fetchRegistryRepos, fetchSearchFallback, readRegistryCache, writeRegistryCache,
   type DshSoEntry, type RegistryRepo,
 } from './registry.ts'
 import { registerTools } from './tools.ts'
@@ -76,7 +74,7 @@ import { createInstallSession, dropInstallSession, filterAnswers, getInstallSess
 
 import {
   dshHome, hostProfileName, isHostProfile, isOfficialProfile, isSafeProfileName,
-  OFFICIAL_PROFILES, patchPath, profileDir, readBundles, readManifest, readPatch, slugify,
+  patchPath, profileDir, readBundles, readManifest, readPatch, slugify,
   enqueueMutation, OUR_PACKAGE_NAME,
 } from './paths.ts'
 import { commandEnv, execFileTimeout, resolveCommand, resolveExec, runDshPlugin } from './childproc.ts'
@@ -86,8 +84,8 @@ import {
   scanRunsCached, type RunInfo, type TerminalOpen,
 } from './profiles.ts'
 import {
-  beginMarketplaceRefresh, blockedMeta, buildInstalledIndex, dedupeMarketplace, dirNameSet,
-  enrichRepos, fetchCatalogItems, fetchMarkdownItems, filterBlockedRepos, flagMarketplaceItems,
+  beginMarketplaceRefresh, dirNameSet,
+  enrichRepos, fetchCatalogItems, fetchMarkdownItems, filterBlockedRepos, finalizeListing,
   gitCacheIdentity, MARKETPLACE_CACHE_VERSION, MARKETPLACE_FAILURE_TTL, MARKETPLACE_TTL,
   mergeMarketplace, mergeRegistryWithCurated, overlayDshSo, readMemoryCache, registryToItem,
   writeMemoryCache,
@@ -113,6 +111,76 @@ export type * from './types.ts'
 export const ROUTE_PREFIX = '/api2/plugin-manager'
 
 
+
+// ── Marketplace disk-cache helpers (module-level: shared by the cached and walk paths) ──
+
+function marketplaceCachePaths(): { cachePath: string; failurePath: string } {
+  const cacheDir = join(dshHome(), 'plugin-manager-cache')
+  return { cachePath: join(cacheDir, 'marketplace.json'), failurePath: join(cacheDir, 'marketplace-failure.json') }
+}
+
+/** Read the cached listing: in-process mirror first, then the disk file. */
+function marketplaceReadCache(): { fetchedAt?: string; items: MarketplaceItem[]; source?: string } {
+  // In-process mirror first: the listing is profile-independent, so
+  // profile switches (flag recomputation) skip the disk read entirely.
+  const memory = readMemoryCache()
+  if (memory !== null) {
+    return {
+      fetchedAt: new Date(memory.at).toISOString(),
+      items: memory.items,
+      source: memory.source,
+    }
+  }
+  try {
+    const cached = JSON.parse(readFileSync(marketplaceCachePaths().cachePath, 'utf8')) as { version?: unknown; fetchedAt?: unknown; items?: unknown; source?: unknown }
+    // Cache format changed (item shape / source layout): ignore old files.
+    if (cached.version !== MARKETPLACE_CACHE_VERSION) return { items: [] }
+    const fetchedAt = typeof cached.fetchedAt === 'string' ? cached.fetchedAt : ''
+    const items = Array.isArray(cached.items) ? cached.items as MarketplaceItem[] : []
+    const source = typeof cached.source === 'string' ? cached.source : undefined
+    return { fetchedAt, items, source }
+  } catch { /* no/ broken cache */ }
+  return { items: [] }
+}
+
+function marketplaceWriteCache(items: MarketplaceItem[], source: string): void {
+  writeMemoryCache(items, source)
+  const { cachePath, failurePath } = marketplaceCachePaths()
+  mkdirSync(dirname(cachePath), { recursive: true })
+  // Atomic write (tmp + rename): two concurrent refreshes must not
+  // interleave into a truncated file (audit M13). Compact JSON: the ~13k-item
+  // listing is machine-read only; pretty-printing tripled the sync write.
+  const tmpPath = cachePath + '.tmp'
+  writeFileSync(tmpPath, JSON.stringify({
+    version: MARKETPLACE_CACHE_VERSION,
+    fetchedAt: new Date().toISOString(),
+    source,
+    items,
+  }) + '\n')
+  renameSync(tmpPath, cachePath)
+  try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
+  // A successful fetch clears the recorded failure reason.
+  rmSync(failurePath, { force: true })
+}
+
+function marketplaceReadFailure(): { fetchedAt?: string; message?: string } {
+  try {
+    const parsed = JSON.parse(readFileSync(marketplaceCachePaths().failurePath, 'utf8')) as { fetchedAt?: unknown; message?: unknown }
+    return {
+      fetchedAt: typeof parsed.fetchedAt === 'string' ? parsed.fetchedAt : '',
+      message: typeof parsed.message === 'string' ? parsed.message : undefined,
+    }
+  } catch { /* no/broken failure record */ }
+  return {}
+}
+
+function marketplaceWriteFailure(message: string): void {
+  try {
+    const { failurePath } = marketplaceCachePaths()
+    mkdirSync(dirname(failurePath), { recursive: true })
+    writeFileSync(failurePath, JSON.stringify({ fetchedAt: new Date().toISOString(), message }, undefined, 2) + '\n')
+  } catch { /* failure recording is best-effort */ }
+}
 
 /** Management service (also registered as ctx.pluginManager for host peers). */
 export class PluginManagerService extends Service {
@@ -348,118 +416,82 @@ export class PluginManagerService extends Service {
    * older response overwrite a newer one (audit M13).
    */
   async marketplace(profile: string, refresh: boolean): Promise<MarketplaceResult> {
-    if (refresh) {
-      const gate = beginMarketplaceRefresh()
-      await gate.previous
-      try {
-        return await this.marketplaceInner(profile, true)
-      } finally {
-        gate.release()
-      }
+    if (!refresh) {
+      const cached = await this.marketplaceCached(profile)
+      if (cached !== null) return cached
     }
-    return this.marketplaceInner(profile, false)
+    // Full source walk — a forced refresh, or a stale/missing cache. Gated
+    // either way (audit M13): the stale-cache path used to bypass this gate
+    // and run a second full walk beside an in-flight refresh, doubling the
+    // network round-trip for every source.
+    const gate = beginMarketplaceRefresh()
+    await gate.previous
+    try {
+      if (!refresh) {
+        // The walk queued ahead of us may have refreshed the cache already:
+        // serve its result instead of stacking another network round-trip.
+        const cached = await this.marketplaceCached(profile)
+        if (cached !== null) return cached
+      }
+      return await this.marketplaceWalk(profile, refresh)
+    } finally {
+      gate.release()
+    }
   }
 
-  private async marketplaceInner(profile: string, refresh: boolean): Promise<MarketplaceResult> {
-    const cacheDir = join(dshHome(), 'plugin-manager-cache')
-    const cachePath = join(cacheDir, 'marketplace.json')
-    const failurePath = join(cacheDir, 'marketplace-failure.json')
-    mkdirSync(cacheDir, { recursive: true })
-    const readCache = (): { fetchedAt?: string; items: MarketplaceItem[]; source?: string } => {
-      // In-process mirror first: the listing is profile-independent, so
-      // profile switches (flag recomputation) skip the disk read entirely.
-      const memory = readMemoryCache()
-      if (memory !== null) {
-        return {
-          fetchedAt: new Date(memory.at).toISOString(),
-          items: memory.items,
-          source: memory.source,
-        }
-      }
-      try {
-        const cached = JSON.parse(readFileSync(cachePath, 'utf8')) as { version?: unknown; fetchedAt?: unknown; items?: unknown; source?: unknown }
-        // Cache format changed (item shape / source layout): ignore old files.
-        if (cached.version !== MARKETPLACE_CACHE_VERSION) return { items: [] }
-        const fetchedAt = typeof cached.fetchedAt === 'string' ? cached.fetchedAt : ''
-        const items = Array.isArray(cached.items) ? cached.items as MarketplaceItem[] : []
-        const source = typeof cached.source === 'string' ? cached.source : undefined
-        return { fetchedAt, items, source }
-      } catch { /* no/ broken cache */ }
-      return { items: [] }
-    }
-    const writeCache = (items: MarketplaceItem[], source: string): void => {
-      writeMemoryCache(items, source)
-      // Atomic write (tmp + rename): two concurrent refreshes must not
-      // interleave into a truncated file (audit M13).
-      const tmpPath = cachePath + '.tmp'
-      writeFileSync(tmpPath, JSON.stringify({
-        version: MARKETPLACE_CACHE_VERSION,
-        fetchedAt: new Date().toISOString(),
-        source,
-        items,
-      }, undefined, 2) + '\n')
-      renameSync(tmpPath, cachePath)
-      try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
-      // A successful fetch clears the recorded failure reason.
-      rmSync(failurePath, { force: true })
-    }
-    const readFailure = (): { fetchedAt?: string; message?: string } => {
-      try {
-        const parsed = JSON.parse(readFileSync(failurePath, 'utf8')) as { fetchedAt?: unknown; message?: unknown }
-        return {
-          fetchedAt: typeof parsed.fetchedAt === 'string' ? parsed.fetchedAt : '',
-          message: typeof parsed.message === 'string' ? parsed.message : undefined,
-        }
-      } catch { /* no/broken failure record */ }
-      return {}
-    }
-    const writeFailure = (message: string): void => {
-      try {
-        writeFileSync(failurePath, JSON.stringify({ fetchedAt: new Date().toISOString(), message }, undefined, 2) + '\n')
-      } catch { /* failure recording is best-effort */ }
-    }
-    // Serve the cache unless it is missing, stale (>24h), or refresh is forced.
+  /**
+   * Serve the marketplace from cache when possible: a fresh (< TTL) listing,
+   * or the recorded recent-failure message. Null when a full walk is needed.
+   */
+  private async marketplaceCached(profile: string): Promise<MarketplaceResult | null> {
     const blocked = await loadBlockedRepos()
-    if (!refresh) {
-      const cached = readCache()
-      const fetchedAt = Date.parse(cached.fetchedAt ?? '')
-      if (!Number.isNaN(fetchedAt) && Date.now() - fetchedAt < MARKETPLACE_TTL && cached.items.length > 0) {
-        // The cached listing may predate the dsh.so overlay (or the overlay
-        // fields were dropped by an older cache version) — overlay from the
-        // disk-cached dsh.so index (fast, no network when the TTL holds).
-        const dshSo = await fetchDshSoIndex().catch(() => null)
-        const items = overlayDshSo(cached.items, dshSo)
-        const { items: deduped, dropped } = dedupeMarketplace(await flagMarketplaceItems(filterBlockedRepos(items, blocked), profile))
-        return {
-          ok: true,
-          items: deduped,
-          cachedAt: cached.fetchedAt,
-          fromCache: true,
-          message: 'served from cache',
-          ...(cached.source !== undefined ? { source: cached.source } : {}),
-          ...(dropped > 0 ? { dropped } : {}),
-          ...blockedMeta(blocked),
-          total: deduped.length,
-        }
-      }
-      // Recent total failure: serve the recorded reason instead of re-running
-      // the full GitHub round-trip (the failure is environmental and will
-      // not clear within minutes).
-      const failure = readFailure()
-      const failureAt = Date.parse(failure.fetchedAt ?? '')
-      if (failure.message !== undefined && !Number.isNaN(failureAt)
-        && Date.now() - failureAt < MARKETPLACE_FAILURE_TTL) {
-        return {
-          ok: false,
-          items: [],
-          fromCache: false,
-          message: failure.message + ' (negative cache — retry automatically in a few minutes)',
-        }
+    const cached = marketplaceReadCache()
+    const fetchedAt = Date.parse(cached.fetchedAt ?? '')
+    if (!Number.isNaN(fetchedAt) && Date.now() - fetchedAt < MARKETPLACE_TTL && cached.items.length > 0) {
+      // Warm the in-process mirror from a fresh disk read (stamped with the
+      // file's own fetchedAt, not now): without this a cache-hit-only process
+      // re-read and re-parsed the multi-MB file on EVERY request — the mirror
+      // used to be written only by the full-walk path.
+      if (readMemoryCache() === null) writeMemoryCache(cached.items, cached.source ?? '', fetchedAt)
+      // The cached listing may predate the dsh.so overlay (or the overlay
+      // fields were dropped by an older cache version) — overlay from the
+      // dsh.so index (memo/disk-cached, no network when the TTL holds).
+      const dshSo = await fetchDshSoIndex().catch(() => null)
+      return finalizeListing({
+        profile,
+        items: cached.items,
+        baseAt: fetchedAt,
+        dshSo,
+        blocked,
+        variant: 'cache',
+        message: 'served from cache',
+        fromCache: true,
+        cachedAt: cached.fetchedAt,
+        ...(cached.source !== undefined ? { source: cached.source } : {}),
+      })
+    }
+    // Recent total failure: serve the recorded reason instead of re-running
+    // the full GitHub round-trip (the failure is environmental and will
+    // not clear within minutes).
+    const failure = marketplaceReadFailure()
+    const failureAt = Date.parse(failure.fetchedAt ?? '')
+    if (failure.message !== undefined && !Number.isNaN(failureAt)
+      && Date.now() - failureAt < MARKETPLACE_FAILURE_TTL) {
+      return {
+        ok: false,
+        items: [],
+        fromCache: false,
+        message: failure.message + ' (negative cache — retry automatically in a few minutes)',
       }
     }
+    return null
+  }
+
+  private async marketplaceWalk(profile: string, refresh: boolean): Promise<MarketplaceResult> {
     // Keep previous metadata (stars/dates) for catalog-only entries when the
     // GitHub API is rate-limited during enrichment.
-    const prior = new Map<string, MarketplaceItem>(readCache().items.map(item => [item.name, item]))
+    const blocked = await loadBlockedRepos()
+    const prior = new Map<string, MarketplaceItem>(marketplaceReadCache().items.map(item => [item.name, item]))
     let catalogError: string | null = null
     let markdownError: string | null = null
     // Fetch sources independently and CONCURRENTLY: the registry index, the
@@ -481,7 +513,9 @@ export class PluginManagerService extends Service {
       }),
       // dsh.so registry: independent verification (L1–L5) + security scan
       // metadata, overlaid onto matching entries (never an install source).
-      fetchDshSoIndex().catch((error: unknown) => {
+      // A manual refresh forces the network; a stale-cache walk reuses a
+      // still-fresh dsh.so cache like every other read surface.
+      fetchDshSoIndex({ forceNetwork: refresh }).catch((error: unknown) => {
         console.warn('[plugin-manager] dsh.so index unavailable: ' + (error instanceof Error ? error.message : String(error)))
         return null
       }),
@@ -527,46 +561,47 @@ export class PluginManagerService extends Service {
     if (items.length > 0) {
       // Persist only complete listings (registry or catalog); the search
       // fallback is partial and must not downgrade a good cache.
-      if (source !== 'search') writeCache(items, source)
+      if (source !== 'search') marketplaceWriteCache(items, source)
       const note = [
         'registry: ' + (registryItems !== null ? 'ok' : 'unavailable'),
         catalogError === null ? 'catalog' : 'catalog unavailable (' + catalogError + ')',
         markdownError === null ? 'PLUGINS.md' : 'PLUGINS.md unavailable (' + markdownError + ')',
       ].join('; ')
-      const flagged = await flagMarketplaceItems(filterBlockedRepos(items, blocked), profile)
-      const { items: deduped, dropped } = dedupeMarketplace(flagged)
-      return {
-        ok: true,
-        items: deduped,
+      return finalizeListing({
+        profile,
+        items,
+        // writeCache just stamped the memory mirror; keying on it means the
+        // very next (cached) request reuses this exact result.
+        baseAt: readMemoryCache()?.at ?? Date.now(),
+        dshSo,
+        blocked,
+        variant: 'fresh',
+        message: 'fetched ' + items.length + ' plugins (' + note + ')',
         fromCache: false,
-        message: 'fetched ' + deduped.length + ' plugins (' + note + ')',
         source,
-        ...(dropped > 0 ? { dropped } : {}),
-        ...blockedMeta(blocked),
-        total: deduped.length,
-      }
+      })
     }
     // Last resort: the on-disk cache (any age — better than an empty list).
-    const cached = readCache()
+    const cached = marketplaceReadCache()
     if (cached.items.length > 0) {
-      const dshSo = await fetchDshSoIndex().catch(() => null)
-      const { items: flagged, dropped } = dedupeMarketplace(await flagMarketplaceItems(filterBlockedRepos(overlayDshSo(cached.items, dshSo), blocked), profile))
-      return {
-        ok: true,
-        items: flagged,
-        cachedAt: cached.fetchedAt,
-        fromCache: true,
+      const dshSoLate = dshSo !== null ? dshSo : await fetchDshSoIndex().catch(() => null)
+      return finalizeListing({
+        profile,
+        items: cached.items,
+        baseAt: readMemoryCache()?.at ?? (Date.parse(cached.fetchedAt ?? '') || Date.now()),
+        dshSo: dshSoLate,
+        blocked,
+        variant: 'stale-cache',
         message: 'sources unavailable; served from cache: ' + (catalogError ?? markdownError ?? 'unknown'),
+        fromCache: true,
+        cachedAt: cached.fetchedAt,
         ...(cached.source !== undefined ? { source: cached.source } : {}),
-        ...(dropped > 0 ? { dropped } : {}),
-        ...blockedMeta(blocked),
-        total: flagged.length,
-      }
+      })
     }
     // Total failure with nothing to serve: record the reason so the next
     // visits within the negative-cache TTL fail fast with a visible message.
     const failure = catalogError ?? markdownError ?? 'no sources'
-    writeFailure(failure)
+    marketplaceWriteFailure(failure)
     return { ok: false, items: [], fromCache: false, message: failure }
   }
 
@@ -1021,7 +1056,9 @@ export class PluginManagerService extends Service {
     await pruneGhostRecords()
     // Kind records (global skills/presets).
     const records = await loadKindRecords()
-    for (const kind of backup.kinds) {
+    // Shape-hardened: the backup arrives over REST from an uploaded file —
+    // malformed entries are skipped, not TypeErrors into a vague 400.
+    for (const kind of Array.isArray(backup.kinds) ? backup.kinds : []) {
       if (records.has(kind.repo)) {
         already.push(kind.repo)
         continue
@@ -1047,7 +1084,8 @@ export class PluginManagerService extends Service {
       }
       const manifest = readManifest(profileDir(bp.name)) as { dependencies?: Record<string, string> }
       const deps = manifest.dependencies ?? {}
-      for (const [name, source] of Object.entries(bp.dependencies)) {
+      const backupDeps = (bp as { dependencies?: Record<string, string> }).dependencies ?? {}
+      for (const [name, source] of Object.entries(backupDeps)) {
         if (deps[name] !== undefined) {
           already.push(bp.name + '/' + name)
           continue
@@ -1760,6 +1798,9 @@ function pruneJobs(): void {
   }
 }
 
+/** Serialized marketplace envelopes, keyed by result-object identity. */
+const marketplaceSerialization = new WeakMap<MarketplaceResult, { json: string; gzip?: Buffer }>()
+
 /**
  * Start a long operation as a tracked job. Bounded: more than
  * JOBS_MAX_PENDING simultaneously pending jobs means a client is stacking
@@ -1855,6 +1896,17 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         return
       }
       const body = (await readJsonBody(req)) as Record<string, unknown>
+      // Input fence for job-backed mutations: an empty or unsafe profile /
+      // package name used to travel into a bounded job slot (4 pending max)
+      // and fail only after clone/pnpm work had started.
+      const validProfile = (name: string): boolean => name.length > 0 && isSafeProfileName(name)
+      const requireProfile = (name: string): boolean => {
+        if (!validProfile(name)) {
+          respond(400, { ok: false, error: { code: 'bad-profile', message: 'invalid profile name: ' + JSON.stringify(name) } })
+          return false
+        }
+        return true
+      }
       switch (op) {
         case 'listProfiles': {
           respond(200, { ok: true, value: service.listProfiles() })
@@ -1875,6 +1927,11 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'install': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const spec = typeof body['spec'] === 'string' ? body['spec'] : ''
+          if (!requireProfile(profile)) return
+          if (spec.trim().length === 0) {
+            respond(400, { ok: false, error: { code: 'bad-spec', message: 'install spec is empty' } })
+            return
+          }
           const rawAnswers = body['answers']
           const answers = rawAnswers !== null && typeof rawAnswers === 'object' && !Array.isArray(rawAnswers)
             ? Object.fromEntries(
@@ -1890,12 +1947,22 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'remove': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
+          if (!requireProfile(profile)) return
+          if (name.trim().length === 0) {
+            respond(400, { ok: false, error: { code: 'bad-name', message: 'plugin name is empty' } })
+            return
+          }
           respondJob(respond, startJob(() => service.remove(profile, name)))
           return
         }
         case 'uninstallKind': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const repo = typeof body['repo'] === 'string' ? body['repo'] : ''
+          if (!requireProfile(profile)) return
+          if (repo.trim().length === 0) {
+            respond(400, { ok: false, error: { code: 'bad-repo', message: 'repo is empty' } })
+            return
+          }
           respondJob(respond, startJob(() => service.uninstallKind(profile, repo)))
           return
         }
@@ -1911,8 +1978,8 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'backupDiff': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const backup = body['backup'] as BackupFile | undefined
-          if (backup === undefined || typeof backup !== 'object' || !Array.isArray(backup.profiles)) {
-            respond(400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
+          if (backup === undefined || typeof backup !== 'object' || !Array.isArray(backup.profiles) || !Array.isArray(backup.kinds)) {
+            respond(400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file (profiles/kinds lists)' } })
             return
           }
           respond(200, { ok: true, value: await service.backupDiff(backup, profile) })
@@ -1921,8 +1988,12 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'backupRestore': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const backup = body['backup'] as BackupFile | undefined
-          if (backup === undefined || typeof backup !== 'object' || !Array.isArray(backup.profiles)) {
-            respond(400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file' } })
+          if (backup === undefined || typeof backup !== 'object' || !Array.isArray(backup.profiles) || !Array.isArray(backup.kinds)) {
+            respond(400, { ok: false, error: { code: 'bad-backup', message: 'backup payload is not a valid backup file (profiles/kinds lists)' } })
+            return
+          }
+          if (profile.length > 0 && !validProfile(profile)) {
+            respond(400, { ok: false, error: { code: 'bad-profile', message: 'invalid profile name: ' + JSON.stringify(profile) } })
             return
           }
           respondJob(respond, startJob(() => service.backupRestore(backup, profile)))
@@ -1953,7 +2024,32 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'marketplace': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const refresh = body['refresh'] === true
-          respond(200, { ok: true, value: await service.marketplace(profile, refresh) })
+          const result = await service.marketplace(profile, refresh)
+          // Large-listing serialization cache: the per-generation pipeline
+          // cache returns the SAME result object for repeat requests, so the
+          // ~1.7MB stringify + gzip is paid once per generation instead of
+          // per request (gzip is computed lazily — only gzip-capable clients
+          // trigger it).
+          let serialized = marketplaceSerialization.get(result)
+          if (serialized === undefined) {
+            serialized = { json: JSON.stringify({ ok: true, value: result }) }
+            marketplaceSerialization.set(result, serialized)
+          }
+          if (acceptEncoding.toLowerCase().includes('gzip')
+            && Buffer.byteLength(serialized.json, 'utf8') > GZIP_MIN_BYTES) {
+            if (serialized.gzip === undefined) {
+              serialized.gzip = gzipSync(Buffer.from(serialized.json, 'utf8'))
+            }
+            res.writeHead(200, {
+              'content-type': 'application/json',
+              'content-encoding': 'gzip',
+              'vary': 'Accept-Encoding',
+            })
+            res.end(serialized.gzip)
+            return
+          }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(serialized.json)
           return
         }
         case 'startProfile': {
@@ -1964,7 +2060,8 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'copyPlugins': {
           const from = typeof body['from'] === 'string' ? body['from'] : ''
           const to = typeof body['to'] === 'string' ? body['to'] : ''
-          const names = Array.isArray(body['names']) ? body['names'] as string[] : []
+          const names = Array.isArray(body['names']) ? body['names'].filter((n): n is string => typeof n === 'string') : []
+          if (!requireProfile(from) || !requireProfile(to)) return
           respondJob(respond, startJob(() => service.copyPlugins(from, to, names)))
           return
         }
@@ -1998,6 +2095,9 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         }
         case 'analyze': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
+          // Let queued request callbacks flush before the (synchronous,
+          // node_modules-walking) analysis monopolizes the event loop.
+          await new Promise(resolve => setImmediate(resolve))
           respond(200, { ok: true, value: service.analyze(profile) })
           return
         }
@@ -2016,6 +2116,11 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'update': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const name = typeof body['name'] === 'string' ? body['name'] : ''
+          if (!requireProfile(profile)) return
+          if (name.trim().length === 0) {
+            respond(400, { ok: false, error: { code: 'bad-name', message: 'plugin name is empty' } })
+            return
+          }
           const locale = acceptLanguageLocale(String((req as { headers?: Record<string, string | string[] | undefined> }).headers?.['accept-language'] ?? ''))
           respondJob(respond, startJob(() => service.update(profile, name, locale)))
           return
@@ -2027,6 +2132,11 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'job': {
           // Long-operation poll (install/update/remove/… return { jobId }).
           const id = typeof body['id'] === 'string' ? body['id'] : ''
+          // Polls are the only guaranteed traffic after a job settles (the
+          // starting client may go away), so expiry is enforced here too —
+          // not just on startJob, where a quiet period kept settled jobs
+          // (each holding up to 4MB of pnpm output) alive past the TTL.
+          pruneJobs()
           const job = jobs.get(id)
           if (job === undefined) {
             respond(200, { ok: true, value: { done: true, missing: true } })
@@ -2047,6 +2157,10 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           respond(404, { ok: false, error: { code: 'unknown-op', message: op } })
       }
     } catch (error: unknown) {
+      // Route-level failures were silent before — a loader/fs error deep in
+      // a read path surfaced only as a bare 400 to the client.
+      console.warn('[plugin-manager] route ' + op + ' failed: '
+        + (error instanceof Error ? error.stack ?? error.message : String(error)))
       respond(400, {
         ok: false,
         error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) },
