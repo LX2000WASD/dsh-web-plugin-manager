@@ -32,7 +32,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { isBuiltin } from 'node:module'
-import { dirname, extname, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { AnalyzeEdge, AnalyzeIssue, AnalyzePackage, AnalyzeResult } from './types.ts'
 
 /**
@@ -55,8 +55,15 @@ import type { AnalyzeEdge, AnalyzeIssue, AnalyzePackage, AnalyzeResult } from '.
  */
 export const OFFICIAL_DEP_ALLOWED = new Set(['@deepseek-ai/schemastery', '@deepseek-ai/cosmokit'])
 
-/** Specifiers the loader provides without any plugin declaring them. */
-const LOADER_PROVIDED = new Set([
+/**
+ * Specifiers the loader provides without the plugin declaring them: the
+ * client platform table plus the host-side cordis basics the profile
+ * bundles mount. Anything else a plugin imports must be in its manifest.
+ * The @deepseek-ai/dsh-client-* and @deepseek-ai/cordis-plugin-* families
+ * are platform packages (matched by prefix so the whitelist cannot drift
+ * from the web-app client table).
+ */
+export const LOADER_PROVIDED = new Set([
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
   '@deepseek-ai/cordis',
   '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include',
@@ -66,7 +73,7 @@ const LOADER_PROVIDED = new Set([
 ])
 
 /** Whether the loader/platform provides a specifier without declaration. */
-function isLoaderProvided(spec: string): boolean {
+export function isLoaderProvided(spec: string): boolean {
   return LOADER_PROVIDED.has(spec)
     || spec.startsWith('@deepseek-ai/dsh-client-')
     || spec.startsWith('@deepseek-ai/cordis-plugin-')
@@ -157,11 +164,6 @@ function stripComments(code: string): string {
   const withoutBlock = code.replace(/\/\*[\s\S]*?\*\//g, '')
   // A line comment starts at // not preceded by : (http:// is not a comment).
   return withoutBlock.replace(/(^|[^:])\/\/.*$/gm, '$1')
-}
-
-/** All relative specifiers referenced by one JS file (for entry traversal). */
-function relativeImports(filePath: string): string[] {
-  return scanFileSpecifiers(filePath).relative
 }
 
 /** Resolve one relative specifier to a file path (dir, .js, .mjs, .cjs, .ts…). */
@@ -280,32 +282,84 @@ export function collectExportTargets(node: unknown, targets: string[]): void {
 }
 
 /**
- * Resolve a package's entry file. Handles every common exports shape:
- * `"exports": "./dist/main.js"`, `"exports": {".": "./dist/main.js"}`,
- * `{".": {"default": ...}}` and nested conditions — a line-only default
- * lookup misjudged valid string-exports packages as "no entry" and rolled
- * back legal installs (audit M3). Single source of truth: the health
- * analysis and the install quality gate must never drift on entry
- * resolution (a string-exports package used to pass the gate but silently
- * skip every analysis check).
+ * Non-script targets of an exports map. `"./package.json": "./package.json"`
+ * is a common re-export, and a JSON/CSS asset can never contain a bare
+ * runtime import — scanning them would only risk false positives in a gate
+ * that ROLLS BACK installs. Extensionless targets stay eligible (some
+ * packages point a subpath at a bin script with no extension).
  */
-export function packageEntry(pkgDir: string, manifest: Record<string, unknown>): string | null {
+const NON_SCRIPT_TARGET = /\.(?:json|jsonc|css|md|markdown|txt|wasm|node|map|html?|svg|png|jpe?g|gif|ya?ml|toml|d\.ts)$/i
+
+/**
+ * Every declared entry target of a package, in declaration order: all
+ * top-level `exports` subpaths first (with `"."` leading when present),
+ * then `main`, then `module`.
+ *
+ * C-1: only `exports["."]` used to be collected, so an undeclared import
+ * inside `exports["./server"]` passed the install quality gate — and a
+ * bundle patch row mounting that subpath then failed the WHOLE profile at
+ * boot with ERR_MODULE_NOT_FOUND. DSH plugins commonly ship several entries
+ * (host + client + worker), so every one of them is part of the load chain.
+ *
+ * Shapes handled: a bare string, a subpath map (`{"./x": …}`), a
+ * conditions-only map (`{import: …, require: …}`, which applies to `"."`),
+ * and nested condition/array trees under any of them.
+ */
+export function packageEntries(pkgDir: string, manifest: Record<string, unknown>): string[] {
   const candidates: string[] = []
   const exportsField = manifest['exports']
   if (typeof exportsField === 'string') {
     candidates.push(exportsField)
   } else if (exportsField !== null && typeof exportsField === 'object') {
-    const dot = (exportsField as Record<string, unknown>)['.']
-    if (dot !== undefined) collectExportTargets(dot, candidates)
+    const record = exportsField as Record<string, unknown>
+    const keys = Object.keys(record)
+    // Node's rule: an exports object is EITHER a subpath map (every key
+    // starts with ".") or a single conditions object for ".". Collecting
+    // every string of either shape is equivalent, but walking subpaths
+    // individually keeps "." first for the entry-primary caller.
+    const isSubpathMap = keys.length > 0 && keys.every(key => key.startsWith('.'))
+    if (isSubpathMap) {
+      // "." first (the canonical root entry), then the remaining subpaths.
+      for (const key of ['.', ...keys.filter(key => key !== '.')]) {
+        collectExportTargets(record[key], candidates)
+      }
+    } else {
+      collectExportTargets(exportsField, candidates)
+    }
   }
   if (typeof manifest['main'] === 'string') candidates.push(manifest['main'])
   if (typeof manifest['module'] === 'string') candidates.push(manifest['module'])
+  const out: string[] = []
+  const seen = new Set<string>()
   for (const candidate of candidates) {
+    if (NON_SCRIPT_TARGET.test(candidate)) continue
     const resolved = join(pkgDir, candidate)
-    if (existsSync(resolved)) return resolved
+    if (seen.has(resolved) || !existsSync(resolved)) continue
+    seen.add(resolved)
+    out.push(resolved)
   }
-  const index = join(pkgDir, 'index.js')
-  return existsSync(index) ? index : null
+  if (out.length === 0) {
+    const index = join(pkgDir, 'index.js')
+    if (existsSync(index)) out.push(index)
+  }
+  return out
+}
+
+/**
+ * Resolve a package's PRIMARY entry file (the first declared, existing
+ * target). Handles every common exports shape: `"exports": "./dist/main.js"`,
+ * `"exports": {".": "./dist/main.js"}`, `{".": {"default": ...}}` and
+ * nested conditions — a line-only default lookup misjudged valid
+ * string-exports packages as "no entry" and rolled back legal installs
+ * (audit M3). Single source of truth: the health analysis and the install
+ * quality gate must never drift on entry resolution (a string-exports
+ * package used to pass the gate but silently skip every analysis check).
+ *
+ * Callers that must cover the whole load chain use `packageEntries` (C-1);
+ * this stays for the places that need exactly one representative entry.
+ */
+export function packageEntry(pkgDir: string, manifest: Record<string, unknown>): string | null {
+  return packageEntries(pkgDir, manifest)[0] ?? null
 }
 
 /** Parse one package manifest defensively. */
@@ -317,18 +371,7 @@ function readManifest(dir: string): Record<string, unknown> {
   }
 }
 
-/** Simple semver compare: major.minor.patch (ignores prerelease ordering). */
-function compareVersions(a: string, b: string): number {
-  const clean = (value: string): string => value.trim().replace(/^[v=~^]/, '')
-  const pa = clean(a).split('.')
-  const pb = clean(b).split('.')
-  for (let i = 0; i < 3; i += 1) {
-    const na = Number.parseInt(pa[i] ?? '0', 10)
-    const nb = Number.parseInt(pb[i] ?? '0', 10)
-    if (na !== nb) return na < nb ? -1 : 1
-  }
-  return 0
-}
+import { compareVersions } from './match.ts'
 
 /** Whether an installed version satisfies a semver range (simplified). */
 function satisfiesRange(installed: string, range: string): boolean {
@@ -745,8 +788,18 @@ export function analyzeProfile(
     })
   }
 
-  // Topological order (Kahn), cycles broken at their first member.
-  const topoOrder = topoSort(adjacency, packages.map(pkg => pkg.name))
+  // Topological order (Kahn), cycles broken at their first member. The
+  // adjacency above points importer → provider, so Kahn's indegree-0 seeds
+  // are consumers — the reverse of a usable load order. Reverse the edges
+  // for the sort so providers come first (a plugin can only activate after
+  // the packages it imports).
+  const providersFirst = new Map<string, string[]>()
+  for (const edge of edges) {
+    const list = providersFirst.get(edge.to) ?? []
+    list.push(edge.from)
+    providersFirst.set(edge.to, list)
+  }
+  const topoOrder = topoSort(providersFirst, packages.map(pkg => pkg.name))
 
   return {
     ok: issues.length === 0,

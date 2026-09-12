@@ -43,7 +43,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 
 ## 健康检查（`src/analyze.ts`，离线引擎）
 
-- 依赖图：全包 entry imports → providers（含 pnpm symlink、exports 子路径）→ 包间依赖边；拓扑排序输出（加载顺序提示，cordis 激活本身是服务可用性驱动）
+- 依赖图：全包 entry imports → providers（含 pnpm symlink、exports 子路径）→ 包间依赖边；拓扑排序输出（加载顺序提示，cordis 激活本身是服务可用性驱动）。**被依赖方排在依赖方之前**（邻接表方向是 importer→provider，直接 Kahn 会输出反向；0.6.2 修正）
 - 缺失依赖（imports 无提供者且未声明）、被禁用依赖、循环依赖（DFS）、重复 patch 行 id
 - **同名注册冲突**（确定性 fail-loud 故障）：服务名（new Service/ctx.provide）、工具名（ctx.tools.register）、prompt section 名（ctx.systemPrompt.section）、web 路由路径（ctx.webServer.register）——源码正则扫描，动态注册（字符串拼接的名字）检测不到
 - peerDependencies 版本满足性（简化 semver：`^`/`~`/`>=`/`<=`/`>`/`<`/精确/星号），含经共享 fallback 解析的官方核心包
@@ -73,9 +73,10 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 - **dsh.so 验证/安全叠加**：[dsh.so](https://www.dsh.so) 独立索引（1630 条，全部带 verification L1–L5 + 自动化安全扫描）按仓库名叠加 verification/security 徽标到卡片（TAG 行与 awesome 状态徽标同行，不新增条目、不作安装源）；dsh.so 索引独立磁盘缓存 24h，失败降级不阻塞；注意扫描为静态启发式，`high` 风险可能是误报（如本管理器自身也被标 high）——徽标是"装前留意"信号，最终判定仍是安装质量门
 - **已安装判定在服务端**（每请求按目标 profile 计算，12 并发池标注）：① npm 包名（registry pkg_name / 仓库名）② manifest `repository` 双向匹配（同名不同仓库不误判）③ git 缓存源 owner-repo 身份 ④ `~/.dsh/skills|.agent-presets` 目录探测；返回 `installed` / `installedVersion` / `latestVersion`（索引版本字段）/ `updateAvailable`（仅严格更高才提示，回滚不误报）
 - **同名包冲突消解**：同一 pkg_name 只保留一条（已安装优先、否则星数高者），`dropped` 计数透传前端提示「N 个同名包已隐藏」
-- **模糊搜索与相关性排序**（`src/rank.ts`）：搜索框按"有序子序列"对齐打分（vendor 自官方 0.1.3-alpha.1 ui-primitives `rankByName` 算法并做长名适配）——`plgmgr` 能命中 `plugin-manager`，`trmnl` 能命中 `dsh-terminal-panel`；打分规则：分隔符边界（`-`/`_` 后）加分、连续命中强加分、间隔按间距扣分、首字符起始位有界扣分（官方的全局 -index 惩罚在长仓库名上会累计成大负分，已适配）、总分下限 1（名称命中恒不低于描述兜底）；搜索态按相关性排序（同分星数破平），清空搜索恢复所选排序；打分经 `useDeferredValue` 在低优先级渲染中重算，3000+ 条不阻塞键击；目录页（查看 tab）同一算法做过滤
+- **分类（category）与标签模型**：上游 CI 分类器给每条仓库一个功能分类 id（tool/memory/web-ui/coding/agent/conversation/notify/model/vision/document/resource/other），服务端在最终 listing 上聚合成 `categories: {id,count}[]`（去重/屏蔽之后的条目才计数，所以筛不出空列表），客户端缺失时用同一实现本地兜底；卡片标签由共享纯函数 `src/tags.ts` 的 `buildMarketTags` 统一产出，顺序固定为 **category → type → status → verify → security → topic**，跨 kind 同名值忽略大小写去重（保留高优先级者），未知上游分类原样显示不归一（暴露上游分类器的问题而不是掩盖它）
+- **模糊搜索与相关性排序**（`src/rank.ts`）：搜索框按"有序子序列"对齐打分（vendor 自官方 0.1.3-alpha.1 ui-primitives `rankByName` 算法并做长名适配）——`plgmgr` 能命中 `plugin-manager`，`trmnl` 能命中 `dsh-terminal-panel`；打分规则：分隔符边界（`-`/`_` 后）加分、连续命中强加分、间隔按间距扣分、首字符起始位有界扣分（官方的全局 -index 惩罚在长仓库名上会累计成大负分，已适配）、总分下限 1（名称命中恒不低于描述兜底）；**字符掩码预筛**（26 位 bitmask，query 含掩码外字符即 O(1) 淘汰；掩码与朴素版分数逐条一致，13k×2 字段实测 25.1ms→8.9ms/键击）；搜索态按相关性排序（同分星数破平），清空搜索恢复所选排序；打分经 `useDeferredValue` 在低优先级渲染中重算，1.3 万条不阻塞键击；目录页（查看 tab）同一算法做过滤
 - 卡片动作：未安装 → 安装；已装无新版 → 绿色「已安装 vX」；已装有新版 → 橙色「更新」（npm 包走受保护 update 链路重写 specifier + 质量门 + 回滚，git-only 源重装）；星数排序时已安装置顶
-- 卡片布局：标题省略号不挤占按钮区；短 meta 行（星数缩写 2.5K / 来源 npm包|git仓库 / 类型占位）；TAG 行（审核状态 + 功能分类本地化）；单/双列切换（localStorage 记忆）；**增量渲染**——首屏 120 条 + 触底加载更多 + `content-visibility: auto`（~3000 条列表不卡顿，无需服务端分页）
+- 卡片布局：**等高槽位**（标题 52 / 标签行 24×2 / 描述 42（`-webkit-line-clamp:2`）/ 日期 30 = 172px，与 `contain-intrinsic-size` 一致，双列同行两卡实测高度差 0px）；标签走官方 `Tag`（胶囊 + 语义 tone），超出槽位合并成 "+n" 胶囊；短 meta 行（星数缩写 2.5K / 来源 npm包|git仓库）；**排序**：星数/更新时间/发布时间默认降序、A-Z 升序，方向按钮文案与实际方向同源（`marketToolbarModel`），已安装恒置顶（优先级而非排序键，反向也不掉队），tie-break 为 displayName→name（共享 `Intl.Collator`）；单/双列切换（localStorage 记忆）；**增量渲染**——首屏 120 条 + 触底加载更多 + `content-visibility: auto` + 分批 chunk（父层元素数 O(批数) 而非 O(已挂载)，滚到底父层函数体 539.9ms→7.7ms）
 - **缓存**：进程内存镜像（listing 与 profile 无关，切 profile 只重算已安装标记，零磁盘 IO）+ 磁盘 24h 缓存 + 失败负缓存 5min + registry 原始索引缓存；`refresh=1` 是唯一强制网络路径。刷新路径四源**并行**抓取（registry 索引 / catalog / PLUGINS.md / dsh.so，耗时=最慢源而非四者之和），catalog 条目 8 并发池下载；npm registry 地址进程级只解析一次（`npm_config_registry` 优先，避免每次版本检查重复 spawn）
 - **网络健壮性**：每请求 15s 超时（AbortSignal.timeout）；支持 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`（undici ProxyAgent——Node 全局 fetch 会丢弃 dispatcher 选项，市场请求必须走 undici 自身 fetch）；失败原因负缓存 5 分钟（`marketplace-failure.json`，避免每次进页重跑全量 GitHub 往返）；索引全挂且无缓存时空列表直接显示失败原因
 - GitHub API 未认证限流 60/h：仅 catalog 独有条目的星数富化会打 API（量小）；403/429 停止富化（星数降级用上次快照元数据），列表本身不受影响；raw 兜底源可达时列表保持非空
@@ -118,7 +119,7 @@ README 只保留功能速览；本文件存放功能与限制的细致说明，�
 
 ## 架构模块
 
-- Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）；六条 pnpm 长操作（install/update/remove/backupRestore/uninstallKind/copyPlugins）job 化：POST 即返 `{jobId}`，`job` op 轮询至 settle（30min TTL，>4 个在途返回 429 busy），client 端轮询封装在注入面内——所有 tab 调用点与 busy/elapsed 状态零改动
+- Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST（`webServer.register`）；七条长操作（install/update/remove/backupRestore/uninstallKind/copyPlugins/checkUpdates）job 化：POST 即返 `{jobId}`，`job` op 轮询至 settle（TTL 自 settle 起算 30min，>4 个在途返回 429 busy），client 端轮询封装在注入面内——所有 tab 调用点与 busy/elapsed 状态零改动
 - 基础层：`src/paths.ts`（profile 路径/manifest/patch 读取、全局变更互斥队列、宿主 profile 识别）；`src/childproc.ts`（命令解析、PATH 注入、官方 CLI 运行器、异步 exec）；`src/profiles.ts`（进程表扫描/终端/端口/模板/in-box 保护）
 - 保护链路：`src/installFlow.ts`（安装/更新/删除保护流 + 质量门 + 回滚 + managed 行清理）；市场管道：`src/marketplaceMerge.ts`（抓取/合并/标记/叠加/消解）
 - 实时应用：`src/live.ts`；分析引擎：`src/analyze.ts`（与质量门共享扫描器，永不漂移）；Patch 编辑：`src/patch.ts`（YAML 陷阱：`@` 包名引号、空数组文档 `[]`、纯注释文件恢复模板）；网络助手：`src/net.ts`（超时 + 代理 + 共享 UA）；REST 原语：`src/rest.ts`（信任围栏 + 请求体读取，纯函数可单测）；模糊打分：`src/rank.ts`（client/host 共用纯函数）；版本比较：`src/match.ts`（updateSpec + compareVersions）；Agent 工具：`src/tools.ts`；守卫与提示：`src/guard.ts`；CLI：`src/cli.ts`

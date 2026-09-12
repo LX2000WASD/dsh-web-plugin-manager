@@ -34,7 +34,7 @@
  *    official `[]` template instead.
  */
 
-import { readFileSync, writeFileSync, existsSync, renameSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 
 /** Marker lines delimiting one managed block. */
 const START = '# dsh-plugin-manager:managed:start'
@@ -78,6 +78,40 @@ export interface PatchInsertRow {
 }
 
 /**
+ * The module specifier of one insert row, read from the row's OWN `name:`
+ * field. Returns '' when the row has none.
+ *
+ * The name must be a direct sibling of the row's `- id:` (indented exactly
+ * two spaces deeper, the YAML mapping level). The previous implementation
+ * scanned forward for ANY `name:` and stopped at the first hit, which had
+ * two failure modes (audit M-2), both of which silently defeated the
+ * install-time id-collision guard and let a duplicate top-level id reach the
+ * loader (`TypeError: duplicate loader entry id` — the whole profile fails
+ * to boot):
+ *  - it read a nested `config.name` as the module name;
+ *  - when the row had no name of its own it inherited the NEXT row's name.
+ * Both made `row.name !== installed` false for an unrelated user row, so the
+ * guard saw "no conflict" and appended a second row with the same id.
+ */
+function rowName(lines: readonly string[], idIndex: number, idIndent: number): string {
+  for (let j = idIndex + 1; j < lines.length; j += 1) {
+    const next = lines[j]!
+    const trimmed = next.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    const indent = next.length - next.trimStart().length
+    // A sibling or shallower line ends the row: never read past it (that is
+    // where the old cross-row inheritance came from).
+    if (indent <= idIndent) break
+    // Deeper than the row's own mapping level — a nested `config:` subtree
+    // (or a nested entry), never the row's module name.
+    if (indent > idIndent + 2) continue
+    const nameMatch = /^name:\s*(.+)$/.exec(trimmed)
+    if (nameMatch !== null) return nameMatch[1]!.trim().replace(/^['"]|['"]$/g, '')
+  }
+  return ''
+}
+
+/**
  * Read every insert row from a patch file (managed blocks and user rows).
  * Line-level parse of top-level `- insert:` blocks and their indented
  * `- id:` / `name:` pairs; never parses the whole document.
@@ -104,17 +138,8 @@ export function readInsertRows(content: string): PatchInsertRow[] {
     }
     const idMatch = /^(\s*)- id:\s*([^\s]+)/.exec(line)
     if (idMatch === null) continue
-    let name = idMatch[2]!
-    for (let j = i + 1; j < lines.length; j += 1) {
-      const next = lines[j]!
-      if (/^(\s*)- id:/.test(next.trim()) && !next.startsWith('    ')) break
-      const nameMatch = /name:\s*(.+)/.exec(next.trim())
-      if (nameMatch !== null) {
-        name = nameMatch[1]!.trim().replace(/^['"]|['"]$/g, '')
-        break
-      }
-    }
-    rows.push({ id: idMatch[2]!, name, managed: inManaged })
+    const idIndent = idMatch[1]!.length
+    rows.push({ id: idMatch[2]!, name: rowName(lines, i, idIndent), managed: inManaged })
   }
   return rows
 }
@@ -132,22 +157,6 @@ export function readManagedIds(content: string): Set<string> {
     if (match !== null) ids.add(match[1]!)
   }
   return ids
-}
-
-/** Whether a patch file already manages a disable block for the entry id. */
-export function hasManagedDisable(patchPath: string, entryId: string): boolean {
-  if (!existsSync(patchPath)) return false
-  const lines = readFileSync(patchPath, 'utf8').split('\n')
-  let blockStart = -1
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]!
-    if (line.trimEnd() === START) { blockStart = i; continue }
-    if (line.trimEnd() === END) { blockStart = -1; continue }
-    if (blockStart < 0) continue
-    const block = scanBlock(lines, blockStart)
-    return block !== undefined && block.kind === 'disable' && block.id === entryId
-  }
-  return false
 }
 
 /**
@@ -171,13 +180,23 @@ export function addDisableBlock(content: string, entryId: string): string {
   return joinDocument(without, block)
 }
 
-/** Remove the disable block for one entry id. Returns new content. */
+/**
+ * Remove the disable block for one entry id. Returns new content.
+ *
+ * A no-op removal returns the input UNCHANGED (same contract as
+ * removeInsertRow): normalizeDocument rewrites the document, which silently
+ * dropped a comments-only file's header lines on every enable of a plugin
+ * that had no disable block. Callers compare the result against the input to
+ * decide whether to persist, so "nothing removed" must mean "nothing
+ * changed".
+ */
 export function removeDisableBlock(content: string, entryId: string): string {
   assertSafeEntryId(entryId)
   const lines = content.length === 0 ? [] : content.split('\n')
   // Disable blocks only — an insert block for the same id is the plugin's
   // mount record and must survive the enable.
-  const { lines: without } = removeDisableBlocksOnly(lines, entryId)
+  const { lines: without, removed } = removeDisableBlocksOnly(lines, entryId)
+  if (!removed) return content
   return normalizeDocument(without)
 }
 
@@ -197,7 +216,23 @@ function removeDisableBlocksOnly(lines: readonly string[], entryId: string): { l
     if (line.trimEnd() === START) {
       let j = i + 1
       while (j < lines.length && lines[j]!.trimEnd() !== END) j += 1
-      if (j >= lines.length) break // unterminated marker: stop, keep the rest
+      if (j >= lines.length) {
+        // Unterminated marker (half-written by an editor, killed process,
+        // full disk, or a hand-edit that dropped the END line). Nothing after
+        // it can be attributed to a managed block, so every remaining line —
+        // the user's own rows and comments included — is kept verbatim
+        // (audit M-3: the old `break` discarded the whole tail, silently
+        // destroying user configuration).
+        //
+        // The orphan START line itself is dropped (it is OUR sentinel, never
+        // user content). Keeping it would make the next parse pair it with
+        // the END of the block appended below, and a later removal would then
+        // delete everything in between — trading one silent data loss for a
+        // delayed one. Removing it restores a well-formed document while
+        // preserving every user line.
+        out.push(...lines.slice(i + 1))
+        break
+      }
       const block = scanBlock(lines, i)
       if (block !== undefined && block.id === entryId && block.kind === 'disable') {
         i = j + 1 // skip only the disable block
@@ -312,14 +347,42 @@ export function applyRowDisabled(content: string, entryId: string): { content: s
 
 
 /**
+ * Count every patch row already carrying `rowId`, at ANY indentation.
+ *
+ * Both shapes become loader entries, so both collide: a top-level `- id: X`
+ * row, and a `- id: X` child inside a user's `- insert:` list. This is the
+ * authoritative collision signal (the loader throws `duplicate loader entry
+ * id` and refuses the WHOLE tree), deliberately independent of how well the
+ * `name:` parser attributes fields — the fallback net under audit M-2.
+ */
+function countRowsWithId(lines: readonly string[], rowId: string): number {
+  let count = 0
+  for (const line of lines) {
+    const match = /^\s*-\s*id:\s*([^\s#]+)/.exec(line)
+    if (match !== null && match[1] === rowId) count += 1
+  }
+  return count
+}
+
+/**
  * Add (or refresh) the insert block mounting one non-bundle plugin. The name
  * is single-quoted (YAML @ trap) and the row id is validated.
+ *
+ * Refuses to create a SECOND top-level row with the same id: a duplicate id
+ * makes the loader throw `duplicate loader entry id` and the entire profile
+ * fails to boot. Callers already check for collisions before calling; this is
+ * the last-resort guard for any path that missed it (audit M-2: the install
+ * guard was defeated by a mis-parsed `name`, so the write itself must be
+ * safe rather than relying solely on the caller).
  */
 export function addInsertRow(content: string, rowId: string, name: string): string {
   assertSafeEntryId(rowId)
   assertSafePackageName(name)
   const lines = content.length === 0 ? [] : content.split('\n')
   const without = removeManagedBlocks(lines, rowId).lines
+  if (countRowsWithId(without, rowId) > 0) {
+    throw new Error(`row id ${rowId} is already used by an existing patch row (id collision)`)
+  }
   const block = [
     START,
     '- insert:',
@@ -377,7 +440,13 @@ function removeManagedBlocks(lines: readonly string[], entryId: string): { lines
     if (line.trimEnd() === START) {
       let j = i + 1
       while (j < lines.length && lines[j]!.trimEnd() !== END) j += 1
-      if (j >= lines.length) break // unterminated marker: stop, keep the rest
+      if (j >= lines.length) {
+        // Unterminated marker: keep the entire tail verbatim and drop only
+        // the orphan sentinel (audit M-3 — see removeDisableBlocksOnly for
+        // why the marker line itself must not survive).
+        out.push(...lines.slice(i + 1))
+        break
+      }
       const block = scanBlock(lines, i)
       if (block !== undefined && block.id === entryId) {
         i = j + 1 // skip the whole block
@@ -394,9 +463,17 @@ function removeManagedBlocks(lines: readonly string[], entryId: string): { lines
   return { lines: out, removed }
 }
 
-/** Join kept lines with an appended block, dropping empty-doc and blank lines. */
+/**
+ * Join kept lines with an appended block, dropping leftover `[]` template
+ * rows. Interior blank lines are PRESERVED (same rule as normalizeDocument,
+ * audit M11): a blank line inside a user block scalar (`|` / `>`) is
+ * meaningful, and dropping it silently changed user configuration values.
+ * Only the trailing document terminator is trimmed so repeated writes cannot
+ * accumulate empty lines.
+ */
 function joinDocument(base: readonly string[], block: readonly string[]): string {
-  const significant = base.filter(l => l.trim() !== '[]' && l.trim() !== '')
+  const significant = base.filter(l => l.trim() !== '[]')
+  while (significant.length > 0 && significant[significant.length - 1]!.trim() === '') significant.pop()
   const joined = [...significant, ...block].join('\n')
   return joined.endsWith('\n') ? joined : joined + '\n'
 }
@@ -411,11 +488,19 @@ function joinDocument(base: readonly string[], block: readonly string[]): string
  */
 function normalizeDocument(lines: readonly string[]): string {
   const significant = lines.filter(l => l.trim() !== '[]')
-  const text = significant.join('\n').trimEnd() + '\n'
+  const text = significant.join('\n').trimEnd()
   const hasRow = text.split('\n').some(
     l => /^- id:/.test(l) || /^- insert:/.test(l) || /^insert:/.test(l),
   )
-  return hasRow ? text : EMPTY_TEMPLATE
+  if (hasRow) return text + '\n'
+  // No patch row left. An empty file needs the stock template, but a file that
+  // still holds the USER'S OWN comments must keep them: returning
+  // EMPTY_TEMPLATE wholesale silently rewrote a custom header comment on every
+  // enable/removal (the roundtrip add→remove on a real profile patch did not
+  // return the original bytes). Re-add only the `[]` terminator, which is the
+  // part that matters — a comments-only document parses as null and HMR
+  // reload fails.
+  return text.length === 0 ? EMPTY_TEMPLATE : text + '\n[]\n'
 }
 
 /** Persist new content with an atomic write (tmp + rename). */
@@ -423,5 +508,4 @@ export function writePatch(patchPath: string, content: string): void {
   const tmp = patchPath + '.tmp'
   writeFileSync(tmp, content, 'utf8')
   renameSync(tmp, patchPath)
-  try { rmSync(tmp, { force: true }) } catch { /* best-effort cleanup */ }
 }

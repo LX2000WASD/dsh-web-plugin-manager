@@ -7,6 +7,7 @@
 import { useState, type ReactNode } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { EnvQuestion } from '../types.ts'
+import { isSensitiveEnvKey } from '../scan.ts'
 import type { PluginManagerLocaleKey } from './locales.ts'
 
 /** Locale bind signature (ctx.locale.bind(NS)). */
@@ -16,8 +17,12 @@ const styles: Record<string, React.CSSProperties> = {
   box: {
     display: 'flex', flexDirection: 'column', gap: '8px',
     marginTop: '8px', padding: '10px 12px',
-    background: 'color-mix(in srgb, var(--dsw-alias-fill-base) 96%, transparent)',
-    border: '1px solid color-mix(in srgb, var(--dsw-alias-border) 60%, transparent)',
+    // Official tokens only: the previous "fill-base" and bare "border" aliases
+    // do not exist in ui-theme, so both declarations were dropped and the form
+    // rendered with no background and no border at all.
+    background: 'var(--dsw-alias-bg-layer-1)',
+    // Neutral borders are 0.5px hairlines per the official styling rules.
+    border: '0.5px solid var(--dsw-alias-border-l4)',
     borderRadius: '8px',
   },
   title: { margin: 0, fontSize: '12px', lineHeight: '18px', fontWeight: 600, color: 'var(--dsw-alias-label-primary)' },
@@ -48,6 +53,8 @@ export function EnvQuestionForm({ questions, busy, t, onContinue, onCancel }: {
     for (const q of questions) initial[q.id] = ''
     return initial
   })
+  // Per-variable reveal state for the masked inputs.
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({})
 
   const setValue = (key: string, value: string): void => {
     setAnswers(current => ({ ...current, [key]: value }))
@@ -57,24 +64,43 @@ export function EnvQuestionForm({ questions, busy, t, onContinue, onCancel }: {
     <div style={styles.box} role="group" aria-label={t('envFormTitle')}>
       <p style={styles.title}>{t('envFormTitle')}</p>
       <p style={styles.hint}>{t('envFormHint')}</p>
-      {questions.map(question => (
-        <div key={question.id} style={styles.row}>
-          <label style={styles.label} title={question.id}>{question.id}</label>
-          <input
-            type="text"
-            style={styles.input}
-            value={answers[question.id] ?? ''}
-            placeholder={t('envFormValuePlaceholder')}
-            aria-label={question.id}
-            spellCheck={false}
-            autoComplete="off"
-            onChange={(event) => setValue(question.id, event.currentTarget.value)}
-          />
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => setValue(question.id, '')}>
-            {t('envFormSkip')}
-          </Button>
-        </div>
-      ))}
+      {questions.map(question => {
+        // Every scanned variable is credential-shaped (the C2 scanner only
+        // reports TOKEN/KEY/SECRET/PASSWORD forms), so the value is masked by
+        // default — a shoulder-surfer or a screen recording would otherwise
+        // read the secret straight off the form.
+        const sensitive = isSensitiveEnvKey(question.id)
+        const shown = revealed[question.id] === true
+        return (
+          <div key={question.id} style={styles.row}>
+            <label style={styles.label} title={question.id}>{question.id}</label>
+            <input
+              type={sensitive && !shown ? 'password' : 'text'}
+              style={styles.input}
+              value={answers[question.id] ?? ''}
+              placeholder={t('envFormValuePlaceholder')}
+              aria-label={question.id}
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(event) => setValue(question.id, event.currentTarget.value)}
+            />
+            {sensitive && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy}
+                aria-label={(shown ? t('envFormHide') : t('envFormShow')) + ' ' + question.id}
+                onClick={() => setRevealed(current => ({ ...current, [question.id]: !shown }))}
+              >
+                {shown ? t('envFormHide') : t('envFormShow')}
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setValue(question.id, '')}>
+              {t('envFormSkip')}
+            </Button>
+          </div>
+        )
+      })}
       <div style={styles.actions}>
         <Button size="sm" variant="primary" disabled={busy} onClick={() => onContinue(answers)}>
           {busy ? t('envFormBusy') : t('envFormContinue')}

@@ -24,6 +24,29 @@ function boundaryBonus(name: string, index: number): number {
   return prev === '-' || prev === '_' ? 8 : 0
 }
 
+/** A2 预筛掩码：字符串里出现过的小写 ASCII 字母集合（26 位）。 */
+export type CharMask = number
+
+/**
+ * 计算 {@link CharMask}：把 a–z 映射到 26 个 bit。市场搜索在**预构建小写
+ * 索引**时对每个候选字段算一次，之后每键击只算一次 needle 的掩码。
+ *
+ * 只用 ASCII 字母：非 ASCII 字符（CJK / emoji）不进掩码，因此掩码**只会**
+ * 放过、绝不会误杀——这是预筛正确性的前提。子序列匹配要求 needle 的每个
+ * 字符都在 haystack 里出现过，即字符集合是超集关系，掩码检查是它的必要
+ * 条件。
+ */
+export function charMask(value: string): CharMask {
+  let mask = 0
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    // 小写 a–z（调用方传入的已是小写串）；大写一并兼容，避免误用。
+    if (code >= 97 && code <= 122) mask |= 1 << (code - 97)
+    else if (code >= 65 && code <= 90) mask |= 1 << (code - 65)
+  }
+  return mask
+}
+
 /**
  * 模糊名称匹配打分：query 作为 name 的有序子序列的最优对齐分
  * （时间 O(name×query)，空间 O(query)）。返回 null 表示不是子序列
@@ -41,16 +64,33 @@ export function fuzzyScore(name: string, query: string): number | null {
 }
 
 /**
- * fuzzyScore 的预小写版本：marketplace 搜索每次键击对 ~3000 条 × 2 个字段
- * 调用本函数——把 toLowerCase() 提到循环外（调用方按条目缓存小写形式）
- * 消除每键击数千次的字符串分配。语义与 fuzzyScore 完全一致（传入方须自行
- * toLowerCase）。
+ * A2 掩码预筛（唯一落地的 A2 优化）。
+ *
+ * 两个**可选**参数，不传即完全退回原行为（签名与语义向后兼容）：
+ * @param hayMask - {@link charMask}(haystack)，调用方预构建索引时算一次。
+ * @param needleMask - {@link charMask}(needle)，每键击算一次。
+ *   两个都传时启用 O(1) 预筛：needle 的字符集合不是 haystack 的子集 ⇒
+ *   一定不是子序列 ⇒ 直接淘汰，跳过整个 DP。掩码只做**拒绝**、不参与
+ *   打分，所以传与不传的命中分数逐条相同（tests/rank.test.mjs 有断言）。
+ *
+ * **DP 数组缓冲复用：实测后放弃**（perf.md 的 A2 建议包含它，但数据不支持）。
+ * 实测（/tmp/pmperf/bench-a2-holey.mjs，13k×2 字段，15 轮交错中位数）：
+ *   每次 new Array + fill（现状）  26.32 ms
+ *   模块缓冲复用（holey）          28.78 ms  (+9%)
+ *   模块缓冲复用（packed）         28.30 ms  (+8%)
+ * 缓冲复用**更慢**——分配 4 个小数组在 V8 里很便宜（young-gen bump allocation），
+ * 而复用要付重置 4×(m+1) 格 + 长生命周期数组阻碍逃逸分析/标量替换的代价。
+ * 它还引入模块级可变状态（重入风险），因此这里保持每次新分配：更快且是纯函数。
+ * 详见 docs/private/audit/perf-verify.md。
  */
-export function fuzzyScoreLowered(haystack: string, needle: string): number | null {
+export function fuzzyScoreLowered(haystack: string, needle: string, hayMask?: CharMask, needleMask?: CharMask): number | null {
   const m = needle.length
   if (m === 0) return 0
   const n = haystack.length
   if (m > n) return null
+  // A2 预筛：只做必要条件检查（见上方说明），不影响任何命中条目的分数。
+  if (hayMask !== undefined && needleMask !== undefined && (hayMask & needleMask) !== needleMask) return null
+
   // 逐扫描位推进的两行 DP：
   //  exact[j] —— query 前 j 个字符已匹配、且第 j 个字符恰好命中的最优分；
   //  bestScore[j]/bestPos[j] —— 前 j 个字符已匹配的最优分及其最后命中位，
@@ -119,11 +159,14 @@ export function fuzzyFilter<T>(
   const trimmed = query.trim()
   if (trimmed.length === 0) return null
   const needle = trimmed.toLowerCase()
+  // A2：needle 掩码每查询算一次；候选掩码随小写串一起现算（本函数没有预构建
+  // 索引的调用方）。掩码只做拒绝，命中与分数与不传掩码时逐条相同。
+  const needleMask = charMask(needle)
   const hits: FuzzyHit<T>[] = []
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index]!
     const lowered = nameOf(item).toLowerCase()
-    const score = fuzzyScoreLowered(lowered, needle)
+    const score = fuzzyScoreLowered(lowered, needle, charMask(lowered), needleMask)
     if (score === null) continue
     hits.push({ item, score, prefix: lowered.startsWith(needle) })
   }

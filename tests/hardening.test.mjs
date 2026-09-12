@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { analyzeProfile } from '../dist/analyze.js'
 import { fetchDshSoIndex, dshSoIndexAt } from '../dist/registry.js'
+import { createPluginGuard } from '../dist/guard.js'
 
 /** Write one file (creating parent directories). */
 async function write(dir, name, content) {
@@ -104,5 +105,33 @@ describe('fetchDshSoIndex 缓存优先', () => {
       process.env.DSH_HOME = previousHome
       await rm(fixture, { recursive: true, force: true })
     }
+  })
+})
+
+describe('createPluginGuard — 安装守卫的误报与漏报', () => {
+  const guard = createPluginGuard()
+  /** Run the guard over one bash command; undefined = allowed. */
+  const run = (command) => guard({ name: 'bash', arguments: { command } })
+
+  it('放行 npm run <script>（脚本名不是依赖变更）', () => {
+    // 回归：\binstall\b 也会匹配脚本名前缀 install-，于是
+    // `npm run install-assets --dir ~/.dsh/profiles/web` 被误判为裸变更。
+    assert.equal(run('npm run install-assets --dir ~/.dsh/profiles/web'), undefined)
+    assert.equal(run('npm run add-deps --prefix ~/.dsh/profiles/web'), undefined)
+    assert.equal(run('npm run build --prefix ~/.dsh/profiles/web'), undefined)
+  })
+
+  it('仍然拦截真正改动依赖树的包管理器命令', () => {
+    assert.ok(run('pnpm add foo --dir ~/.dsh/profiles/web'))
+    assert.ok(run('pnpm --dir ~/.dsh/profiles/web add foo'))
+    assert.ok(run('npm install --prefix ~/.dsh/profiles/web'))
+    assert.ok(run('npm uninstall x --prefix ~/.dsh/profiles/web'))
+    assert.ok(run('pnpm remove bar --dir ~/.dsh/profiles/web'))
+  })
+
+  it('仍然拦截官方 dsh plugin 写动词', () => {
+    assert.ok(run('dsh plugin --profile web add foo'))
+    assert.ok(run('dsh plugin --profile web remove foo'))
+    assert.equal(run('dsh plugin --profile web list'), undefined)
   })
 })

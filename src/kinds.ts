@@ -370,7 +370,6 @@ function writeKindRecords(records: Map<string, KindRecord>): void {
   writeFileSync(tmp, JSON.stringify({ version: 1, records: data }, undefined, 2) + '\n')
   renameSync(tmp, target)
   kindRecordsStampValue += 1
-  try { rmSync(tmp, { force: true }) } catch { /* best-effort */ }
 }
 
 /** Persist one record (serialized read-modify-write). */
@@ -456,7 +455,6 @@ function writeBlockedRepos(repos: Set<string>): void {
   const tmp = target + '.tmp'
   writeFileSync(tmp, JSON.stringify({ version: 1, repos: [...repos].sort() }, undefined, 2) + '\n')
   renameSync(tmp, target)
-  try { rmSync(tmp, { force: true }) } catch { /* best-effort */ }
 }
 
 /** Block a repository (detected as not plugin/skill/preset). */
@@ -497,35 +495,42 @@ export function isUnderRoot(target: string, root: string): boolean {
   return t.startsWith(r + sep)
 }
 
+/** Backoff between filesystem retry attempts (see rmRetry). */
+const RETRY_DELAY_MS = 120
+function retryDelay(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS))
+}
+
 /**
  * Remove a tree with brief retries. Windows AV scanners / editors hold
  * transient handles and rmSync fails EPERM/EBUSY on the first attempt
  * (audit W1); `force` only tolerates a missing path, not an open handle.
+ *
+ * Backoff is a timer, not a busy loop: the call sites are all async, and a
+ * synchronous spin froze the event loop (and every concurrent REST request)
+ * for up to 3×120ms per failure.
  */
-export function rmRetry(target: string): void {
+export async function rmRetry(target: string): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
       rmSync(target, { recursive: true, force: true })
       return
     } catch (error: unknown) {
       if (attempt >= 3) throw error
-      // Synchronous short backoff (no timers available in sync call sites).
-      const end = Date.now() + 120
-      while (Date.now() < end) { /* spin */ }
+      await retryDelay()
     }
   }
 }
 
 /** Rename with brief retries (Windows: destination busy / AV scanning). */
-export function renameRetry(from: string, to: string): void {
+export async function renameRetry(from: string, to: string): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
       renameSync(from, to)
       return
     } catch (error: unknown) {
       if (attempt >= 3) throw error
-      const end = Date.now() + 120
-      while (Date.now() < end) { /* spin */ }
+      await retryDelay()
     }
   }
 }

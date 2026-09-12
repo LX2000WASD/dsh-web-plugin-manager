@@ -83,3 +83,42 @@ describe('official-duplicate 豁免', () => {
       'cordis 仍应被报为 official-duplicate: ' + JSON.stringify(official))
   })
 })
+
+describe('topoOrder — 建议加载顺序', () => {
+  it('把被依赖方排在依赖方之前（provider first）', () => {
+    // app imports lib, lib imports core: the load order must be core, lib, app.
+    // Regression: the adjacency points importer -> provider, so a direct Kahn
+    // pass emitted the reverse (app before lib) while the CLI and the settings
+    // page present the list as the suggested load order. Edges come from real
+    // import statements, so the fixture needs entry files with imports.
+    const dir = join(fixture, 'profiles', 'topo-scenario')
+    const pkgs = {
+      app: { name: 'app', version: '1.0.0', imports: "import 'lib'\n" },
+      lib: { name: 'lib', version: '1.0.0', imports: "import 'core'\n" },
+      core: { name: 'core', version: '1.0.0', imports: 'export const x = 1\n' },
+    }
+    for (const [name, spec] of Object.entries(pkgs)) {
+      const pkgDir = join(dir, 'node_modules', name)
+      mkdirSync(pkgDir, { recursive: true })
+      writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({
+        name: spec.name, version: spec.version, main: 'index.js',
+        dependencies: name === 'app' ? { lib: '1.0.0' } : name === 'lib' ? { core: '1.0.0' } : {},
+      }))
+      writeFileSync(join(pkgDir, 'index.js'), spec.imports)
+    }
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-topo', private: true,
+      dependencies: { app: '1.0.0', lib: '1.0.0', core: '1.0.0' },
+    }))
+    const result = analyzeProfile(dir, [], '[]', new Set())
+    const order = [...result.topoOrder]
+    assert.ok(result.edges.length >= 2,
+      'fixture 应产生依赖边: ' + JSON.stringify(result.edges))
+    assert.ok(order.includes('core') && order.includes('lib') && order.includes('app'),
+      'topoOrder 应包含全部包: ' + JSON.stringify(order))
+    assert.ok(order.indexOf('core') < order.indexOf('lib'),
+      'core（被依赖）应排在 lib 之前: ' + JSON.stringify(order))
+    assert.ok(order.indexOf('lib') < order.indexOf('app'),
+      'lib（被依赖）应排在 app 之前: ' + JSON.stringify(order))
+  })
+})

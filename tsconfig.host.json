@@ -12,5 +12,5 @@
     "rewriteRelativeImportExtensions": true,
     "experimentalDecorators": false
   },
-  "include": ["src/index.ts", "src/analyze.ts", "src/childproc.ts", "src/guard.ts", "src/installFlow.ts", "src/installSession.ts", "src/live.ts", "src/match.ts", "src/net.ts", "src/patch.ts", "src/paths.ts", "src/presets.ts", "src/profiles.ts", "src/rank.ts", "src/registry.ts", "src/rest.ts", "src/scan.ts", "src/kinds.ts", "src/tools.ts", "src/types.ts", "src/cli.ts"]
+  "include": ["src/index.ts", "src/analyze.ts", "src/childproc.ts", "src/guard.ts", "src/installFlow.ts", "src/installSession.ts", "src/live.ts", "src/match.ts", "src/net.ts", "src/patch.ts", "src/paths.ts", "src/presets.ts", "src/profiles.ts", "src/rank.ts", "src/registry.ts", "src/rest.ts", "src/scan.ts", "src/kinds.ts", "src/tools.ts", "src/types.ts", "src/tags.ts", "src/marketView.ts", "src/cli.ts"]
 }

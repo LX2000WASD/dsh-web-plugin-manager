@@ -98,8 +98,25 @@ function parseJsonBody(text: string): unknown {
   return JSON.parse(text || '{}')
 }
 
+/** Default JSON body cap: 1 MB covers every op except the backup ones. */
+const BODY_LIMIT_BYTES = 1_000_000
+
 /**
- * Read a JSON request body, bounded to 1 MB.
+ * Body cap for the backup ops. backupRestore embeds the whole uploaded
+ * backup file inside the JSON body (and backupDiff the same for a preview),
+ * and a profile with a few dozen plugins — each dependency a git URL or
+ * source string — legitimately exceeds 1 MB. 16 MB keeps the fence bounded
+ * while letting a real backup through.
+ */
+const BACKUP_BODY_LIMIT_BYTES = 16_000_000
+
+/** The body cap for one route (backup ops carry a whole backup file). */
+export function bodyLimitFor(op: string): number {
+  return op === 'backupRestore' || op === 'backupDiff' ? BACKUP_BODY_LIMIT_BYTES : BODY_LIMIT_BYTES
+}
+
+/**
+ * Read a JSON request body, bounded by `limit` (1 MB by default).
  *
  * Accepts whatever transport shape the host delivers: the node:http stream
  * (official `dsh web` server), a fetch-style request (`text()`/`json()`/a
@@ -109,7 +126,7 @@ function parseJsonBody(text: string): unknown {
  * readable error instead of an opaque crash (which the webserver would answer
  * as a bare HTTP 400).
  */
-export async function readJsonBody(req: unknown): Promise<unknown> {
+export async function readJsonBody(req: unknown, limit: number = BODY_LIMIT_BYTES): Promise<unknown> {
   if (req !== null && typeof req === 'object') {
     const stream = req as StreamRequest
     if (typeof stream.on === 'function') {
@@ -118,7 +135,7 @@ export async function readJsonBody(req: unknown): Promise<unknown> {
         let size = 0
         stream.on('data', (chunk: Buffer) => {
           size += chunk.length
-          if (size > 1_000_000) {
+          if (size > limit) {
             reject(new Error('request body too large'))
             stream.destroy?.()
           } else chunks.push(chunk)
@@ -134,9 +151,24 @@ export async function readJsonBody(req: unknown): Promise<unknown> {
       })
     }
     const fetchLike = req as { text?(): Promise<string>; json?(): Promise<unknown>; body?: unknown }
-    if (typeof fetchLike.text === 'function') return parseJsonBody(await fetchLike.text())
-    if (typeof fetchLike.json === 'function') return await fetchLike.json()
-    if (typeof fetchLike.body === 'string') return parseJsonBody(fetchLike.body)
+    // The text()/json()/body shims cannot be interrupted mid-read, so the cap
+    // is enforced after the fact — an unbounded read here would be the one
+    // transport that ignores the fence (the stream branch above is the
+    // normal one; these exist for desktop-shell carriers, issue #11).
+    if (typeof fetchLike.text === 'function') {
+      const text = await fetchLike.text()
+      if (Buffer.byteLength(text, 'utf8') > limit) throw new Error('request body too large')
+      return parseJsonBody(text)
+    }
+    if (typeof fetchLike.json === 'function') {
+      const value = await fetchLike.json()
+      if (Buffer.byteLength(JSON.stringify(value ?? null), 'utf8') > limit) throw new Error('request body too large')
+      return value
+    }
+    if (typeof fetchLike.body === 'string') {
+      if (Buffer.byteLength(fetchLike.body, 'utf8') > limit) throw new Error('request body too large')
+      return parseJsonBody(fetchLike.body)
+    }
   }
   return {}
 }

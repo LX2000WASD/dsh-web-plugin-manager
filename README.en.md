@@ -123,6 +123,8 @@ The `PLATFORM` list in `tsdown.client.config.ts` is the **only set of specifiers
 
 The table **changes across DSH versions**: 0.1.2-alpha.1 removed `@deepseek-ai/dsh-client-runtime` and added `@deepseek-ai/dsh-client-store`. Re-check it and rebuild the bundle on every DSH upgrade.
 
+`tests/client-boot.test.mjs` turns that contract into an automated check: it boots `dist/client.js` against a simulated module table (an off-table `require` throws `missed the module table` on the spot) and verifies the five tabs' slot registrations, zh/en dictionary parity, and renderability.
+
 ## Related
 
 - Source & issues: [github.com/LX2000WASD/dsh-web-plugin-manager](https://github.com/LX2000WASD/dsh-web-plugin-manager)

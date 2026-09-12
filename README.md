@@ -68,14 +68,14 @@ git 源插件需要安装期环境变量时，CLI 会打印缺失变量清单并
 | 更新 | 检查更新（npm dist-tag / git HEAD / 安装 commit），更新带质量门与回滚；含管理器自身（自更新）——管理页可直接点更新升级，失败自动装回旧版本 |
 | 健康检查 | 依赖图/缺失/循环/重复行 id/同名注册冲突（服务/工具/section/路由）/peer 版本/官方包重复；运行中追加 pending 与失败诊断及遮蔽自检；A 级问题一键修复、B 级建议确认后修复 |
 | 环境管理 | 启停、复制/转移插件、创建/重命名/删除 profile（官方 profile 只读）、备份导出/导入恢复（差异对比 + 恢复前行内二次确认 + 切换目标自动重算差异；批量恢复与其他变更互斥） |
-| 市场 | 静态索引（topic:dsh-plugin 全量 ~3100 条，多源兜底 + gzip + 磁盘缓存 + 新鲜度门控）+ awesome 精选覆盖层 + dsh.so 独立验证/安全扫描徽标（L1-L5 + 风险等级叠加）；服务端已安装判定（包名/repository 双向/git 源/目录探测）；更新检测（索引版本对比）；同名包冲突消解；模糊搜索 + 相关性排序（`plgmgr` 命中 `plugin-manager`，官方 rankByName 算法长名适配版）；24h 缓存、超时预算、代理支持、失败负缓存 |
+| 市场 | 静态索引（topic:dsh-plugin 全量 1.3 万+ 条，多源兜底 + gzip + 磁盘缓存 + 新鲜度门控）+ awesome 精选覆盖层 + dsh.so 独立验证/安全扫描徽标（L1-L5 + 风险等级叠加）；服务端已安装判定（包名/repository 双向/git 源/目录探测）；更新检测（索引版本对比）；同名包冲突消解；**分类筛选**（上游 CI 分类器 id 聚合，服务端 `categories` 计数 + 客户端兜底）；模糊搜索 + 相关性排序（`plgmgr` 命中 `plugin-manager`，官方 rankByName 算法长名适配版 + 字符掩码预筛）；24h 缓存、超时预算、代理支持、失败负缓存 |
 | agent 工具 | plugin_status/search/install/uninstall/toggle + 安装守卫（拦截裸命令并引导）+ 提示词注入；plugin_search 自然语言检索市场（name/topics/描述加权），结果提示安装前先浏览仓库 |
 
 功能与限制的详细说明见 [docs/feature-reference.md](docs/feature-reference.md)（随仓库与 npm 包发布）。
 
 ## 架构
 
-- Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST 路由（带信任围栏：POST+JSON 强制、Host 回环/白名单校验、Origin 同源——防 CSRF/DNS-rebinding）；安装链路 installWithSource→installProtected（质量门+回滚）整体串行互斥；六条 pnpm 长操作（install/update/remove/backupRestore/uninstallKind/copyPlugins）REST job 化——POST 即返 jobId、客户端经 `job` op 轮询取结果（HTTP 超时不再与服务端状态脱节），在途 job 数上限背压堆叠点击
+- Host：`src/index.ts` —— `PluginManagerService`（`ctx.pluginManager`）+ `/api2/plugin-manager/*` REST 路由（带信任围栏：POST+JSON 强制、Host 回环/白名单校验、Origin 同源——防 CSRF/DNS-rebinding）；安装链路 installWithSource→installProtected（质量门+回滚）整体串行互斥；**七条**长操作（install/update/remove/backupRestore/uninstallKind/copyPlugins/checkUpdates）REST job 化——POST 即返 jobId、客户端经 `job` op 轮询取结果（HTTP 超时不再与服务端状态脱节，短任务用 250ms 起步的轮询），在途 job 数上限背压堆叠点击
 - 基础层：`src/paths.ts` —— profile 路径/manifest/patch 读取、全局变更互斥队列、宿主 profile 识别（argv → 安装位置兜底）；`src/childproc.ts` —— 命令解析（运行中 node 目录 → PATH → $NVM_DIR 兜底）、PATH 注入子进程环境、官方 `dsh plugin` 运行器、异步 exec 工具（请求路径上零 execFileSync）
 - 保护链路：`src/installFlow.ts` —— 安装/更新/删除保护流（源准备：git clone 缓存 + npm-first 探测；质量门 + 自动回滚；更新检查 npm dist-tag / git HEAD / lockfile commit；managed 行清理），全部经全局互斥串行
 - 市场管道：`src/marketplaceMerge.ts` —— catalog/PLUGINS.md 抓取、registry 索引合并、星数富化、服务端已安装标记、dsh.so 徽标叠加、屏蔽名单过滤与同名包消解（index.ts 只保留缓存闭包与 REST 接线）
@@ -127,6 +127,8 @@ pnpm test        # 纯函数单测（node --test 跑 dist 产物）
 - 内联了表内的包 → 模块身份分裂（同一个包两份实例，服务/上下文对不上）
 
 这张表**随 DSH 版本变动**：0.1.2-alpha.1 删除了 `@deepseek-ai/dsh-client-runtime`、新增了 `@deepseek-ai/dsh-client-store`。每次跟进 DSH 版本都要比对该表并重新构建产物。
+
+`tests/client-boot.test.mjs` 把这条契约做成了自动化检查：它用模拟的模块表真正启动 `dist/client.js`，越表 require 会当场抛 `missed the module table`；同时核对五个页签的 slot 注册面、zh/en 字典键位对齐与可渲染性。
 
 ## 相关
 

@@ -166,6 +166,21 @@ export interface MarketplaceResult {
   readonly message: string
   /** Data source of the listing: registry | catalog | cache | search. */
   readonly source?: string
+  /**
+   * Category aggregation of `items` (post-dedupe), most frequent first
+   * (ties by id). Same implementation as the client's `categoryCounts`
+   * (src/tags.ts), so the filter chips and a client-side recount agree.
+   *
+   * Optional on the wire: the client falls back to counting `items` itself
+   * when the field is missing, which keeps an older host / newer client
+   * combination working. Always present on `ok: true` listings — every
+   * return path (memory mirror / 24h disk cache / stale cache / fresh walk)
+   * goes through `finalizeListing` in src/marketplaceMerge.ts, which builds
+   * it over the FINAL listing, so categories dropped by dedupe or the
+   * blocklist are not offered as filters. Empty (`[]`) on an `ok: false`
+   * failure response.
+   */
+  readonly categories?: readonly { readonly id: string; readonly count: number }[]
   /** How many entries were hidden by the same-package deduplication. */
   readonly dropped?: number
   /** Total entries after deduplication. */

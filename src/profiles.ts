@@ -5,7 +5,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { connect, createServer } from 'node:net'
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { dshHome, profileDir, readManifest } from './paths.ts'
@@ -45,6 +45,49 @@ export function windowsProcessLines(): string[] {
   }
 }
 
+/**
+ * POSIX process table as "pid<TAB>command line" lines, read straight from
+ * /proc — the Linux fast path for scanRuns (A6).
+ *
+ * `ps -eo pid=,args=` costs a fork+exec: median 18.0ms on a 590-process box,
+ * synchronously blocking the event loop (scanRuns runs on listProfiles/list,
+ * i.e. on every page load past the 3s TTL). Reading /proc/<pid>/cmdline
+ * directly measures 4.7ms (3.8x) for the same information.
+ *
+ * `cmdline` is NUL-separated; we join on a single space because the shared
+ * parser below treats "the rest of the line" as the command line and its
+ * `--profile\s+(\S+)` group ends at the profile name. A NUL inside an argv
+ * word would be a path separator here, so joining cannot merge two words
+ * that `ps` would have kept apart in a way the parser cares about. A
+ * process that exits mid-scan (ENOENT) or that we may not read (EACCES /
+ * EPERM) is skipped — `ps` could not see those either.
+ *
+ * Returns null when /proc is unusable (macOS, BSD, a locked-down container):
+ * the caller must fall back to `ps`.
+ */
+function procProcessLines(): string[] | null {
+  let entries: string[]
+  try {
+    entries = readdirSync('/proc')
+  } catch {
+    return null
+  }
+  const lines: string[] = []
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    let cmdline: string
+    try {
+      cmdline = readFileSync('/proc/' + entry + '/cmdline', 'utf8')
+    } catch {
+      continue
+    }
+    // A kernel thread / zombie has an empty cmdline: nothing to parse.
+    if (cmdline.length === 0) continue
+    lines.push(entry + '\t' + cmdline.split('\0').join(' ').replace(/\s+$/, ''))
+  }
+  return lines
+}
+
 export function scanRuns(): Map<string, RunInfo> {
   // Collect every match per profile, then resolve the primary process: the
   // real node process when present (a .cmd/.bat shim or bash wrapper is only
@@ -52,9 +95,12 @@ export function scanRuns(): Map<string, RunInfo> {
   // preferring the entry carrying a --port, as before.
   const byProfile = new Map<string, Array<{ port: number | null; pid: number; node: boolean }>>()
   try {
+    // Linux/WSL: /proc direct read (A6, 18.0ms -> 4.7ms). Everywhere else
+    // (macOS, BSD, Windows) keep the previous path — a missing /proc must
+    // degrade to `ps`, never throw.
     const output = process.platform === 'win32'
       ? windowsProcessLines()
-      : execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' }).split('\n')
+      : (procProcessLines() ?? execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8' }).split('\n'))
     for (const line of output) {
       let match = /^\s*(\d+)\s+(.*\bdsh\b.*--profile\s+(\S+))/.exec(line)
       let profile: string | undefined

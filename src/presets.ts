@@ -230,7 +230,7 @@ export async function cleanupOwnedPresets(ctx: unknown, root: string, pluginName
           skipped.push({ id, reason: 'outside the preset root — kept' })
           continue
         }
-        rmRetry(dir)
+        await rmRetry(dir)
       }
       removed.push(id)
     } catch (error) {
@@ -251,7 +251,7 @@ export interface PresetArchiveResult {
  * entry. The roster re-scans the directory on every read, so the change is
  * visible immediately; no host notification is needed.
  */
-export function archiveOwnedPresets(root: string, pluginName: string): PresetArchiveResult {
+export async function archiveOwnedPresets(root: string, pluginName: string): Promise<PresetArchiveResult> {
   const archiveRoot = presetArchiveDir()
   const archived: string[] = []
   const skipped: Array<{ id: string; reason: string }> = []
@@ -268,7 +268,7 @@ export function archiveOwnedPresets(root: string, pluginName: string): PresetArc
     }
     try {
       mkdirSync(archiveRoot, { recursive: true })
-      renameRetry(dir, target)
+      await renameRetry(dir, target)
       archived.push(id)
     } catch (error) {
       skipped.push({ id, reason: error instanceof Error ? error.message : String(error) })
@@ -287,7 +287,7 @@ export interface PresetRestoreResult {
  * same-id preset that appeared meanwhile wins; the archived copy stays put
  * and is reported.
  */
-export function restoreArchivedPresets(root: string, pluginName: string): PresetRestoreResult {
+export async function restoreArchivedPresets(root: string, pluginName: string): Promise<PresetRestoreResult> {
   const archiveRoot = presetArchiveDir()
   const restored: string[] = []
   const skipped: Array<{ id: string; reason: string }> = []
@@ -299,7 +299,7 @@ export function restoreArchivedPresets(root: string, pluginName: string): Preset
       continue
     }
     try {
-      renameRetry(dir, target)
+      await renameRetry(dir, target)
       restored.push(id)
     } catch (error) {
       skipped.push({ id, reason: error instanceof Error ? error.message : String(error) })

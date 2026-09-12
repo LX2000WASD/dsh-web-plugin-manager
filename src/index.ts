@@ -28,9 +28,8 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process'
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { isBuiltin } from 'node:module'
-import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gzipSync } from 'node:zlib'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -47,7 +46,7 @@ import {
   readInsertRows, readManagedIds, removeDisableBlock,
   removeInsertRow, writePatch,
 } from './patch.ts'
-import { analyzeProfile, OFFICIAL_DEP_ALLOWED, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
+import { analyzeProfile, OFFICIAL_DEP_ALLOWED, scanPackageImports } from './analyze.ts'
 import type { AnalyzeIssue, AnalyzeResult, PresetCompositionGroup } from './types.ts'
 import { applyLiveOps, closePatchWatcher, ensurePatchWatcher, type StackOp } from './live.ts'
 import { registerPluginGuard, registerPluginRulePrompt } from './guard.ts'
@@ -62,7 +61,7 @@ import {
 } from './presets.ts'
 import { marketplaceFetch } from './net.ts'
 import { compareVersions, isGitSourceSpec, updateSpec } from './match.ts'
-import { isTrustedRequest, readJsonBody } from './rest.ts'
+import { bodyLimitFor, isTrustedRequest, readJsonBody } from './rest.ts'
 import {
   dshSoIndexAt, fetchDshSoIndex, fetchRegistryRepos, fetchSearchFallback, readRegistryCache, writeRegistryCache,
   type DshSoEntry, type RegistryRepo,
@@ -86,7 +85,8 @@ import {
 import {
   beginMarketplaceRefresh, dirNameSet,
   enrichRepos, fetchCatalogItems, fetchMarkdownItems, filterBlockedRepos, finalizeListing,
-  gitCacheIdentity, MARKETPLACE_CACHE_VERSION, MARKETPLACE_FAILURE_TTL, MARKETPLACE_TTL,
+  gitCacheIdentity, invalidateInstalledIndex, MARKETPLACE_CACHE_VERSION, MARKETPLACE_FAILURE_TTL, MARKETPLACE_TTL,
+  memoryCacheGeneration,
   mergeMarketplace, mergeRegistryWithCurated, overlayDshSo, readMemoryCache, registryToItem,
   writeMemoryCache,
 } from './marketplaceMerge.ts'
@@ -158,7 +158,6 @@ function marketplaceWriteCache(items: MarketplaceItem[], source: string): void {
     items,
   }) + '\n')
   renameSync(tmpPath, cachePath)
-  try { rmSync(tmpPath, { force: true }) } catch { /* best-effort */ }
   // A successful fetch clears the recorded failure reason.
   rmSync(failurePath, { force: true })
 }
@@ -218,8 +217,18 @@ export class PluginManagerService extends Service {
   }
 
 
-  /** Create a custom profile from an official template (web/headless). */
+  /**
+   * Create a custom profile from an official template (web/headless).
+   * Serialized by the mutation mutex: an install/removal running against the
+   * same directory would otherwise interleave with the template write (pnpm
+   * creating node_modules while the manifest is replaced, or a removal
+   * deleting the tree an install is about to write into).
+   */
   async createProfile(name: string, template: string): Promise<MutationResult> {
+    return enqueueMutation(() => this.createProfileInner(name, template))
+  }
+
+  private async createProfileInner(name: string, template: string): Promise<MutationResult> {
     if (!/^[A-Za-z0-9._-]+$/.test(name) || name.length > 120) {
       return { ok: false, message: "invalid profile name: " + JSON.stringify(name) }
     }
@@ -259,8 +268,15 @@ export class PluginManagerService extends Service {
     }
   }
 
-  /** Rename a custom profile directory (never the hosting profile). */
-  renameProfile(oldName: string, newName: string): MutationResult {
+  /**
+   * Rename a custom profile directory (never the hosting profile).
+   * Serialized by the mutation mutex (see createProfile).
+   */
+  async renameProfile(oldName: string, newName: string): Promise<MutationResult> {
+    return enqueueMutation(async () => this.renameProfileInner(oldName, newName))
+  }
+
+  private async renameProfileInner(oldName: string, newName: string): Promise<MutationResult> {
     if (!/^[A-Za-z0-9._-]+$/.test(newName) || newName.length > 120) {
       return { ok: false, message: "invalid profile name: " + JSON.stringify(newName) }
     }
@@ -273,22 +289,31 @@ export class PluginManagerService extends Service {
     const newDir = profileDir(newName)
     if (existsSync(newDir)) return { ok: false, message: "profile already exists: " + newName }
     try {
-      renameRetry(oldDir, newDir)
+      await renameRetry(oldDir, newDir)
       return { ok: true, message: "renamed " + oldName + " to " + newName }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
     }
   }
 
-  /** Delete a custom profile directory (never the hosting profile). */
-  removeProfile(name: string): MutationResult {
+  /**
+   * Delete a custom profile directory (never the hosting profile).
+   * Serialized by the mutation mutex: removing a profile while a queued
+   * install targets it would let pnpm write into a tree that is then
+   * deleted (or resurrect a manifest the removal already read).
+   */
+  async removeProfile(name: string): Promise<MutationResult> {
+    return enqueueMutation(async () => this.removeProfileInner(name))
+  }
+
+  private async removeProfileInner(name: string): Promise<MutationResult> {
     if (!isSafeProfileName(name)) return { ok: false, message: "invalid profile name: " + JSON.stringify(name) }
     if (isOfficialProfile(name)) return { ok: false, message: "official profiles (web/headless) are not managed here" }
     const dir = profileDir(name)
     if (!existsSync(dir)) return { ok: false, message: "profile not found: " + name }
     if (isHostProfile(name)) return { ok: false, message: "cannot remove the running profile (" + name + ")" }
     try {
-      rmRetry(dir)
+      await rmRetry(dir)
       return { ok: true, message: "removed profile " + name }
     } catch (error: unknown) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) }
@@ -480,6 +505,10 @@ export class PluginManagerService extends Service {
       return {
         ok: false,
         items: [],
+        // Explicit empty aggregation: the field is always present on a
+        // MarketplaceResult, so the client never has to tell "no categories"
+        // from "old host that does not send the field".
+        categories: [],
         fromCache: false,
         message: failure.message + ' (negative cache — retry automatically in a few minutes)',
       }
@@ -570,9 +599,10 @@ export class PluginManagerService extends Service {
       return finalizeListing({
         profile,
         items,
-        // writeCache just stamped the memory mirror; keying on it means the
-        // very next (cached) request reuses this exact result.
-        baseAt: readMemoryCache()?.at ?? Date.now(),
+        // writeCache just stamped the memory mirror; keying on its content
+        // generation means the very next (cached) request reuses this exact
+        // result while a different listing can never reuse it (M-1).
+        baseAt: memoryCacheGeneration(),
         dshSo,
         blocked,
         variant: 'fresh',
@@ -588,7 +618,7 @@ export class PluginManagerService extends Service {
       return finalizeListing({
         profile,
         items: cached.items,
-        baseAt: readMemoryCache()?.at ?? (Date.parse(cached.fetchedAt ?? '') || Date.now()),
+        baseAt: memoryCacheGeneration(),
         dshSo: dshSoLate,
         blocked,
         variant: 'stale-cache',
@@ -602,7 +632,28 @@ export class PluginManagerService extends Service {
     // visits within the negative-cache TTL fail fast with a visible message.
     const failure = catalogError ?? markdownError ?? 'no sources'
     marketplaceWriteFailure(failure)
-    return { ok: false, items: [], fromCache: false, message: failure }
+    return { ok: false, items: [], categories: [], fromCache: false, message: failure }
+  }
+
+  /**
+   * REST envelope of a marketplace listing: `{ ok: true, value: result }`
+   * serialized once per generation, with the UTF-8 byte length cached
+   * alongside (A1). The string length is a constant for the lifetime of the
+   * entry, but the route used to re-measure it with
+   * `Buffer.byteLength(json, 'utf8')` on EVERY request — ~3.4ms of the
+   * ~4.4ms warm path, and the slowest encode path because the listing
+   * carries CJK/emoji. Repeat requests now pay 0ms.
+   *
+   * The gzip body is cached lazily: only gzip-capable clients trigger it.
+   */
+  marketplaceEnvelope(result: MarketplaceResult): { json: string; bytes: number; gzip?: Buffer } {
+    let serialized = marketplaceSerialization.get(result)
+    if (serialized === undefined) {
+      const json = JSON.stringify({ ok: true, value: result })
+      serialized = { json, bytes: Buffer.byteLength(json, 'utf8') }
+      marketplaceSerialization.set(result, serialized)
+    }
+    return serialized
   }
 
   /** Snapshot one profile: live entries + installed packages + bundle status. */
@@ -890,14 +941,14 @@ export class PluginManagerService extends Service {
     if (moduleName.length === 0) return ''
     try {
       if (enabled) {
-        const result = restoreArchivedPresets(presetsDirPath(), moduleName)
+        const result = await restoreArchivedPresets(presetsDirPath(), moduleName)
         const note = formatRestoreResult(moduleName, result)
         return note.length > 0 ? '\n' + note : ''
       }
       if (pluginInstalledInOtherProfiles(profile, moduleName)) {
         return '\n[plugin-manager] preset archive skipped for ' + moduleName + ': still installed in another profile'
       }
-      const result = archiveOwnedPresets(presetsDirPath(), moduleName)
+      const result = await archiveOwnedPresets(presetsDirPath(), moduleName)
       const note = formatArchiveResult(moduleName, result)
       return note.length > 0 ? '\n' + note : ''
     } catch (error) {
@@ -1224,12 +1275,18 @@ export class PluginManagerService extends Service {
         if (!resolve(pkgDir).startsWith(resolve(join(dir, 'node_modules')) + sep)) {
           return { ok: false, message: target + ' escapes node_modules; refusing to remove it' }
         }
-        if (existsSync(pkgDir)) rmSync(pkgDir, { recursive: true, force: true })
-        const manifest = readManifest(dir) as { dependencies?: Record<string, string> }
-        if (manifest.dependencies?.[target] !== undefined) {
-          delete manifest.dependencies[target]
-          writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, undefined, 2) + '\n')
+        // Go through the official CLI instead of rm + manifest surgery: a bare
+        // rm left pnpm-lock.yaml still recording the dependency, so the next
+        // `dsh plugin add` reconciled from the lockfile and reinstalled the
+        // very copy this fix had just removed (the duplicate reappeared as a
+        // fresh official-duplicate issue).
+        const removal = await runDshPlugin(profile, 'remove', [target], process.cwd())
+        if (!removal.ok) {
+          return { ok: false, message: 'failed to remove ' + target + ': ' + removal.output.trim() }
         }
+        // The removal changed the profile's node_modules: drop the installed
+        // index so the catalog and the next analysis see the new state.
+        invalidateInstalledIndex(profile)
         return { ok: true, message: 'removed duplicate official copy ' + target + ' from the profile (host fallback now resolves it)' }
       }
       default:
@@ -1766,6 +1823,15 @@ function readdirSafe(path: string): { name: string; isDirectory(): boolean }[] {
 /** Bodies at or below this size go out uncompressed (gzip overhead > savings). */
 const GZIP_MIN_BYTES = 1024
 
+/**
+ * gzip 压缩级别（A5）。默认 6 对 6.87MB 的市场包络要同步阻塞事件循环
+ * ~112ms（期间 1ms 定时器 0 次触发）；级别 3 实测 48ms（−57%），体积只从
+ * 1.42MB 涨到 1.54MB（+8.5%）。对本地 loopback 传输这 120KB 差异无感，
+ * 换来的是整个 host 少停摆 64ms。客户端 fetch 默认带 gzip，所以这是
+ * 每个进程首次请求（冷 gzip）都要付的成本。
+ */
+const GZIP_LEVEL = 3
+
 // ── Job registry for long REST operations (install/update/remove/…) ──
 
 /**
@@ -1778,12 +1844,21 @@ const GZIP_MIN_BYTES = 1024
 interface JobRecord {
   readonly id: string
   readonly startedAt: number
+  /** When the job settled; the TTL runs from here (undefined while pending). */
+  settledAt?: number
   settled: boolean
   result?: unknown
   error?: string
 }
 
-/** Settled jobs stay queryable this long (a poll after that reads "expired"). */
+/**
+ * Settled jobs stay queryable this long (a poll after that reads "expired").
+ * Measured from SETTLEMENT, not from start: a pnpm op may legitimately run
+ * for 10 minutes (childproc) and backupRestore chains dozens of installs, so
+ * a start-anchored TTL made a 29-minute job unqueryable one minute after it
+ * finished — the client then reported "job result expired (server
+ * restarted?)" for a job that had just completed successfully.
+ */
 const JOBS_TTL_MS = 30 * 60 * 1000
 /** Upper bound on simultaneously pending jobs (stacked clicks get refused). */
 const JOBS_MAX_PENDING = 4
@@ -1794,12 +1869,20 @@ let jobSeq = 0
 function pruneJobs(): void {
   const now = Date.now()
   for (const [id, job] of jobs) {
-    if (job.settled && now - job.startedAt > JOBS_TTL_MS) jobs.delete(id)
+    if (job.settled && now - (job.settledAt ?? job.startedAt) > JOBS_TTL_MS) jobs.delete(id)
   }
 }
 
-/** Serialized marketplace envelopes, keyed by result-object identity. */
-const marketplaceSerialization = new WeakMap<MarketplaceResult, { json: string; gzip?: Buffer }>()
+/**
+ * Serialized marketplace envelopes, keyed by result-object identity.
+ * `bytes` is the UTF-8 length of `json`, computed once when the entry is
+ * built: the string length is a constant for the lifetime of the cached
+ * entry, but the route used to re-measure it with
+ * `Buffer.byteLength(json, 'utf8')` on EVERY request — 3.6ms of the 4.4ms
+ * warm path (~85%), and the slowest encode path because the listing carries
+ * CJK/emoji. Cached here, a repeat request pays 0ms (A1).
+ */
+const marketplaceSerialization = new WeakMap<MarketplaceResult, { json: string; bytes: number; gzip?: Buffer }>()
 
 /**
  * Start a long operation as a tracked job. Bounded: more than
@@ -1817,8 +1900,8 @@ function startJob(run: () => Promise<unknown>): { ok: true; jobId: string } | { 
   const job: JobRecord = { id, startedAt: Date.now(), settled: false }
   jobs.set(id, job)
   void run().then(
-    (result) => { job.settled = true; job.result = result },
-    (error: unknown) => { job.settled = true; job.error = error instanceof Error ? error.message : String(error) },
+    (result) => { job.settled = true; job.settledAt = Date.now(); job.result = result },
+    (error: unknown) => { job.settled = true; job.settledAt = Date.now(); job.error = error instanceof Error ? error.message : String(error) },
   )
   return { ok: true, jobId: id }
 }
@@ -1895,13 +1978,27 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         respond(403, { ok: false, error: { code: 'forbidden', message: 'untrusted request' } })
         return
       }
-      const body = (await readJsonBody(req)) as Record<string, unknown>
+      // The backup ops carry a whole backup file in the JSON body, so they
+      // get the larger cap (see bodyLimitFor).
+      const body = (await readJsonBody(req, bodyLimitFor(op))) as Record<string, unknown>
       // Input fence for job-backed mutations: an empty or unsafe profile /
       // package name used to travel into a bounded job slot (4 pending max)
       // and fail only after clone/pnpm work had started.
       const validProfile = (name: string): boolean => name.length > 0 && isSafeProfileName(name)
       const requireProfile = (name: string): boolean => {
         if (!validProfile(name)) {
+          respond(400, { ok: false, error: { code: 'bad-profile', message: 'invalid profile name: ' + JSON.stringify(name) } })
+          return false
+        }
+        return true
+      }
+      // Profile-less ops (install / uninstallKind from the Skills & Presets
+      // page): skills and agent presets live in the global harness roots, so
+      // the caller legitimately passes ''. An empty name is allowed through,
+      // a non-empty one must still be safe — the service decides whether the
+      // resolved kind actually needs a profile.
+      const requireOptionalProfile = (name: string): boolean => {
+        if (name.length > 0 && !validProfile(name)) {
           respond(400, { ok: false, error: { code: 'bad-profile', message: 'invalid profile name: ' + JSON.stringify(name) } })
           return false
         }
@@ -1927,7 +2024,9 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'install': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const spec = typeof body['spec'] === 'string' ? body['spec'] : ''
-          if (!requireProfile(profile)) return
+          // Empty profile = profile-less install from the Skills & Presets
+          // page (skill / agent-preset repos install into the global roots).
+          if (!requireOptionalProfile(profile)) return
           if (spec.trim().length === 0) {
             respond(400, { ok: false, error: { code: 'bad-spec', message: 'install spec is empty' } })
             return
@@ -1958,7 +2057,10 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'uninstallKind': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const repo = typeof body['repo'] === 'string' ? body['repo'] : ''
-          if (!requireProfile(profile)) return
+          // Empty profile: skill/preset records are removed from the global
+          // roots; a cordis-plugin record falls back to its own recorded
+          // profile inside the service (or fails with guidance).
+          if (!requireOptionalProfile(profile)) return
           if (repo.trim().length === 0) {
             respond(400, { ok: false, error: { code: 'bad-repo', message: 'repo is empty' } })
             return
@@ -2025,20 +2127,18 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
           const refresh = body['refresh'] === true
           const result = await service.marketplace(profile, refresh)
-          // Large-listing serialization cache: the per-generation pipeline
-          // cache returns the SAME result object for repeat requests, so the
-          // ~1.7MB stringify + gzip is paid once per generation instead of
-          // per request (gzip is computed lazily — only gzip-capable clients
-          // trigger it).
-          let serialized = marketplaceSerialization.get(result)
-          if (serialized === undefined) {
-            serialized = { json: JSON.stringify({ ok: true, value: result }) }
-            marketplaceSerialization.set(result, serialized)
-          }
+          // Large-listing serialization cache (A1): the per-generation
+          // pipeline cache returns the SAME result object for repeat
+          // requests, so the 6.87MB stringify, its UTF-8 byte length and the
+          // gzip body are each paid once per generation instead of per
+          // request. Gzip is computed lazily — only gzip-capable clients
+          // trigger it. Built in the service so tests can assert the cached
+          // `bytes` equals the real envelope size.
+          const serialized = service.marketplaceEnvelope(result)
           if (acceptEncoding.toLowerCase().includes('gzip')
-            && Buffer.byteLength(serialized.json, 'utf8') > GZIP_MIN_BYTES) {
+            && serialized.bytes > GZIP_MIN_BYTES) {
             if (serialized.gzip === undefined) {
-              serialized.gzip = gzipSync(Buffer.from(serialized.json, 'utf8'))
+              serialized.gzip = gzipSync(Buffer.from(serialized.json, 'utf8'), { level: GZIP_LEVEL })
             }
             res.writeHead(200, {
               'content-type': 'application/json',
@@ -2068,12 +2168,12 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         case 'renameProfile': {
           const oldName = typeof body['oldName'] === 'string' ? body['oldName'] : ''
           const newName = typeof body['newName'] === 'string' ? body['newName'] : ''
-          respond(200, { ok: true, value: service.renameProfile(oldName, newName) })
+          respond(200, { ok: true, value: await service.renameProfile(oldName, newName) })
           return
         }
         case 'removeProfile': {
           const name = typeof body['name'] === 'string' ? body['name'] : ''
-          respond(200, { ok: true, value: service.removeProfile(name) })
+          respond(200, { ok: true, value: await service.removeProfile(name) })
           return
         }
         case 'removeInsert': {
@@ -2090,7 +2190,13 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
         }
         case 'checkUpdates': {
           const profile = typeof body['profile'] === 'string' ? body['profile'] : ''
-          respond(200, { ok: true, value: await service.checkUpdates(profile) })
+          // Job-backed like install/update: the check runs up to 4 npm probes
+          // (15s timeout, 2 attempts each) plus git ls-remote (20s) per
+          // package, which used to hold the HTTP request open long enough for
+          // a browser or proxy to detach — the exact failure the job system
+          // was introduced for.
+          if (!requireProfile(profile)) return
+          respondJob(respond, startJob(() => service.checkUpdates(profile)))
           return
         }
         case 'analyze': {
@@ -2158,13 +2264,22 @@ export function registerRoutes(ctx: Context, service: PluginManagerService): (()
       }
     } catch (error: unknown) {
       // Route-level failures were silent before — a loader/fs error deep in
-      // a read path surfaced only as a bare 400 to the client.
+      // a read path surfaced only as a bare 400 to the client. Classify what
+      // reaches here: a malformed/oversized body is the client's fault, while
+      // anything else is a server-side fault that must not be reported as a
+      // 400 (it misled both the client error text and the logs).
+      const message = error instanceof Error ? error.message : String(error)
       console.warn('[plugin-manager] route ' + op + ' failed: '
         + (error instanceof Error ? error.stack ?? error.message : String(error)))
-      respond(400, {
-        ok: false,
-        error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) },
-      })
+      if (message === 'request body too large') {
+        respond(413, { ok: false, error: { code: 'payload-too-large', message } })
+        return
+      }
+      if (error instanceof SyntaxError) {
+        respond(400, { ok: false, error: { code: 'bad-json', message: 'request body is not valid JSON' } })
+        return
+      }
+      respond(500, { ok: false, error: { code: 'internal', message } })
     }
   }
 

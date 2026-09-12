@@ -7,9 +7,9 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { isBuiltin } from 'node:module'
-import { basename, delimiter, dirname, join, resolve, sep } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { commandEnv, execFileTimeout, resolveCommand, runDshPlugin } from './childproc.ts'
@@ -20,7 +20,7 @@ import {
 import { restoreInBoxBundles } from './profiles.ts'
 import { applyLiveOps, type StackOp } from './live.ts'
 import { addDisableBlock, addInsertRow, readInsertRows, readManagedIds, removeDisableBlock, removeInsertRow, writePatch } from './patch.ts'
-import { analyzeProfile, OFFICIAL_DEP_ALLOWED, packageEntry, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
+import { analyzeProfile, isLoaderProvided, OFFICIAL_DEP_ALLOWED, packageEntries, scanImports, scanNodeModulesNames, scanPackageImports } from './analyze.ts'
 import { compareVersions, isGitSourceSpec, updateSpec } from './match.ts'
 import {
   addBlockedRepo, detectRepoType, installPreset, installSkill, loadKindRecords, looksLikeDshPlugin,
@@ -568,12 +568,19 @@ export function installWithSource(ctx: Context | null, profile: string, spec: st
 }
 
 export async function installWithSourceInner(ctx: Context | null, profile: string, spec: string, answers?: Record<string, string>, locale?: 'zh' | 'en'): Promise<CommandResult> {
+  // Profile-less call (Skills & Presets page re-pull): skills and agent
+  // presets install into the global harness roots and never touch profile
+  // state. The npm-first shortcut is skipped because it installs INTO a
+  // profile — the clone is always needed so the kind can be detected, and a
+  // cordis plugin is refused below with guidance instead of crashing on an
+  // empty profile name.
+  const profileLess = profile.length === 0
   // npm-first BEFORE cloning for plain GitHub URLs (the marketplace shape:
   // repo name == npm name). A pinned ref / subdir requests a specific git
   // state, so those still clone. On slow networks the registry /latest
   // probe is tiny and fast, so the npm path wins instead of a doomed clone.
   const plainGit = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^\/#\s]+)\/([^\/#\s]+?)(?:\.git)?$/.exec(spec.trim())
-  if (plainGit !== null) {
+  if (!profileLess && plainGit !== null) {
     const npmName = await probeNpmPublished(plainGit[2]!)
     if (npmName !== undefined) {
       const result = await installProtected(ctx, profile, npmName)
@@ -657,6 +664,18 @@ export async function installWithSourceInner(ctx: Context | null, profile: strin
     }
     // cordis-plugin: continue to the npm-first + quality-gate path below,
     // after the C2 env-requirement scan (git-source installs only).
+    if (profileLess) {
+      // Reached only when a profile-less caller (Skills & Presets re-pull)
+      // points at a cordis plugin: the global roots cannot host one, and
+      // installProtected would throw on the empty profile name. Refuse with
+      // the actionable route instead.
+      return {
+        ok: false,
+        exitCode: 1,
+        output: '[plugin-manager] ' + repoKey + ' is a cordis plugin — plugins install into a profile.'
+          + ' Install it from the marketplace or the Manage tab, or run: dshpm install <spec> --profile <name>',
+      }
+    }
     const scanned = await scanRequirements(prepared.spec)
     if (scanned.length > 0) {
       const session = getInstallSession(spec)
@@ -695,6 +714,17 @@ export async function installWithSourceInner(ctx: Context | null, profile: strin
   // the npm install (faster, no local link); fall back to the git clone.
   // The git fallback runs with a filtered env (see gitSourceEnv); the npm
   // path keeps the host env so private-registry tokens (.npmrc auth) work.
+  if (profileLess) {
+    // Defensive: a spec that never reached the kind detection above (a bare
+    // package name rather than a cloned repository) cannot be classified, and
+    // the npm path would install into a profile that does not exist.
+    return {
+      ok: false,
+      exitCode: 1,
+      output: '[plugin-manager] cannot install ' + JSON.stringify(spec) + ' without a profile —'
+        + ' the Skills & Presets page installs skills and agent presets from GitHub repositories.',
+    }
+  }
   const npmName = prepared.packageName !== undefined ? await probeNpmPublished(prepared.packageName) : undefined
   // Git-protocol install when the source has an equivalent (root package of
   // a git URL): the code lands inside the profile tree and pnpm installs the
@@ -702,8 +732,17 @@ export async function installWithSourceInner(ctx: Context | null, profile: strin
   // sources have no git-protocol form and keep the link install (their bare
   // imports may fail to resolve — see prepareInstallSource).
   const gitSpec = prepared.gitSpec
+  // The npm path deliberately keeps the UNFILTERED host env so private
+  // registry credentials (.npmrc auth) resolve — so the user's scanned
+  // answers are merged on top rather than swapping in the filtered env.
+  // Dropping them here (the old behavior) lost the very variables the C2
+  // scan had just prompted for, and the npm lifecycle script then ran
+  // without them.
+  const npmEnv = envAnswers !== undefined && Object.keys(envAnswers).length > 0
+    ? { ...process.env, ...envAnswers }
+    : undefined
   const result = npmName !== undefined
-    ? await installProtected(ctx, profile, npmName)
+    ? await installProtected(ctx, profile, npmName, npmEnv)
     : await installProtected(ctx, profile, gitSpec ?? prepared.spec, gitSourceEnv(envAnswers))
   const note = npmName !== undefined
     ? 'installed from npm (' + npmName + '; the repository also publishes it)'
@@ -1370,33 +1409,10 @@ export async function updateProtectedInner(profile: string, name: string, locale
       + '; restart the profile to load the new code.',
   }
 }
-/**
- * Specifiers the loader provides without the plugin declaring them: the
- * client platform table plus the host-side cordis basics the profile
- * bundles mount. Anything else a plugin imports must be in its manifest.
- * The @deepseek-ai/dsh-client-* and @deepseek-ai/cordis-plugin-* families
- * are platform packages (matched by prefix so the whitelist cannot drift
- * from the web-app client table).
- */
-export const LOADER_PROVIDED = new Set([
-  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
-  '@deepseek-ai/cordis',
-  '@deepseek-ai/cordis-plugin-loader', '@deepseek-ai/cordis-plugin-include',
-  '@deepseek-ai/cordis-plugin-group', '@deepseek-ai/cordis-plugin-hmr',
-  '@deepseek-ai/cordis-plugin-timer',
-  '@deepseek-ai/dsh-client-web-react',
-])
-
-/** Whether the loader/platform provides a specifier without declaration. */
-export function isLoaderProvided(spec: string): boolean {
-  return LOADER_PROVIDED.has(spec)
-    || spec.startsWith('@deepseek-ai/dsh-client-')
-    || spec.startsWith('@deepseek-ai/cordis-plugin-')
-}
-
-// scanImports / scanPackageImports / packageEntry live in src/analyze.ts
-// (shared with the health-check engine so the gate and the analysis never
-// drift — entry resolution in particular must be one implementation).
+// scanImports / scanPackageImports / packageEntry / LOADER_PROVIDED live in
+// src/analyze.ts (shared with the health-check engine so the gate and the
+// analysis never drift — entry resolution and the loader-provided whitelist
+// in particular must be one implementation, imported above).
 
 /**
  * Quality check for one installed package: undeclared bare imports that the
@@ -1415,8 +1431,13 @@ export function qualityIssues(profile: string, packageName: string): string[] {
     ...Object.keys((manifest['dependencies'] ?? {}) as Record<string, unknown>),
     ...Object.keys((manifest['peerDependencies'] ?? {}) as Record<string, unknown>),
   ])
-  const entry = packageEntry(pkgDir, manifest)
-  if (entry === null) return ["no resolvable entry file (exports/main/index.js)"]
+  // EVERY declared entry, not just exports["."]: DSH plugins commonly ship
+  // several (host + client + worker), and an undeclared import in a subpath
+  // entry fails at boot exactly like one in the root — while the bundle patch
+  // row that mounts that subpath makes the WHOLE profile fail to start
+  // (audit C-1).
+  const entries = packageEntries(pkgDir, manifest)
+  if (entries.length === 0) return ["no resolvable entry file (exports/main/index.js)"]
   const issues: string[] = []
   // Official packages as REGULAR dependencies are the one install pattern
   // that passes every import check and still breaks the profile at runtime:
@@ -1436,10 +1457,10 @@ export function qualityIssues(profile: string, packageName: string): string[] {
         + "(the profile falls through to the installation's shared copy), or drop the declaration.")
     }
   }
-  // Scan the WHOLE load chain (entry + every file reachable through relative
-  // imports): an undeclared import one hop down fails at boot exactly like
-  // one in the entry.
-  const imports = scanPackageImports(pkgDir, entry)
+  // Scan the WHOLE load chain (every declared entry + every file reachable
+  // through relative imports): an undeclared import one hop down fails at
+  // boot exactly like one in the entry.
+  const imports = [...new Set(entries.flatMap(entry => scanPackageImports(pkgDir, entry)))]
   for (const spec of imports) {
     // A subpath import (unpdf/pdfjs) is covered by declaring its parent
     // package (unpdf): Node resolves subpaths through the parent entry.
@@ -1502,6 +1523,85 @@ export function readBundleRows(patchFile: string): string[] {
   }
 }
 
+/** Read one installed package's manifest, or null when unreadable. */
+function readInstalledManifest(pkgDir: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+/** Probe one path as a module file: exact, then the usual extension suffixes. */
+function probeModuleFile(target: string): boolean {
+  for (const suffix of ['', '.js', '.mjs', '.cjs', '.json', '.node', '/index.js', '/index.mjs', '/index.cjs']) {
+    try {
+      if (existsSync(target + suffix)) return true
+    } catch { /* keep probing */ }
+  }
+  return false
+}
+
+/**
+ * Whether an `exports` field declares one subpath key (`"./server"`), with
+ * `*` wildcard patterns honoured (`"./x/*"`). A string field or a
+ * conditions-only object exports `"."` alone, so any other subpath is
+ * unexported by Node's rules.
+ */
+function exportsDeclaresKey(exportsField: unknown, key: string): boolean {
+  if (typeof exportsField === 'string' || exportsField === null || typeof exportsField !== 'object') {
+    return key === '.'
+  }
+  const record = exportsField as Record<string, unknown>
+  const keys = Object.keys(record)
+  const isSubpathMap = keys.length > 0 && keys.every(entry => entry.startsWith('.'))
+  if (!isSubpathMap) return key === '.'
+  if (key in record) return true
+  // Wildcard patterns: "./x/*" matches "./x/<anything>".
+  for (const pattern of keys) {
+    const star = pattern.indexOf('*')
+    if (star < 0) continue
+    const prefix = pattern.slice(0, star)
+    const suffix = pattern.slice(star + 1)
+    if (key.startsWith(prefix) && key.endsWith(suffix) && key.length >= prefix.length + suffix.length) return true
+  }
+  return false
+}
+
+/**
+ * Whether one bare specifier resolves to a module inside `root`
+ * (node_modules layout). Covers both a plain package name and a subpath
+ * (`pkg/sub`, `@scope/pkg/sub`).
+ *
+ * C-2: the previous scoped branch returned true as soon as the PACKAGE
+ * directory existed, so `@scope/pkg/<anything>` — including a subpath the
+ * package does not export and a file that does not exist — was reported as
+ * resolving. That silently disabled the bundle-patch check in the quality
+ * gate (the last line of defence for C-1). The subpath is now validated
+ * against the package's `exports` map, falling back to plain file probing
+ * for legacy packages without one.
+ */
+function bareSpecifierResolvesInRoot(root: string, spec: string): boolean {
+  const parts = spec.split('/')
+  const pkgName = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!
+  // "@scope" alone is not a package; neither is an empty spec.
+  if (pkgName.length === 0 || (spec.startsWith('@') && parts.length < 2)) return false
+  const subpath = spec.slice(pkgName.length)
+  const pkgDir = join(root, pkgName)
+  if (!existsSync(pkgDir)) return false
+  if (subpath.length === 0) return true
+  const relative = subpath.replace(/^\//, '')
+  // 1. A real file/dir at that path (legacy resolution, and what a subpath
+  //    means for a package without an exports map).
+  if (probeModuleFile(join(pkgDir, relative))) return true
+  const manifest = readInstalledManifest(pkgDir)
+  const exportsField = manifest?.['exports']
+  // 2. No exports map: the subpath IS a file path — already probed above.
+  if (exportsField === undefined) return false
+  // 3. exports map present: the subpath must be declared by it.
+  return exportsDeclaresKey(exportsField, './' + relative)
+}
+
 /** Whether a bare specifier resolves inside a profile's node_modules. */
 export function bareSpecifierResolves(profileDirPath: string, spec: string): boolean {
   // Node builtins are unconditionally provided by the runtime — they resolve
@@ -1512,12 +1612,7 @@ export function bareSpecifierResolves(profileDirPath: string, spec: string): boo
   const roots = [join(profileDirPath, 'node_modules'), join(profileDirPath, '..', 'node_modules')]
   for (const root of roots) {
     try {
-      if (existsSync(join(root, spec))) return true
-      // Scoped subpath (pkg/sub) — the package itself is the provider.
-      if (spec.includes('/') && spec.startsWith('@')) {
-        const parts = spec.split('/')
-        if (existsSync(join(root, parts[0]!, parts[1]!))) return true
-      }
+      if (bareSpecifierResolvesInRoot(root, spec)) return true
     } catch { /* keep probing */ }
   }
   return false

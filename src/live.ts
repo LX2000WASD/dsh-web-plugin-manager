@@ -34,6 +34,39 @@ import { readFileSync, watch } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
+/**
+ * Default ceiling for one entry.update() call. The platform can hang inside
+ * a poisoned apply queue; both the mutation path and the watcher path race
+ * against this so a hung update degrades to "restart to apply" instead of
+ * wedging every later live apply behind a promise that never settles.
+ */
+const LIVE_APPLY_TIMEOUT_MS = 5_000
+
+/**
+ * Await one entry.update() with a ceiling. The platform can hang inside a
+ * poisoned apply queue; racing a timer converts that into a rejected promise
+ * so a stuck update degrades to "restart to apply" instead of wedging every
+ * later live apply behind a promise that never settles. The timer is always
+ * cleared, so a fast apply leaves no pending handle behind.
+ */
+async function updateWithTimeout(
+  entry: { update(options: { config: Record<string, unknown> }): Promise<unknown> },
+  config: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    await Promise.race([
+      entry.update({ config }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('live apply timed out')), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 /** One mutation of the live patch stack. */
 export type StackOp =
   /** Append a new patch row (managed disable block, insert block). */
@@ -131,7 +164,7 @@ function scrubBakedDisabled(stack: unknown[], id: string): void {
 export async function applyLiveOps(
   ctx: Context,
   ops: readonly StackOp[],
-  timeoutMs = 5_000,
+  timeoutMs = LIVE_APPLY_TIMEOUT_MS,
 ): Promise<{ ok: boolean; message?: string }> {
   const found = includeEntry(ctx)
   if (found === undefined) {
@@ -192,12 +225,8 @@ export async function applyLiveOps(
   // Serialize against the watcher's recompose: two concurrent update() calls
   // race last-write-wins and one op is lost (audit M16).
   return enqueueLive(async () => {
-    const task = entry.update({ config: { ...rest, patches: stack } })
     try {
-      await Promise.race([
-        task,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('live apply timed out')), timeoutMs)),
-      ])
+      await updateWithTimeout(entry, { ...rest, patches: stack }, timeoutMs)
       return { ok: true }
     } catch (error: unknown) {
       console.error('[plugin-manager] live apply failed:', error instanceof Error ? error.stack ?? error.message : String(error))
@@ -370,7 +399,11 @@ async function recomposeFromFile(state: PatchWatcherState): Promise<void> {
       ...structuredClone(rows as unknown[]),
     ]
     await enqueueLive(async () => {
-      await found.entry.update({ config: { ...rest, patches: next } })
+      // Same timeout race as applyLiveOps (see updateWithTimeout): without it
+      // the watcher path never settles, liveApplyTail never advances, and
+      // every later live apply (toggle/install/remove) waits on this task
+      // forever — a full restart was the only recovery.
+      await updateWithTimeout(found.entry, { ...rest, patches: next }, LIVE_APPLY_TIMEOUT_MS)
     })
   } catch (error: unknown) {
     console.error('[plugin-manager] patch watch recompose failed:', error instanceof Error ? error.message : String(error))

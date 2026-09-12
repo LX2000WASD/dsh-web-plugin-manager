@@ -253,7 +253,15 @@ export function readRegistryCache(): RegistryRepo[] | null {
   return null
 }
 
-/** Persist a successful full index (never the search fallback). */
+/**
+ * Persist a successful full index (never the search fallback).
+ *
+ * Compact JSON (A7): the file is machine-read only, and pretty-printing cost
+ * both time and disk — measured on the 3115-repo reference index, indent 2 =
+ * 1.93MB / 5.4ms vs compact 1.48MB / 4.0ms (**-24% disk, -1.4ms per write**;
+ * the live cache file is 1.93MB). Matches marketplaceWriteCache, which
+ * documents the same choice for the ~13k-item listing.
+ */
 export function writeRegistryCache(repos: RegistryRepo[]): void {
   try {
     mkdirSync(dirname(registryCacheFile()), { recursive: true })
@@ -261,7 +269,7 @@ export function writeRegistryCache(repos: RegistryRepo[]): void {
       savedAt: new Date().toISOString(),
       count: repos.length,
       repos,
-    }, undefined, 2) + '\n')
+    }) + '\n')
   } catch { /* cache write is best-effort */ }
 }
 

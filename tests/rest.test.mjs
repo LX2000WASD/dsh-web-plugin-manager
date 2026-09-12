@@ -7,7 +7,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
-import { isTrustedRequest, readJsonBody } from '../dist/rest.js'
+import { bodyLimitFor, isTrustedRequest, readJsonBody } from '../dist/rest.js'
 
 describe('isTrustedRequest — web 模式（HTTP 面）', () => {
   it('accepts loopback Host', () => {
@@ -115,5 +115,31 @@ describe('readJsonBody — 请求体读取（issue #11）', () => {
     bad.push('{not json')
     bad.push(null)
     await assert.rejects(readJsonBody(bad), SyntaxError)
+  })
+})
+
+describe('readJsonBody — 请求体上限分级（backup 载荷）', () => {
+  it('caps ordinary ops at 1 MB but lets the backup ops carry a whole backup file', () => {
+    assert.equal(bodyLimitFor('marketplace'), 1_000_000)
+    assert.equal(bodyLimitFor('install'), 1_000_000)
+    // A profile with a few dozen plugins exceeds 1 MB of JSON — the restore
+    // payload used to be rejected with an opaque "request body too large".
+    assert.ok(bodyLimitFor('backupRestore') > 1_000_000)
+    assert.ok(bodyLimitFor('backupDiff') > 1_000_000)
+  })
+
+  it('rejects an oversized body on the default cap and accepts it under the backup cap', async () => {
+    const payload = JSON.stringify({ backup: 'x'.repeat(1_100_000) })
+    const stream = () => { const r = new Readable(); r.push(payload); r.push(null); return r }
+    await assert.rejects(readJsonBody(stream()), /request body too large/)
+    const accepted = await readJsonBody(stream(), bodyLimitFor('backupRestore'))
+    assert.equal(typeof accepted.backup, 'string')
+  })
+
+  it('bounds the fetch-style shims too (no unbounded transport)', async () => {
+    const big = { text: async () => 'x'.repeat(1_000_001) }
+    await assert.rejects(readJsonBody(big), /request body too large/)
+    const bigBody = { body: 'x'.repeat(1_000_001) }
+    await assert.rejects(readJsonBody(bigBody), /request body too large/)
   })
 })

@@ -239,7 +239,7 @@ describe('archive / restore', () => {
     await writeFile(join(b, 'agent.cordis.yml'), '---\n- name: user-edit\n')
     await makePreset('arch-user', '---\n- name: p\n')
 
-    const result = archiveOwnedPresets(presetRoot, 'pkg-arch')
+    const result = await archiveOwnedPresets(presetRoot, 'pkg-arch')
     assert.deepEqual([...result.archived].sort(), ['arch-a', 'arch-b'])
     // moved out of the user root, present under the archive dir
     const archiveRoot = presetArchiveDir()
@@ -254,7 +254,7 @@ describe('archive / restore', () => {
     // a same-id preset appeared meanwhile
     await makePreset('restore-me', '---\n- name: p\n')
 
-    const result = restoreArchivedPresets(presetRoot, 'pkg-restore')
+    const result = await restoreArchivedPresets(presetRoot, 'pkg-restore')
     assert.deepEqual(result.restored, [])
     assert.equal(result.skipped.length, 1)
     // the fresh preset wins; the archive copy stays
@@ -262,11 +262,11 @@ describe('archive / restore', () => {
 
     // clean conflict away, restore now succeeds
     await rm(join(presetRoot, 'restore-me'), { recursive: true, force: true })
-    const again = restoreArchivedPresets(presetRoot, 'pkg-restore')
+    const again = await restoreArchivedPresets(presetRoot, 'pkg-restore')
     assert.deepEqual(again.restored, ['restore-me'])
   })
   it('idempotent: nothing to archive after archiving', async () => {
-    const result = archiveOwnedPresets(presetRoot, 'pkg-arch')
+    const result = await archiveOwnedPresets(presetRoot, 'pkg-arch')
     assert.deepEqual(result.archived, [])
   })
 })

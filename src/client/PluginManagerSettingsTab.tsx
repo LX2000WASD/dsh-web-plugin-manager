@@ -274,15 +274,18 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
   /** A-level fixes run directly; B-level suggestions confirm inline first. */
   const onFix = async (issue: AnalyzeIssue, key?: string): Promise<void> => {
     if (issue.fix === undefined) return
+    // The caller passes the stable content-derived key (see issueKey); the
+    // fallback keeps the function usable without one.
+    const stableKey = key ?? issueKey('auto', issue)
     if (issue.fix.confirm) {
-      const id = key ?? issue.fix.label
+      const id = stableKey
       if (confirmKey !== id) {
         setConfirmKey(id)
         return
       }
       setConfirmKey(null)
     }
-    const fixKey = key ?? 'auto-' + issue.kind
+    const fixKey = stableKey
     const profile = selected
     setFixing(fixKey)
     try {
@@ -330,6 +333,14 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
     () => (analysis?.issues ?? []).filter(issue => issue.fix === undefined),
     [analysis],
   )
+  /**
+   * Stable identity of one issue row. Positional keys ('auto-' + index) were
+   * wrong twice over: React re-patched the wrong row after a successful fix
+   * reordered the list, and the "fixed ✓" marker (keyed the same way) then
+   * appeared on an unrelated line. Content-derived keys survive reordering.
+   */
+  const issueKey = (prefix: string, issue: AnalyzeIssue): string =>
+    prefix + ':' + issue.kind + ':' + (issue.from ?? '') + ':' + (issue.to ?? '') + ':' + issue.message
 
   /** Shared install flow (was duplicated verbatim in onInstall/onEnvContinue
    *  — including the live-mount comment, which had already started to drift). */
@@ -538,27 +549,30 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                     <p style={styles.status}>{t('fixAutoGroup')}</p>
                   )}
                   <ul style={styles.analysisList}>
-                    {autoFixable.map((issue, index) => (
-                      <li key={'auto-' + index} style={styles.analysisIssue}>
-                        <span style={styles.analysisIssueKind}>{issue.kind}</span>
-                        <span style={styles.analysisIssueText}>{issue.message}</span>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={busy !== null || fixing !== null}
-                          onClick={() => void onFix(issue)}
-                        >
-                          {fixedKeys.has('auto-' + index) ? t('fixDone') : fixing === 'auto-' + index ? t('fixing') : t('fixButton')}
-                        </Button>
-                      </li>
-                    ))}
+                    {autoFixable.map((issue) => {
+                      const key = issueKey('auto', issue)
+                      return (
+                        <li key={key} style={styles.analysisIssue}>
+                          <span style={styles.analysisIssueKind}>{issue.kind}</span>
+                          <span style={styles.analysisIssueText}>{issue.message}</span>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busy !== null || fixing !== null}
+                            onClick={() => void onFix(issue, key)}
+                          >
+                            {fixedKeys.has(key) ? t('fixDone') : fixing === key ? t('fixing') : t('fixButton')}
+                          </Button>
+                        </li>
+                      )
+                    })}
                   </ul>
                   {suggested.length > 0 && (
                     <p style={styles.status}>{t('fixSuggestedGroup')}</p>
                   )}
                   <ul style={styles.analysisList}>
-                    {suggested.map((issue, index) => {
-                      const key = 'sug-' + index
+                    {suggested.map((issue) => {
+                      const key = issueKey('sug', issue)
                       const confirming = confirmKey === key
                       return (
                         <li key={key} style={styles.analysisIssue}>
@@ -583,8 +597,8 @@ export function PluginManagerSettingsTab({ profiles, list, install, remove, remo
                     <p style={styles.status}>{t('fixManualGroup')}</p>
                   )}
                   <ul style={styles.analysisList}>
-                    {manual.map((issue, index) => (
-                      <li key={'manual-' + index} style={styles.analysisIssue}>
+                    {manual.map((issue) => (
+                      <li key={issueKey('manual', issue)} style={styles.analysisIssue}>
                         <span style={styles.analysisIssueKind}>{issue.kind}</span>
                         <span style={styles.analysisIssueText}>{issue.message}</span>
                       </li>

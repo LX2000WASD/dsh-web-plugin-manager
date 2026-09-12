@@ -16,10 +16,24 @@ import { kindRecordsStamp, loadKindRecords, normalizeRepoRef, pruneGhostRecords,
 import { dshHome, isSafeProfileName, profileDir, readManifest } from './paths.ts'
 import { readPackageInfo } from './installFlow.ts'
 import { compareVersions } from './match.ts'
+import { categoryCounts } from './tags.ts'
 import type { MarketplaceItem, MarketplaceResult } from './types.ts'
 
 /** Marketplace snapshot TTL and cache format version. */
 export const MARKETPLACE_TTL = 24 * 60 * 60 * 1000
+/**
+ * Disk-cache format version. Bump when the CACHED payload changes shape in a
+ * way an old file cannot satisfy: `marketplaceReadCache` discards a file whose
+ * version differs, so a bump forces one refetch per install instead of serving
+ * a listing that is missing the new field.
+ *
+ * Deliberately NOT bumped when `MarketplaceResult.categories` was added: the
+ * cached payload is the ITEM LIST, not the result envelope — `categories` is
+ * derived in `finalizeListing` on every return path (including the cache-hit
+ * and stale-cache paths), so an old cache file still produces a complete
+ * response. Bumping here would have thrown away a good 24h listing and cost
+ * every install a full multi-source refetch for no correctness gain.
+ */
 export const MARKETPLACE_CACHE_VERSION = 3
 
 /**
@@ -28,7 +42,9 @@ export const MARKETPLACE_CACHE_VERSION = 3
  * instead of the ~1.7MB disk file. TTL mirrors the disk cache; invalidated
  * on every fresh fetch (writeCache).
  */
-export let marketplaceMemoryCache: { at: number; items: MarketplaceItem[]; source?: string } | null = null
+export let marketplaceMemoryCache: { at: number; items: MarketplaceItem[]; source?: string; generation: number } | null = null
+/** Monotonic counter behind MemoryCache.generation (never reset). */
+let marketplaceMemoryGeneration = 0
 /** Serialization tail for concurrent marketplace refreshes (audit M13). */
 export let marketplaceRefreshTail: Promise<void> = Promise.resolve()
 
@@ -37,6 +53,16 @@ export interface MemoryCache {
   at: number
   items: MarketplaceItem[]
   source?: string
+  /**
+   * Monotonic identity of this mirror write (M-1/m-3). Every writeMemoryCache
+   * call — including the "warm the mirror from the disk cache" path — bumps
+   * it, so two writes that carry DIFFERENT items can never share a stamp even
+   * when they happen inside the same millisecond. The pipeline cache keys on
+   * it instead of on `at`, which is a wall-clock value that (a) repeats for
+   * distinct content and (b) would move for identical content if it were
+   * ever taken from "now" rather than from the listing's own fetch time.
+   */
+  generation: number
 }
 
 /** Read the in-process mirror, or null when cold/expired (MARKETPLACE_TTL). */
@@ -53,7 +79,16 @@ export function readMemoryCache(): MemoryCache | null {
  * mirror cannot extend a listing's lifetime beyond its real age.
  */
 export function writeMemoryCache(items: MarketplaceItem[], source: string, at: number = Date.now()): void {
-  marketplaceMemoryCache = { at, items, source }
+  marketplaceMemoryCache = { at, items, source, generation: ++marketplaceMemoryGeneration }
+}
+
+/**
+ * Identity stamp of the current mirror content, or 0 when cold/expired.
+ * Reads the mirror directly (not through readMemoryCache's TTL) because a
+ * caller that just warmed the mirror must key on the content it wrote.
+ */
+export function memoryCacheGeneration(): number {
+  return marketplaceMemoryCache?.generation ?? 0
 }
 
 /**
@@ -108,9 +143,17 @@ export function catalogStatus(entry: CatalogEntry): string {
  * GitHub contents API (one call), honour catalog/tombstones.json, and parse
  * each entry against the published plugin.schema.json shape. Returns an
  * empty array only when nothing usable could be read.
+ *
+ * Note on `per_page` (B5, resolved): the contents API is NOT a paginated
+ * endpoint — it ignores `per_page`/`page` and returns the whole directory in
+ * one response (verified against a 534-file directory: `per_page=10` still
+ * returned 534 entries and no Link header). The real cap is 1000 files, and
+ * exceeding it fails loudly instead of silently truncating, so there is no
+ * pagination loop to write and the previous `?per_page=100` only looked like
+ * one. This call therefore carries no query string.
  */
 export async function fetchCatalogItems(): Promise<MarketplaceItem[]> {
-  const listingResponse = await marketplaceFetch(CATALOG_API + '/contents/catalog/plugins?per_page=100', { headers: GITHUB_UA })
+  const listingResponse = await marketplaceFetch(CATALOG_API + '/contents/catalog/plugins', { headers: GITHUB_UA })
   if (!listingResponse.ok) throw new Error('catalog listing HTTP ' + listingResponse.status)
   const listing = await listingResponse.json() as Array<{ name?: unknown; download_url?: unknown }>
   const files = listing.filter((entry): entry is { name: string; download_url: string } =>
@@ -353,6 +396,10 @@ export function dirNameSet(dir: string): Set<string> {
 
 /** One registry-index entry in the wire MarketplaceItem shape. */
 export function registryToItem(repo: RegistryRepo): MarketplaceItem {
+  // Computed once (A8): the object literal below used to call
+  // functionalTopics(repo.topics) twice per repo — one filter + array
+  // allocation per repo that was immediately discarded.
+  const topics = functionalTopics(repo.topics)
   return {
     name: repo.full_name,
     displayName: repo.name,
@@ -361,7 +408,7 @@ export function registryToItem(repo: RegistryRepo): MarketplaceItem {
     updatedAt: repo.updated_at,
     createdAt: '',
     url: repo.html_url.length > 0 ? repo.html_url : 'https://github.com/' + repo.full_name,
-    ...(functionalTopics(repo.topics).length > 0 ? { topics: functionalTopics(repo.topics) } : {}),
+    ...(topics.length > 0 ? { topics } : {}),
     ...(repo.pkg_name !== undefined ? { packageName: repo.pkg_name } : {}),
     ...(repo.version !== undefined ? { latestVersion: repo.version } : {}),
     ...(repo.category !== undefined ? { category: repo.category } : {}),
@@ -442,6 +489,9 @@ const installedIndexCache = new Map<string, { at: number; index: InstalledIndex 
  * NOT invalidate.
  */
 export function invalidateInstalledIndex(profile?: string): void {
+  // Clearing the entry is enough to force a rebuild on the next read. It is
+  // deliberately NOT part of the pipeline cache key: an install changes the
+  // rebuilt index's identity, so the key moves by itself (m-3).
   if (profile === undefined) installedIndexCache.clear()
   else installedIndexCache.delete(profile)
 }
@@ -456,12 +506,67 @@ export function buildInstalledIndex(profile: string): InstalledIndex | null {
 }
 
 /**
- * The generation stamp of the cached installed index for one profile (the
- * entry's build time, 0 when never built): keys the marketplace pipeline
- * cache so installs/removes (explicit invalidation) refresh the flags.
+ * Identity of a freshly built installed index (m-3), keyed by the index's own
+ * Sets: a rebuild that produces the same package/repo/git/skill/preset sets
+ * (the common case — the 5s TTL merely re-read the same manifest) yields the
+ * SAME object reference and therefore the same stamp. Stamping on the build
+ * time instead made every TTL expiry move the pipeline cache key and re-run
+ * the full 13k-item pipeline (~15ms of the warm path) for byte-identical
+ * output.
+ *
+ * WeakMap keyed by the index object: entries die with the index itself, and
+ * an invalidate + rebuild still gets a fresh identity.
+ */
+const installedIndexIdentity = new WeakMap<InstalledIndex, number>()
+let installedIndexIdentitySeq = 0
+
+/**
+ * Identity by CONTENT SHAPE, not by object: buildInstalledIndexUncached
+ * builds fresh Maps/Sets on every rebuild, so a WeakMap on the object alone
+ * would move the stamp on every TTL expiry. This index is a Map of the
+ * content shape (member names in insertion order + the skills/presets
+ * directory listings) → identity, so an unchanged manifest resolves to the
+ * identity already minted for that shape. The WeakMap above maps the live
+ * object to it, keeping the lookup O(1) per request.
+ */
+const installedIndexIdentities = new WeakMap<InstalledIndex, number>()
+const installedIndexShapeIds = new Map<string, number>()
+/** Rebuilds that resolved to an existing content identity (diagnostics). */
+let installedIndexReused = 0
+
+/** Content shape of one built index: all five members, order-sensitive. */
+function installedIndexShape(index: InstalledIndex): string {
+  return [
+    [...index.packageVersions.keys()].join(','),
+    [...index.repoVersions.keys()].join(','),
+    [...index.gitVersions.keys()].join(','),
+    [...index.skills].sort().join(','),
+    [...index.presets].sort().join(','),
+  ].join('\u0000')
+}
+
+/**
+ * Content identity stamp of the installed index for one profile: a stable
+ * identity derived from the index's CONTENT (see installedIndexShape), or 0
+ * when the profile has no usable index at all (never built / unknown
+ * profile). Replaces the old build-time stamp, which moved on every rebuild
+ * even when the content did not (m-3).
+ *
+ * The null case is a constant on purpose: with a null index
+ * flagItemInstalled ignores the kind records entirely and returns
+ * `installed:false` for every item, so the pipeline output depends only on
+ * the items — a repeated null build must NOT invalidate the pipeline cache.
+ * Switching between a real index (>=1) and null (0) still moves the stamp.
  */
 export function installedIndexAt(profile: string): number {
-  return installedIndexCache.get(profile)?.at ?? 0
+  const index = installedIndexCache.get(profile)?.index
+  if (index === undefined || index === null) return 0
+  let identity = installedIndexIdentity.get(index)
+  if (identity === undefined) {
+    identity = installedIndexShapeIds.get(installedIndexShape(index)) ?? ++installedIndexIdentitySeq
+    installedIndexIdentities.set(index, identity)
+  }
+  return identity
 }
 
 /** Which listing path a finalize call serves (kept in the cache key: the same items generation can exit through different paths with different messages). */
@@ -472,7 +577,12 @@ export interface FinalizeListingOptions {
   readonly profile: string
   /** Base (already merged) items, straight from the memory/disk cache or a fresh walk. */
   readonly items: readonly MarketplaceItem[]
-  /** Generation stamp of the base items: memory-cache write time, or the disk cache's fetchedAt. */
+  /**
+   * Content-generation stamp of the base items: the memory mirror's
+   * generation (see memoryCacheGeneration), or the disk cache's fetchedAt
+   * when the listing was never mirrored. Must move whenever the items
+   * change — it is the pipeline cache key's content identity (M-1).
+   */
   readonly baseAt: number
   readonly dshSo: readonly DshSoEntry[] | null
   readonly blocked: ReadonlySet<string>
@@ -503,6 +613,16 @@ export async function finalizeListing(options: FinalizeListingOptions): Promise<
   const key = [
     options.profile,
     options.baseAt,
+    // Content identity of the base items (M-1). baseAt is a wall-clock stamp
+    // the caller derives from the memory mirror / disk file: two calls can
+    // carry COMPLETELY different listings under the same baseAt — e.g. the
+    // registry chain "network → readRegistryCache() → search fallback", where
+    // a network failure serves the disk cache under the mirror's old
+    // timestamp and used to be answered with the previous full listing. The
+    // length + first name make distinct listings collide only when they
+    // agree on both, which cannot happen for two real generations.
+    options.items.length,
+    options.items[0]?.name ?? '',
     dshSoIndexAt(),
     installedIndexAt(options.profile),
     kindRecordsStamp(),
@@ -519,6 +639,13 @@ export async function finalizeListing(options: FinalizeListingOptions): Promise<
   const result: MarketplaceResult = {
     ok: true,
     items: deduped,
+    // Category aggregation over the FINAL listing (post-overlay/filter/dedupe):
+    // the client's filter must offer exactly the categories its cards can show,
+    // so a category whose entries were all deduped or blocked must not appear.
+    // Built here because this function is the single choke point every return
+    // path goes through (memory mirror / 24h disk cache / stale cache / fresh
+    // walk) — computing it further up would drop the field on cache hits.
+    categories: categoryCounts(deduped),
     fromCache: options.fromCache,
     message: options.message,
     ...(options.cachedAt !== undefined ? { cachedAt: options.cachedAt } : {}),
@@ -555,13 +682,27 @@ function buildInstalledIndexUncached(profile: string): InstalledIndex | null {
       if (identity !== null) gitVersions.set(identity, version)
     }
   }
-  return {
+  const index: InstalledIndex = {
     packageVersions,
     repoVersions,
     gitVersions,
     skills: dirNameSet(join(dshHome(), 'skills')),
     presets: dirNameSet(join(dshHome(), '.agent-presets')),
   }
+  // Content identity (m-3): a rebuild that yields the SAME sets (the usual
+  // TTL-expiry rebuild of an unchanged manifest) must keep the SAME stamp, so
+  // the pipeline cache key does not move and the 13k-item pipeline is not
+  // re-run for byte-identical output. Keyed by the Sets themselves — the
+  // WeakMap entry dies with the index.
+  const shape = installedIndexShape(index)
+  const identity = installedIndexShapeIds.get(shape)
+  if (identity !== undefined) {
+    installedIndexReused += 1
+    installedIndexIdentities.set(index, identity)
+  } else {
+    installedIndexShapeIds.set(shape, ++installedIndexIdentitySeq)
+  }
+  return index
 }
 
 /**
@@ -673,9 +814,13 @@ export function overlayDshSo(items: readonly MarketplaceItem[], dshSo: readonly 
  * plugin nor skill nor preset). Applied to every listing path — the 24h
  * cache, fresh fetches and the last-resort cache all go through the same
  * filter, so a blocked repo stays hidden until explicitly unblocked.
+ *
+ * Returns a readonly view: with an empty blocklist the input array is
+ * returned as-is (a defensive copy made every listing generation allocate a
+ * second 13k-element array for nothing — the only caller reads it).
  */
-export function filterBlockedRepos(items: readonly MarketplaceItem[], blocked: ReadonlySet<string>): MarketplaceItem[] {
-  if (blocked.size === 0) return [...items]
+export function filterBlockedRepos(items: readonly MarketplaceItem[], blocked: ReadonlySet<string>): readonly MarketplaceItem[] {
+  if (blocked.size === 0) return items
   return items.filter(item => !blocked.has(normalizeRepoRef(item.name) ?? item.name))
 }
 

@@ -5,7 +5,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { tokenize, scoreItem, findPluginMatches } from '../dist/match.js'
+import { tokenize, scoreItem, findPluginMatches, compareVersions } from '../dist/match.js'
 
 /** Minimal MarketplaceItem fixture. */
 const item = (overrides) => ({
@@ -82,5 +82,37 @@ describe('findPluginMatches', () => {
   })
   it('non-matching query returns []', () => {
     assert.deepEqual(findPluginMatches(items, 'unrelated', 10), [])
+  })
+})
+
+describe('compareVersions — semver §11.4 prerelease ordering', () => {
+  it('orders prerelease identifiers per the spec', () => {
+    // The canonical semver.org §11.4 chain, ascending.
+    const chain = [
+      '1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta',
+      '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0',
+    ]
+    for (let i = 0; i < chain.length - 1; i += 1) {
+      assert.equal(compareVersions(chain[i], chain[i + 1]), -1, chain[i] + ' < ' + chain[i + 1])
+      assert.equal(compareVersions(chain[i + 1], chain[i]), 1, chain[i + 1] + ' > ' + chain[i])
+    }
+  })
+  it('treats numeric identifiers as LOWER than alphanumeric (§11.4.3)', () => {
+    // Regression: the comparison was inverted, so checkUpdates offered a
+    // "1.0.0-alpha -> 1.0.0-1" downgrade as an available update.
+    assert.equal(compareVersions('1.0.0-1', '1.0.0-alpha'), -1)
+    assert.equal(compareVersions('1.0.0-alpha', '1.0.0-1'), 1)
+    assert.equal(compareVersions('2.0.0-1', '2.0.0-alpha'), -1)
+  })
+  it('ranks a release above its prereleases', () => {
+    assert.equal(compareVersions('1.0.0', '1.0.0-rc.2'), 1)
+    assert.equal(compareVersions('1.0.0-rc.2', '1.0.0'), -1)
+  })
+  it('ignores build metadata (semver §10)', () => {
+    assert.equal(compareVersions('1.0.0+build.7', '1.0.0'), 0)
+    assert.equal(compareVersions('1.0.0-rc.1+sha.abc', '1.0.0-rc.1'), 0)
+  })
+  it('compares numeric prerelease fields numerically, not lexically', () => {
+    assert.equal(compareVersions('1.0.0-rc.10', '1.0.0-rc.9'), 1)
   })
 })

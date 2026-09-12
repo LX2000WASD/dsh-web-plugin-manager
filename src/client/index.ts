@@ -97,11 +97,43 @@ async function call<T>(op: string, body: Record<string, unknown>, signal?: Abort
  * stays unchanged (busy/spinner state simply spans the whole poll).
  */
 const JOB_POLL_MS = 1500
+/** Interval used for the fast start of the poll schedule (A10). */
+const JOB_POLL_FAST_MS = 250
+/**
+ * Sleep before the next poll, given how long this poll loop has already
+ * waited (A10). 250ms for the first JOB_POLL_MS of waiting, then the
+ * original 1.5s cadence.
+ *
+ * Why this shape: JOB_POLL_MS is an exact multiple of JOB_POLL_FAST_MS, so
+ * the new poll times (0, 250, 500, …, 1500, 3000, 4500, …) are a SUPERSET of
+ * the old ones (0, 1500, 3000, …). The perceived latency is therefore never
+ * worse than the flat 1.5s loop for ANY settle time, and up to 1.25s better
+ * for the common case (a refused spec, a cached no-op, a sub-second pnpm
+ * run). Exponential backoff would not have this property: a job settling
+ * just after the fast window would wait a full 1.5s from an off-grid poll.
+ *
+ * Cost: at most JOB_POLL_MS / JOB_POLL_FAST_MS = 6 extra POSTs per job, all
+ * against the local host (the `job` op is a Map lookup + JSON envelope).
+ */
+function jobPollDelayMs(waitedMs: number): number {
+  return waitedMs < JOB_POLL_MS ? JOB_POLL_FAST_MS : JOB_POLL_MS
+}
+
 async function pollJob<T>(jobId: string): Promise<T> {
+  // Poll BEFORE the first sleep: an op that settles instantly (a refused
+  // spec, a cached no-op) used to pay a flat 1.5s of dead time. Mutating
+  // jobs are deliberately NOT cancellable, so this loop keeps polling to
+  // its end even if the tab unmounts — dropping the result would leave the
+  // user with a mutation that ran and no report of it.
+  let waited = 0
   for (;;) {
-    await new Promise(resolve => setTimeout(resolve, JOB_POLL_MS))
     const status = await call<{ done: boolean; result?: T; error?: string; missing?: boolean }>('job', { id: jobId })
-    if (!status.done) continue
+    if (!status.done) {
+      const delay = jobPollDelayMs(waited)
+      waited += delay
+      await new Promise(resolve => setTimeout(resolve, delay))
+      continue
+    }
     if (status.missing === true) throw new Error('job result expired (server restarted?) — reload and check the profile state')
     if (status.error !== undefined) throw new Error(status.error)
     return status.result as T
@@ -132,7 +164,7 @@ export function apply(ctx: ClientContext): void {
     remove: (profile, name) => callJob<CommandResult>('remove', { profile, name }),
     removeInsert: (profile, rowId) => call<MutationResult>('removeInsert', { profile, rowId }),
     copyPlugins: (from, to, names) => callJob<CommandResult>('copyPlugins', { from, to, names }),
-    checkUpdates: (profile) => call<UpdateCheckResult>('checkUpdates', { profile }),
+    checkUpdates: (profile) => callJob<UpdateCheckResult>('checkUpdates', { profile }),
     update: (profile, name) => callJob<CommandResult>('update', { profile, name }),
     analyze: (profile) => call<AnalyzeResult>('analyze', { profile }),
     fixIssue: (profile, action, target) => call<MutationResult>('fixIssue', { profile, action, target }),
@@ -203,7 +235,7 @@ export function apply(ctx: ClientContext): void {
 
   // Marketplace: a first-level settings entry (after the official Plugins).
   const marketplaceInjected = (): PluginMarketplaceTabInjected => ({
-    marketplace: (refresh, profile) => call<MarketplaceResult>('marketplace', { refresh, profile }),
+    marketplace: (refresh, profile, signal) => call<MarketplaceResult>('marketplace', { refresh, profile }, signal),
     install: (profile, spec, answers) => callJob<CommandResult>('install', { profile, spec, answers }),
     update: (profile, name) => callJob<CommandResult>('update', { profile, name }),
     unblock: (repo) => call<MutationResult>('unblockRepo', { repo }),

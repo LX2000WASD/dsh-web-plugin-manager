@@ -33,15 +33,83 @@ import type { ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
  * read-only exemption — an echo or comment mentioning "plugin list" in the
  * same script can never exempt a real mutation.
  */
-// Flags may carry a space-separated value (--profile web): the optional
-// value is backtrackable, so a flag WITHOUT a value (--force add x) still
-// reaches the verb.
-const DSH_PLUGIN_MUTATION =
-  /\bdsh\s+plugin\b(?:\s+--[^\s]+(?:\s+[^\s-][^\s]*)?)*\s+(?:add|install|remove|rm|update|upgrade|uninstall|delete)\b/
+// Write verbs of the official CLI's plugin subcommand.
+const PLUGIN_WRITE_VERBS = new Set(['add', 'install', 'remove', 'rm', 'update', 'upgrade', 'uninstall', 'delete'])
+
+/**
+ * Positional words of one command segment, with global flag tokens removed.
+ * Both official spellings are handled: `--profile web` (space-separated
+ * value) and `--profile=web` (inline).
+ *
+ * M-6: matching the subcommand ADJACENTLY only caught the order where flags
+ * follow it. The launcher parses global flags anywhere in argv, so the
+ * flag-first and inline orders are the same mutation and used to be allowed
+ * through — a one-token change bypassed the quality gate entirely.
+ *
+ * A token is consumed as a flag value only when it is not itself the
+ * subcommand, so the flag-first order cannot lose its subcommand to the
+ * value slot.
+ */
+function positionalWords(segment: string): string[] {
+  // Command-word tokens: shell punctuation (quotes, parens, backticks, `=`,
+  // commas) separates tokens exactly like whitespace does, so a command
+  // embedded in a quoted string or wrapped in a run_code expression is still
+  // recognized as the same mutation.
+  const tokens = segment.match(/[A-Za-z0-9_@.\/~-]+/g) ?? []
+  const out: string[] = []
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!
+    if (token.startsWith('-')) {
+      // `--flag=value` carries its value inline — nothing to skip.
+      if (token.includes('=')) continue
+      // `--flag value`: consume the next token as the value unless it is the
+      // subcommand itself (or another flag).
+      const next = tokens[i + 1]
+      if (next !== undefined && !next.startsWith('-') && next !== 'plugin') i += 1
+      continue
+    }
+    out.push(token)
+  }
+  return out
+}
+
+/**
+ * Whether one segment mutates plugin state through the official CLI, in ANY
+ * flag order: a `dsh` word immediately followed by the `plugin`
+ * subcommand, then a write verb among the remaining positional words.
+ */
+function isDshPluginMutation(segment: string): boolean {
+  const words = positionalWords(segment)
+  for (let i = 0; i < words.length - 1; i += 1) {
+    if (!isDshWord(words[i]!) || words[i + 1] !== 'plugin') continue
+    for (let j = i + 2; j < words.length; j += 1) {
+      if (PLUGIN_WRITE_VERBS.has(words[j]!)) return true
+    }
+    return false
+  }
+  return false
+}
+
+/**
+ * Whether one positional word names the CLI executable: the bare name or any
+ * path ending in it (`/usr/local/bin/dsh`). A longer word that merely ends in
+ * the name (`x-dsh`) does not match. Erring toward detection is deliberate:
+ * a false positive only makes the model retry through the protected surface,
+ * a false negative lets a mutation skip the quality gate.
+ */
+function isDshWord(word: string): boolean {
+  return word.split('/').pop() === 'dsh'
+}
 // Any package-manager add/remove/rm hitting a profile dir — pnpm, npm,
 // yarn, bun, and their --dir/-C variants (audit: the old guard only
 // covered pnpm).
-const PM_MUTATION = /\b(?:pnpm|npm|yarn|bun)\b[\s\S]{0,80}?\b(?:add|remove|rm|uninstall|install)\b/
+//
+// The trailing `(?![\w-])` matters: `\binstall\b` alone also matched the
+// `install-` PREFIX of a script name, so `npm run install-assets --dir
+// ~/.dsh/profiles/web` was denied as a raw mutation even though `npm run`
+// never touches the dependency tree. The lookahead makes the verb a whole
+// word, so `install-assets` and `add-deps` no longer trip the guard.
+const PM_MUTATION = /\b(?:pnpm|npm|yarn|bun)\b[\s\S]{0,80}?\b(?:add|remove|rm|uninstall|install)(?![\w-])/
 const PROFILE_DIR_MARKER = /profiles|\\.dsh|DSH_HOME/
 
 /** Denial reason shown to the model in the tool result. */
@@ -70,7 +138,7 @@ function commandText(exec: ToolExecution): string | null {
  */
 function isRawPluginMutation(command: string): boolean {
   for (const segment of command.split(/[;\n&|]+/)) {
-    if (DSH_PLUGIN_MUTATION.test(segment)) return true
+    if (isDshPluginMutation(segment)) return true
     if (PM_MUTATION.test(segment) && PROFILE_DIR_MARKER.test(segment)) return true
   }
   return false

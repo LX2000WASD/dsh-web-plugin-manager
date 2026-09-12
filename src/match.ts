@@ -83,17 +83,25 @@ export function updateSpec(source: string, name: string, latest: string | undefi
  * Lightweight semver comparison (v1.2.3-rc.1 < v1.2.3; rc.10 > rc.9;
  * 1.0 / 1 count as 1.0.0). Returns -1/0/1; falls back to string comparison
  * when a version does not parse.
+ *
+ * Prerelease ordering follows semver §11.4: a version WITH a prerelease is
+ * lower than the release; identifiers are compared field by field, numeric
+ * ones numerically and always LOWER than alphanumeric ones, and a shorter
+ * field list is lower when all shared fields are equal (alpha < alpha.1).
  */
 export function compareVersions(a: string, b: string): number {
-  const parse = (v: string): { major: number; minor: number; patch: number; pre: string | null } | null => {
+  const parse = (v: string): { major: number; minor: number; patch: number; pre: string[] | null } | null => {
     const s = v.trim().replace(/^v/i, '')
-    const m = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?$/.exec(s)
+    // Build metadata (`+build.7`) carries no precedence — dropped before the
+    // match so a version that has it still parses instead of falling back to
+    // string comparison.
+    const m = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(s)
     if (m === null) return null
     return {
       major: Number(m[1]),
       minor: m[2] === undefined ? 0 : Number(m[2]),
       patch: m[3] === undefined ? 0 : Number(m[3]),
-      pre: m[4] ?? null,
+      pre: m[4] === undefined ? null : m[4].split('.'),
     }
   }
   const pa = parse(a)
@@ -102,21 +110,25 @@ export function compareVersions(a: string, b: string): number {
   for (const key of ['major', 'minor', 'patch'] as const) {
     if (pa[key] !== pb[key]) return pa[key] < pb[key] ? -1 : 1
   }
-  // Prerelease ordering: no pre > any pre; numeric ids > alphanumeric ids.
   if (pa.pre === pb.pre) return 0
   if (pa.pre === null) return 1
   if (pb.pre === null) return -1
-  const paParts = pa.pre.split('.')
-  const pbParts = pb.pre.split('.')
-  for (let i = 0; i < Math.max(paParts.length, pbParts.length); i++) {
-    const x = paParts[i] ?? ''
-    const y = pbParts[i] ?? ''
+  const len = Math.max(pa.pre.length, pb.pre.length)
+  for (let i = 0; i < len; i++) {
+    const x = pa.pre[i]
+    const y = pb.pre[i]
+    // Shorter field list is lower once every shared field is equal.
+    if (x === undefined) return -1
+    if (y === undefined) return 1
     if (x === y) continue
     const xn = /^\d+$/.test(x)
     const yn = /^\d+$/.test(y)
     if (xn && yn) return Number(x) < Number(y) ? -1 : 1
-    if (xn) return 1
-    if (yn) return -1
+    // Semver §11.4.3: numeric identifiers ALWAYS have lower precedence than
+    // alphanumeric ones (1.0.0-1 < 1.0.0-alpha). The old code returned 1 here,
+    // which inverted the comparison and made checkUpdates offer a downgrade.
+    if (xn) return -1
+    if (yn) return 1
     return x < y ? -1 : 1
   }
   return 0
