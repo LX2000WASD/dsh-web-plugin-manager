@@ -1,5 +1,20 @@
 # dsh-web-plugin-manager
 
+> ## ⚠️ 本仓库已停止维护（对应 DSH <= 0.1.5-rc.2）
+>
+> **DSH 0.1.6-alpha.2 起请改用 [dsh-plugin-manager-companion](https://github.com/LX2000WASD/dsh-plugin-manager-companion)。**
+>
+> 原因：官方 0.1.6-alpha.2 自带完整插件管理页（`@deepseek-ai/dsh-client-ui-plugin-manager` +
+> `@deepseek-ai/dsh-plugin-manager` 宿主服务），本仓库原先"遮蔽官方只读页 + 自建 profile 写权"的
+> 路线不再成立。而且官方在 `dsh-base` bundle 里新增了 `id: plugin-manager` 行，与本仓库
+> `cordis.patch.yml` 的行 id 撞车，**在 0.1.6-alpha.2 上会让 profile 完全无法启动**
+> （`TypeError: duplicate loader entry id: plugin-manager`），服务名也与官方同名冲突。
+>
+> 新仓库改为**伴生补强**路线：当前环境的写操作全部交还官方通道，只补官方明说不做的部分
+> （多环境管理、agent 预设组合、普通插件模块的文件操作、版本/更新、安装前质量门、深度诊断）。
+>
+> 本仓库的 0.6.x 仍可用于 DSH <= 0.1.5-rc.2；**在 0.1.6-alpha.2 及以上请勿安装**。
+
 [中文](./README.md) | [English](./README.en.md)
 
 [![npm version](https://img.shields.io/npm/v/dsh-web-plugin-manager)](https://www.npmjs.com/package/dsh-web-plugin-manager)
